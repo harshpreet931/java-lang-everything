@@ -3,7 +3,7 @@ export const site = {
   tagline: "java, all the way down.",
   description:
     "an open-source, visual-first guide to java. every concept drawn, from int x = 5 to the garbage collector. free, forever.",
-  url: "https://java-lang-everything.vercel.app",
+  url: "https://java.harshpreet.com",
   repo: "https://github.com/harshpreet931/java-lang-everything",
   author: {
     name: "Harshpreet Singh",

@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRunner } from "@/components/code/useRunner";
 import { browserCantRun, browserCaveat } from "@/components/code/browserSupport";
+import { track } from "@/lib/analytics";
 import { examples } from "./examples";
 
 const JavaEditor = dynamic(() => import("@/components/code/JavaEditor").then((m) => m.JavaEditor), {
@@ -82,6 +83,7 @@ export function Playground() {
       await navigator.clipboard.writeText(url);
     } catch {}
     setShared(true);
+    track("playground_shared");
     setTimeout(() => setShared(false), 1800);
   };
 

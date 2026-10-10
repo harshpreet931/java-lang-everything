@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { flat, pad2, parts } from "@/content/curriculum";
 import { glossary } from "@/content/glossary";
+import { track } from "@/lib/analytics";
 
 // ⌘K. chapters + glossary are searched instantly in memory. full text comes
 // from pagefind, which only exists after `pnpm build` (it indexes the html).
@@ -176,6 +177,14 @@ export function Search() {
   }, [local, text]);
 
   useEffect(() => setActive(0), [q]);
+
+  // what people look for (and don't find): one event per settled query
+  useEffect(() => {
+    const s = q.trim();
+    if (s.length < 2) return;
+    const t = setTimeout(() => track("search", { q: s, results: hits.length }), 1200);
+    return () => clearTimeout(t);
+  }, [q, hits.length]);
   useEffect(() => {
     list.current?.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" });
   }, [active]);

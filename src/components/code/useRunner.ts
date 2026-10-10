@@ -10,6 +10,7 @@ import {
   type JavaStatus,
   type RunResult,
 } from "@/lib/java";
+import { track } from "@/lib/analytics";
 
 /** one runnable program's state: status of the shared compiler, live output, the last result. */
 export function useRunner() {
@@ -38,7 +39,10 @@ export function useRunner() {
         onStdout: (c) => setOut((o) => o + c),
         onStderr: (c) => setErr((e) => e + c),
       });
-      if (!ctl.signal.aborted) setResult(r);
+      if (!ctl.signal.aborted) {
+        setResult(r);
+        track("code_run", { ok: r.ok, ms: Math.round(r.compileMs + r.runMs), timed_out: !!r.timedOut });
+      }
     } finally {
       if (abort.current === ctl) setRunning(false);
     }

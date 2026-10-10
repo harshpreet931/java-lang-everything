@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const site = (process.argv[2] ?? "https://java-lang-everything.vercel.app").replace(/\/$/, "");
+const site = (process.argv[2] ?? "https://java.harshpreet.com").replace(/\/$/, "");
 const keyFile = fs.readdirSync(path.join(process.cwd(), "public")).find((f) => /^[0-9a-f]{32}\.txt$/.test(f));
 if (!keyFile) {
   console.error("no IndexNow key file (public/<32 hex>.txt)");

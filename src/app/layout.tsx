@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from "next";
 import { Cormorant_Garamond, Crimson_Pro, JetBrains_Mono } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import { Bar } from "@/components/site/Bar";
 import { Search } from "@/components/site/Search";
 import { themeScript } from "@/lib/theme-script";
 import { site } from "@/lib/site";
+import { posthogScript } from "@/lib/analytics";
 
 // three faces, three jobs: crimson pro for reading, cormorant for headings,
 // jetbrains mono for code and figures.
@@ -28,7 +30,7 @@ export const metadata: Metadata = {
     "java concurrency", "java memory model", "hashmap internals", "java 25", "effective java", "java interview",
   ],
   category: "education",
-  // google search console: url-prefix property https://java-lang-everything.vercel.app/
+  // google search console (url-prefix property). a domain property on harshpreet.com verifies by dns instead
   verification: { google: "IXbhcGIm1Fs7jeLfLaoVMXsQvtlaSZqBAlmHBgz-VPE" },
   openGraph: {
     title: site.name,
@@ -84,6 +86,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Bar />
         {children}
         <Search />
+        <Script id="posthog" strategy="afterInteractive" dangerouslySetInnerHTML={{ __html: posthogScript }} />
       </body>
     </html>
   );

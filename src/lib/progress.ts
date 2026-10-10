@@ -1,8 +1,10 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
+import { track } from "@/lib/analytics";
 
-// which chapters you've finished. lives in your browser only, never leaves it.
+// which chapters you've finished. the list lives in your browser only; analytics just gets
+// an anonymous "chapter_finished" the first time.
 
 const KEY = "jle-progress-v1";
 type Store = Record<string, number>; // href -> finished at (ms)
@@ -30,6 +32,7 @@ function write(next: Store) {
 
 export function markDone(href: string, done = true) {
   const s = { ...read() };
+  if (done && !s[href]) track("chapter_finished", { chapter: href });
   if (done) s[href] = Date.now();
   else delete s[href];
   write(s);

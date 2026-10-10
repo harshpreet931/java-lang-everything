@@ -4,6 +4,8 @@ java, all the way down. by [Harshpreet Singh](https://harshpreet.com) ([harshpre
 
 an open-source guide that draws java instead of describing it. 18 parts, 192 chapters, from `int x = 5` to the garbage collector. every figure is interactive, every snippet runs, every number was measured. free, forever.
 
+**read it at [java.harshpreet.com](https://java.harshpreet.com)**
+
 ## what's different
 
 - **figures, not walls of text.** step through code and watch the stack and heap change. put keys into a HashMap and watch them land. race two threads on `count++`. slide a recursion depth until the stack overflows.

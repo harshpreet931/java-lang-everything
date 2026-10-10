@@ -5,7 +5,13 @@
   "buildCommand": "pnpm build",
   "outputDirectory": "out",
   "cleanUrls": true,
-  "trailingSlash": false,
+  "redirects": [
+    {
+      "source": "/:path((?!ingest/).+)/",
+      "destination": "/:path",
+      "permanent": true
+    }
+  ],
   "headers": [
     {
       "source": "/opengraph-image",
@@ -33,6 +39,16 @@
           "value": "public, max-age=86400, stale-while-revalidate=604800"
         }
       ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/ingest/static/:path(.*)",
+      "destination": "https://eu-assets.i.posthog.com/static/:path"
+    },
+    {
+      "source": "/ingest/:path(.*)",
+      "destination": "https://eu.i.posthog.com/:path"
     }
   ]
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { Children, createContext, isValidElement, useContext, useId, useState, type ReactNode } from "react";
+import { track } from "@/lib/analytics";
 
 // interactive mdx blocks: quizzes, tabs, compare. client components.
 
@@ -53,7 +54,10 @@ export function Quiz({
               role="radio"
               aria-checked={picked === i}
               disabled={revealed}
-              onClick={() => setPicked(i)}
+              onClick={() => {
+                setPicked(i);
+                track("quiz_answered", { correct: i === answer, kind: label });
+              }}
               className="act !min-h-9 !text-13 disabled:!pointer-events-none disabled:!opacity-100"
               style={
                 isAnswer
