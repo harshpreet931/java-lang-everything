@@ -1,0 +1,186 @@
+import { CursorWalk } from "@/components/figures/io/CursorWalk";
+import { InjectionDemo } from "@/components/figures/io/InjectionDemo";
+import { IsolationLab } from "@/components/figures/io/IsolationLab";
+
+<InShort>
+**JDBC** is the `java.sql` package: a set of interfaces (`Connection`, `PreparedStatement`, `ResultSet`) that every database vendor implements in a **driver** jar. you get a connection, prepare a statement with `?` placeholders, execute it, and walk the result with a cursor.
+
+three things matter more than the API: **always use `PreparedStatement`** (SQL injection), **know your transaction isolation** (what other transactions can do to your reads), and **pool your connections** (opening one is slow).
+</InShort>
+
+## the picture
+
+you know how one charger cable works with phones from a dozen brands? the plug is a standard; each phone implements its side. JDBC is the plug. your code only talks to the interfaces in `java.sql`. the driver jar (postgres, mysql, oracle...) is the vendor's side, translating those calls into the database's own wire protocol.
+
+<Figure caption="hover a stage. everything left of the driver is the JDK's interfaces; the driver is the only vendor code. since JDBC 4.0 (java 6) drivers register themselves through ServiceLoader, so no more Class.forName.">
+<Flow
+  stages={[
+    { label: "DriverManager", sub: "or a DataSource", note: "asks every registered driver 'can you handle jdbc:postgresql://...?'. drivers are found through META-INF/services/java.sql.Driver in their jars." },
+    { label: "Connection", sub: "a session", note: "one TCP connection, authenticated, with its own transaction state. expensive to open, so in real apps it comes from a pool." },
+    { label: "PreparedStatement", sub: "SQL with ?", note: "the SQL text is fixed; values are bound to the ? placeholders with setString, setInt, setObject. parsed by the database, not concatenated by you." },
+    { label: "ResultSet", sub: "a cursor", note: "rows come back one at a time through next(), fetched from the server in batches behind the scenes." },
+  ]}
+/>
+</Figure>
+
+the JDK ships the interfaces and no driver at all. you can see the plug with nothing in it:
+
+```java title="Main.java" run output="drivers on the classpath: 0\nNo suitable driver found for jdbc:postgresql://localhost/shop"
+import java.sql.*;
+
+void main() {
+    IO.println("drivers on the classpath: " + DriverManager.drivers().count());
+    try (Connection c = DriverManager.getConnection("jdbc:postgresql://localhost/shop", "app", "secret")) {
+        IO.println("connected?");
+    } catch (SQLException e) {
+        IO.println(e.getMessage());
+    }
+}
+```
+
+that's why the rest of this chapter's code is shown, not run: there's no database here. put the postgres driver on the classpath (and a database behind it) and the code below works as written.
+
+## the shape of every query
+
+```java title="OrderDao.java"
+String sql = "SELECT id, name, total FROM orders WHERE total > ? ORDER BY id";
+
+try (Connection conn = dataSource.getConnection();
+     PreparedStatement ps = conn.prepareStatement(sql)) {
+
+    ps.setInt(1, 100);                          // parameters are 1-based
+
+    try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {                     // move the cursor, false when done
+            long id = rs.getLong("id");
+            String name = rs.getString("name");
+            int total = rs.getInt("total");
+            orders.add(new Order(id, name, total));
+        }
+    }
+}
+```
+
+three resources, all `AutoCloseable`, all in try-with-resources. a leaked `Connection` is a leaked server-side session, and with a pool it's worse: the pool runs dry and everything starts waiting.
+
+<Figure caption={<>step through reading a result. the <C k="ref">cursor</C> starts before the first row, which is why every read loop is <code>while (rs.next())</code> and never <code>do ... while</code>. the <C k="hot">cell</C> being read is the current row's.</>}>
+<CursorWalk />
+</Figure>
+
+writes use `executeUpdate()`, which returns the number of rows changed. for many rows, `addBatch()` and `executeBatch()` send them in one round trip instead of one each, which is usually the single biggest JDBC speedup there is.
+
+<Gotcha title="getInt on a NULL column returns 0">
+SQL `NULL` has no `int` to map to, so `rs.getInt("discount")` on a null column returns `0`, and you can't tell "no discount" from "zero discount" unless you call `rs.wasNull()` right after. or ask for the boxed type: `rs.getObject("discount", Integer.class)` returns `null`. same trap for `getLong`, `getDouble` and `getBoolean`.
+</Gotcha>
+
+## never build SQL with +
+
+the one rule of JDBC. if user input is concatenated into SQL, the user is writing part of your query.
+
+<Figure caption={<>type a name, or pick one. on the left, the input is pasted into the SQL text, and a single quote <C k="dead">escapes the string</C>. on the right it travels as a <C k="live">parameter</C>, separately from the SQL, and can't change its structure.</>}>
+<InjectionDemo />
+</Figure>
+
+```java title="Main.java" run output="SELECT * FROM users WHERE name = 'ada'\nSELECT * FROM users WHERE name = 'x' OR '1'='1'"
+void main() {
+    String[] inputs = { "ada", "x' OR '1'='1" };
+    for (String name : inputs) {
+        String sql = "SELECT * FROM users WHERE name = '" + name + "'";
+        IO.println(sql);
+    }
+}
+```
+
+<Compare>
+<Bad label="concatenation">
+```java
+String sql = "SELECT * FROM users WHERE name = '"
+    + name + "' AND password = '" + pw + "'";
+ResultSet rs = conn.createStatement().executeQuery(sql);
+```
+</Bad>
+<Good label="placeholders">
+```java
+var ps = conn.prepareStatement(
+    "SELECT * FROM users WHERE name = ? AND password_hash = ?");
+ps.setString(1, name);
+ps.setString(2, hash(pw));
+ResultSet rs = ps.executeQuery();
+```
+</Good>
+</Compare>
+
+placeholders work for **values** only. table names, column names, `ORDER BY` directions and `IN (...)` lists of unknown length can't be `?`. for those, pick from an allowlist in code (`Map.of("newest", "created_at DESC")`), never from raw input. (and yes, the good side also hashes the password. see [security and crypto](/learn/io/security-and-crypto).)
+
+<Quiz question="which of these can be a ? placeholder in a PreparedStatement?" options={["the table name in FROM ?", "the value in WHERE id = ?", "the column in ORDER BY ?", "all three"]} answer={1}>
+<Explain>
+only values. the database parses the SQL before it sees the parameters, and it needs to know the tables and columns to build the plan. `ORDER BY ?` is legal in some databases but sorts by the *value* you pass (a constant), not by the column you named, so it silently does nothing.
+</Explain>
+</Quiz>
+
+## transactions
+
+by default a JDBC connection is in **autocommit** mode: every statement is its own transaction, committed the moment it finishes. to make several statements succeed or fail together, turn that off:
+
+```java title="Transfer.java"
+try (Connection conn = dataSource.getConnection()) {
+    conn.setAutoCommit(false);
+    try (var debit = conn.prepareStatement("UPDATE accounts SET balance = balance - ? WHERE id = ?");
+         var credit = conn.prepareStatement("UPDATE accounts SET balance = balance + ? WHERE id = ?")) {
+        debit.setInt(1, 80);  debit.setLong(2, alice);  debit.executeUpdate();
+        credit.setInt(1, 80); credit.setLong(2, bob);   credit.executeUpdate();
+        conn.commit();                     // both, or...
+    } catch (SQLException e) {
+        conn.rollback();                   // ...neither
+        throw e;
+    }
+}
+```
+
+atomic is only half of it. the other half is **isolation**: while your transaction runs, other transactions are running too, and the isolation level decides how much of their unfinished or freshly-committed work you can see.
+
+<Figure wide caption={<>pick an anomaly and an isolation level, then step. this shows what the SQL standard <em>allows</em> at each level: the anomaly either <C k="dead">happens</C> or is <C k="live">prevented</C>. T1's and T2's statements interleave top to bottom.</>}>
+<IsolationLab />
+</Figure>
+
+| level (`Connection.TRANSACTION_*`) | dirty read | non-repeatable read | phantom |
+| --- | --- | --- | --- |
+| `READ_UNCOMMITTED` | possible | possible | possible |
+| `READ_COMMITTED` | no | possible | possible |
+| `REPEATABLE_READ` | no | no | possible |
+| `SERIALIZABLE` | no | no | no |
+
+that's the standard's table. real databases differ, and the differences matter: postgres, oracle and SQL server default to `READ_COMMITTED`, mysql's InnoDB defaults to `REPEATABLE_READ`. postgres and InnoDB implement `REPEATABLE_READ` with a snapshot, so the phantom in the figure doesn't happen there for plain reads. and `SERIALIZABLE` often doesn't block, it **aborts** one of the transactions with a serialization error that your code must catch and retry. set the level per connection with `conn.setTransactionIsolation(...)`, and read your database's docs for what it actually means.
+
+<Gotcha title="the lost update that isolation won't catch for you">
+read a value, compute in java, write it back (`balance = rs.getInt(...) - 80`, then `UPDATE ... SET balance = ?`): two transactions doing that at once under `READ_COMMITTED` both read 100, both write 20, and one withdrawal disappears. fix it in the SQL (`SET balance = balance - 80`, atomic in the database), lock the row you read (`SELECT ... FOR UPDATE`), or use optimistic locking (a `version` column checked in the `WHERE`).
+</Gotcha>
+
+## connection pools
+
+opening a connection is a TCP handshake, usually TLS, authentication, and server-side session setup: several network round trips and real work on the database. doing that per request is the classic slow-app bug. a **pool** opens a few connections once and lends them out: `getConnection()` borrows one, `close()` gives it back instead of closing it.
+
+| | no pool | a pool (HikariCP, the usual choice) |
+| --- | --- | --- |
+| `dataSource.getConnection()` | a new TCP + TLS + auth session | take an idle connection from a queue |
+| `conn.close()` | tears the session down | returns it to the pool |
+| 200 concurrent requests | 200 sessions, if the database even allows that | at most `maximumPoolSize` (Hikari's default: 10), the rest wait up to `connectionTimeout` (default 30 s) |
+
+the pool size is a knob on the *database's* capacity, not your app's thread count: a database with 8 cores doesn't run 200 queries in parallel any faster than 20. and since connections now get reused, anything a request changes on one (autocommit, isolation, a session variable) has to be reset before the next borrower gets it. good pools do that for you.
+
+<Deep title="what PreparedStatement does on the server">
+the database parses the SQL once, plans it, and can then execute it many times with different parameters. drivers vary in how they use this: postgres's driver switches to a named server-side prepared statement after a statement is executed a few times on the same connection; others emulate prepared statements client-side by safely escaping values into the text. either way the injection guarantee holds, because the driver, not your string concatenation, decides how a value is encoded. for caching across requests (which use different connections), pools can keep a per-connection statement cache.
+</Deep>
+
+<Interview q="what's the difference between Statement and PreparedStatement?">
+`Statement` executes a SQL string as given, so any values have to be concatenated in, which is SQL injection waiting to happen. `PreparedStatement` takes SQL with `?` placeholders and binds values separately, so input can never change the query's structure; it can also be parsed and planned once and reused, and it handles type conversion (dates, nulls, binary). bonus point: placeholders only work for values, not identifiers, so dynamic table or column names need an allowlist; and `executeBatch` with a prepared statement is how you insert thousands of rows quickly.
+</Interview>
+
+<Keylines>
+- JDBC is interfaces in `java.sql`; the vendor's driver implements them. the JDK ships no driver.
+- `Connection` → `PreparedStatement` → `ResultSet`, all in try-with-resources.
+- never concatenate input into SQL. `?` for values, an allowlist for identifiers.
+- turn off autocommit to group statements, then commit or roll back.
+- isolation levels decide which anomalies you can see; real databases implement them differently.
+- pool your connections; size the pool for the database, not your thread count.
+</Keylines>

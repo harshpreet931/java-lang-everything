@@ -1,0 +1,155 @@
+import { ShapeCatalog, FunctionGrid } from "@/components/figures/functional/FunctionShapes";
+
+<InShort>
+a **functional interface** is any interface with exactly **one abstract method**. that one method is what a lambda becomes.
+
+`java.util.function` ships 43 of them, but don't panic: it's four shapes (**supply**, **consume**, **transform**, **test**), times one or two inputs, times a few primitive versions.
+</InShort>
+
+## the picture
+
+you know how old libraries each shipped their own `Callback`, `Listener`, `Handler` and `Transformer`, all with one method, all slightly different, none of them interchangeable? java 8 fixed that by standardizing the common shapes once.
+
+think of plug standards. you don't design a new socket for every lamp, you pick the one that matches the pins. here the pins are "what goes in" and "what comes out". pick those two and the interface picks itself.
+
+<Figure caption={<>filter by shape, or click a card. circles are inputs, the square is what comes out, the diamond is a boolean, a dashed outline means "nothing". the bottom three live outside <code>java.util.function</code> but have the same job.</>}>
+<ShapeCatalog />
+</Figure>
+
+the names are verbs once you see them: a `Supplier` supplies, a `Consumer` consumes, a `Function` transforms, a `Predicate` tests. `Bi` means two inputs. `Operator` means the output is the same type as the input.
+
+## the one rule
+
+an interface is functional if it has exactly one abstract method. that's the whole definition. things that don't count toward the one:
+
+- `default` methods (they have a body).
+- `static` methods (they have a body too).
+- abstract methods that redeclare a public method of `Object`, like `equals`. every object already has those, so a lambda never needs to supply them. that's why `Comparator` still counts even though it declares `boolean equals(Object)`.
+
+```java title="Main.java" run output="true\nfalse\nfalse"
+@FunctionalInterface
+interface Validator {
+    boolean check(String s);                       // the one abstract method
+
+    default Validator and(Validator other) {       // defaults don't count
+        return s -> check(s) && other.check(s);
+    }
+    static Validator nonBlank() {                  // statics don't count
+        return s -> !s.isBlank();
+    }
+    boolean equals(Object o);                      // Object's methods don't count
+}
+
+void main() {
+    Validator v = Validator.nonBlank().and(s -> s.length() <= 8);
+    IO.println(v.check("duke"));
+    IO.println(v.check("   "));
+    IO.println(v.check("a very long name"));
+}
+```
+
+`@FunctionalInterface` is optional. any interface with one abstract method works as a lambda target without it. the annotation is a promise you ask the compiler to enforce: add a second abstract method later and the build breaks right there, instead of in every file that used a lambda.
+
+```text
+error: Unexpected @FunctionalInterface annotation
+  Shout is not a functional interface
+    multiple non-overriding abstract methods found in interface Shout
+```
+
+<Effective item={44} title="favor the use of standard functional interfaces">
+before writing your own, check whether one of the 43 already fits. a custom one earns its place when the name tells the reader something real, when it has a contract worth documenting, or when it carries useful default methods. `Comparator` is the classic example: structurally it's a `ToIntBiFunction<T, T>`, but it has a name everyone understands and a stack of helpers like `reversed()` and `thenComparing()`.
+</Effective>
+
+## composing them
+
+the interfaces come with default methods that glue them together. the one that trips people up is the order.
+
+<Predict options={["12", "11", "13"]} answer={0}>
+```java
+Function<Integer, Integer> plus1 = x -> x + 1;
+Function<Integer, Integer> times2 = x -> x * 2;
+IO.println(plus1.andThen(times2).apply(5));
+```
+<Explain>
+`a.andThen(b)` runs `a` first, then feeds the result into `b`: `times2(plus1(5))` = `times2(6)` = 12. `a.compose(b)` is the other way round: `plus1(times2(5))` = 11. read `andThen` left to right, `compose` like math, inside out.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="12\n11\ntrue\nfalse\n[a, b]\n9"
+import java.util.*;
+import java.util.function.*;
+
+void main() {
+    Function<Integer, Integer> plus1 = x -> x + 1;
+    Function<Integer, Integer> times2 = x -> x * 2;
+    IO.println(plus1.andThen(times2).apply(5));   // times2(plus1(5))
+    IO.println(plus1.compose(times2).apply(5));   // plus1(times2(5))
+
+    Predicate<String> empty = s -> s.isEmpty();
+    Predicate<String> longish = s -> s.length() > 3;
+    IO.println(empty.negate().and(longish).test("duke"));
+    IO.println(Predicate.not(empty).or(longish).test(""));
+
+    Consumer<List<String>> addA = l -> l.add("a");
+    var list = new ArrayList<String>();
+    addA.andThen(l -> l.add("b")).accept(list);    // both run, in order
+    IO.println(list);
+
+    BinaryOperator<Integer> max = BinaryOperator.maxBy(Comparator.naturalOrder());
+    IO.println(max.apply(3, 9));
+}
+```
+
+`Predicate.not` (java 11) is the one you'll use most, because it reads well inside a stream: `.filter(Predicate.not(String::isBlank))`.
+
+## the primitive ones
+
+the big table looks scary because of primitives. a `Function<Integer, Integer>` boxes its argument and its result on every call, which in a hot loop means millions of tiny `Integer` objects. so the JDK ships primitive versions of the common shapes.
+
+<Figure caption={<>all 43 interfaces in <code>java.util.function</code>, by shape. rows are what goes in, columns are what comes out. click a name to see its one method. <code>UnaryOperator</code> and <code>BinaryOperator</code> share a cell with the function they specialize.</>}>
+<FunctionGrid />
+</Figure>
+
+the naming is regular enough to guess:
+
+<Defs>
+<dt>Int..., Long..., Double...</dt><dd>the input is that primitive. `IntPredicate` tests an `int`.</dd>
+<dt>To...</dt><dd>the output is that primitive. `ToIntFunction<T>` turns a `T` into an `int`.</dd>
+<dt>IntToLong...</dt><dd>both: `int` in, `long` out.</dd>
+<dt>Obj...Consumer</dt><dd>an object and a primitive in, nothing out. `ObjIntConsumer<T>`.</dd>
+<dt>...AsInt</dt><dd>the method name changes when the result is primitive: `applyAsInt`, `getAsInt`. the names have to differ, or one class couldn't implement two of them.</dd>
+</Defs>
+
+notice the dots. there's no `IntBiPredicate`, no `BooleanFunction`, nothing for `char`, `byte`, `short` or `float`. the JDK stopped at the shapes streams actually need. `char`s travel as `int`s (`"hi".chars()` is an `IntStream`), and for anything else you write a tiny interface of your own.
+
+<Quiz question="you need a lambda that takes two ints and returns their sum, with no boxing. which type?" options={["BinaryOperator\u003CInteger>", "BiFunction<Integer, Integer, Integer>", "IntBinaryOperator", "ToIntBiFunction<Integer, Integer>"]} answer={2}>
+<Explain>
+`IntBinaryOperator` is `int applyAsInt(int left, int right)`: primitives in, primitive out. the other three all take `Integer`s, so every call boxes (and the first two box the result too). `ToIntBiFunction<Integer, Integer>` at least returns a raw `int`.
+</Explain>
+</Quiz>
+
+## gotcha: same shape, different type
+
+<Gotcha title="a Predicate is not a Function, even when it's the same lambda">
+two functional interfaces with identical shapes are still unrelated types. java has no structural typing, so you can't assign one to the other:
+
+```java
+Predicate<String> isEmpty = s -> s.isEmpty();
+Function<String, Boolean> f = isEmpty;        // [!code error]
+Function<String, Boolean> g = isEmpty::test;  // fine: a new object
+```
+
+`error: incompatible types: Predicate<String> cannot be converted to Function<String,Boolean>`. the fix is a method reference (next chapter), which wraps the old object in a new one of the right type.
+</Gotcha>
+
+<Interview q="what makes an interface a functional interface? can it have default methods?">
+exactly one abstract method, not counting methods that override public methods of `Object`. it can have any number of default and static methods. `@FunctionalInterface` is optional and only asks the compiler to check that rule. bonus point: that's why `Comparator`, which redeclares `equals`, is still functional, and why the JDK could add `andThen`/`compose`/`negate` to old-style interfaces without breaking anyone's lambdas.
+</Interview>
+
+<Keylines>
+- functional interface = one abstract method. defaults, statics and `Object`'s methods don't count.
+- supply, consume, transform, test. `Bi` for two inputs, `Operator` when in and out match.
+- `andThen` runs left to right, `compose` runs inside out.
+- primitive versions exist so hot code doesn't box. the naming is mechanical once you see it.
+- same shape isn't the same type. bridge with a method reference.
+</Keylines>

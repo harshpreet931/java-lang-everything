@@ -1,0 +1,17 @@
+[
+  { "term": "effectively final", "short": "a local that's never reassigned after it's set. the only kind a lambda may capture.", "chapter": "lambdas" },
+  { "term": "target type", "short": "the functional interface a lambda becomes, decided by where it's written: assignment, argument or cast.", "chapter": "lambdas", "aka": ["target typing"] },
+  { "term": "method reference", "short": "a lambda that just calls one existing method, written as Class::method or expr::method.", "chapter": "method-references", "aka": ["::"] },
+  { "term": "intermediate operation", "short": "a lazy stream step like filter or map. it only adds a stage, no work happens yet.", "chapter": "stream-pipeline" },
+  { "term": "terminal operation", "short": "the stream step that pulls elements through and produces a result: toList, count, forEach.", "chapter": "stream-pipeline" },
+  { "term": "short-circuiting", "short": "a stream operation that can finish without seeing every element: limit, findFirst, anyMatch.", "chapter": "stream-pipeline" },
+  { "term": "stateful operation", "short": "an intermediate op that remembers earlier elements: distinct, sorted, limit, skip.", "chapter": "stream-operations" },
+  { "term": "flatMap", "short": "turns each element into a stream of zero or more elements and splices them into one stream.", "chapter": "stream-operations" },
+  { "term": "downstream collector", "short": "a collector that runs inside each group of another, like counting() in groupingBy.", "chapter": "collectors" },
+  { "term": "identity", "short": "the starting value of a reduction, one that changes nothing: 0 for +, 1 for *.", "chapter": "reduction", "aka": ["identity element"] },
+  { "term": "mutable reduction", "short": "folding a stream into a container that each chunk fills privately. what collect does.", "chapter": "reduction" },
+  { "term": "primitive stream", "short": "IntStream, LongStream or DoubleStream: a stream of raw numbers, no boxing.", "chapter": "primitive-streams", "aka": ["IntStream"] },
+  { "term": "integrator", "short": "the part of a gatherer that sees each element, pushes results downstream and can stop the stream.", "chapter": "gatherers" },
+  { "term": "spliterator", "short": "the iterator a stream's source provides. it can split itself in half for parallel work.", "chapter": "parallel-streams" },
+  { "term": "common pool", "short": "the JVM-wide ForkJoinPool that every parallel stream shares. cores minus one threads.", "chapter": "parallel-streams", "aka": ["ForkJoinPool.commonPool"] }
+]

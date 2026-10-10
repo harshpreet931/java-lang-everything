@@ -1,0 +1,127 @@
+import { JshellSession } from "@/components/figures/start/JshellSession";
+
+<InShort>
+`jshell` is java's **REPL**: type a line of java, press enter, see the result. no file, no class, no `main`, no compile step. it ships with every JDK since java 9, and it's the fastest way to try anything on this site.
+</InShort>
+
+## the picture
+
+writing a java file to test one expression is like mailing a letter to ask what time it is. jshell is just asking out loud.
+
+REPL stands for read, eval, print, loop: it **reads** what you typed, **evaluates** it, **prints** the result, and **loops** back for more. variables and methods you define stick around until you quit, so you can build things up one line at a time.
+
+```bash
+$ jshell
+|  Welcome to JShell -- Version 25.0.4.1
+|  For an introduction type: /help intro
+
+jshell>
+```
+
+<Figure wide caption={<>press step to type the next snippet. every output is copied from a real jshell 25 session with these exact inputs. watch the <C k="hot">$ numbers</C>: they count snippets, and the failed one doesn't get one.</>}>
+<JshellSession />
+</Figure>
+
+## what you can type
+
+pretty much any java you'd write inside a method, plus declarations:
+
+- **expressions:** `2 + 2`, `"abc".length()`, `List.of(1, 2)`. the result lands in a scratch variable like `$5`.
+- **statements:** `for` loops, `if`s, `System.out.println(...)`. statements that produce no value print nothing extra.
+- **declarations:** variables, methods, even whole classes and records. redeclare one and it's replaced.
+
+semicolons are optional at the end of a line. multi-line code works too: jshell sees the open brace and waits, with a `...>` prompt, until it's closed.
+
+```text title="jshell"
+jshell> int[] a = {3, 1, 2}
+a ==> int[3] { 3, 1, 2 }
+
+jshell> Arrays.sort(a)
+
+jshell> a
+a ==> int[3] { 1, 2, 3 }
+```
+
+arrays print their contents (a plain `println` of an array would give you something like `[I@1b6d3586`, more on that in [arrays](/learn/basics/arrays)). `Arrays.sort` returns nothing, so jshell prints nothing for it.
+
+<Predict options={['"hi duke!"', '"hey duke!"', "an error: twice was built with the old greet"]} answer={1}>
+```text
+jshell> String greet(String n) { return "hi " + n; }
+jshell> String twice(String n) { return greet(n) + "!"; }
+jshell> String greet(String n) { return "hey " + n; }
+jshell> twice("duke")
+```
+<Explain>
+`"hey duke!"`. when you redefine `greet`, jshell says `modified method greet(String)` and re-links everything that depends on it. `twice` calls whatever `greet` is now. you can even define `twice` first: jshell answers "created method twice(String), however, it cannot be invoked until method greet(java.lang.String) is declared".
+</Explain>
+</Predict>
+
+## the commands
+
+anything starting with `/` talks to jshell itself, not to java. the ones you'll actually use:
+
+| command | does |
+| --- | --- |
+| `/vars` | every variable, with its type and value |
+| `/methods` | every method you've defined |
+| `/list` | every snippet so far, numbered (`/list -all` includes the startup ones) |
+| `/edit 5` | opens snippet 5 in an editor. save and it's re-run |
+| `/save demo.jsh` | writes your snippets to a file. `/open demo.jsh` loads them back |
+| `/imports` | what's imported. since java 25 that's all of `java.base` |
+| `/reset` | forget everything, start clean |
+| `/exit` | leave (or <kbd>ctrl</kbd> <kbd>d</kbd>) |
+
+and the two keys that make it fly: <kbd>tab</kbd> completes names and shows a method's overloads (`"abc".` then <kbd>tab</kbd> lists every `String` method), and <kbd>↑</kbd> brings back your previous lines.
+
+## what's actually happening
+
+jshell isn't an interpreter for some java-like language. it's the real compiler and the real JVM, wired up so you don't see them.
+
+<Figure caption="hover a stage. your snippets never run inside jshell itself: they run in a second JVM that jshell starts and talks to over a socket.">
+<Flow
+  stages={[
+    { label: "your snippet", sub: "x * 2", note: "anything from one expression to a whole class." },
+    { label: "wrap", sub: "synthetic class", note: "jshell wraps it in a generated class. top-level variables and methods become static members, so 'this' doesn't exist out here." },
+    { label: "javac", sub: "in-process", note: "the real java compiler, called as a library. that's why the errors look exactly like javac's." },
+    { label: "remote JVM", sub: "a 2nd process", note: "a separate java process (RemoteExecutionControl) loads and runs the bytecode. if your snippet crashes or loops forever, jshell survives." },
+    { label: "print", sub: "$2 ==> 10", note: "the value comes back over the wire and gets formatted as name ==> value." },
+  ]}
+/>
+</Figure>
+
+<Gotcha title="jshell is more forgiving than a .java file">
+a snippet that works in jshell might not compile in a file. jshell lets you skip semicolons, call methods before they're defined, and ignore checked exceptions: `Thread.sleep(100)` just works at the prompt, but in a method it's a compile error until you handle the `InterruptedException`. it also imports all of `java.base` for you (a compact source file does too, a normal class doesn't). when you move code from jshell into a project, expect to add a few things back.
+</Gotcha>
+
+## jshell or a file?
+
+| reach for | when |
+| --- | --- |
+| jshell | "what does this return?", "does this compile?", exploring an API, checking an edge case like `Integer.MAX_VALUE + 1` |
+| `java Main.java` | anything you want to keep, anything longer than a screen, anything with input or real control flow |
+
+both are one command away, so the real rule is: if you're wondering, try it.
+
+<Figure caption={<>medians of 7 runs on jdk 25, apple silicon. jshell pays once to start two JVMs and warm up the compiler, then answers fast. <code>java Main.java</code> pays its compile on every single run.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "start jshell", value: 783 },
+    { label: "first snippet", value: 100 },
+    { label: "each snippet after", value: 15, tone: "live" },
+    { label: "java Main.java, every run", value: 200 },
+  ]}
+/>
+</Figure>
+
+<Interview q="how would you quickly check what an expression evaluates to in java?">
+open `jshell` and type it. it's in every JDK since java 9 ([JEP 222](https://openjdk.org/jeps/222)), it runs on the real compiler and JVM so the answer is authoritative, and it shows the static type of the result with `/vars` (or `/set feedback verbose`, which prints "created scratch variable $6 : double" after every line). it also runs scripts: put snippets in a `.jsh` file, end it with `/exit`, and run `jshell file.jsh`.
+</Interview>
+
+<Keylines>
+- `jshell` = type java, see the result. no class, no main, no compile step.
+- unnamed results become scratch variables: `$2`, `$3`... and you can use them.
+- `/vars`, `/methods`, `/list`, `/edit`, `/save`. <kbd>tab</kbd> completes everything.
+- it's the real javac and a real (separate) JVM, so its answers are java's answers.
+- it's more forgiving than a file. moving code into a class may need imports, semicolons and try/catch.
+</Keylines>

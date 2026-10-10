@@ -1,0 +1,208 @@
+import { SelfUseTrace } from "@/components/figures/oop/SelfUseTrace";
+
+export const wrapper = {
+  frames: [{ name: "main", locals: { s: { ref: "w" } } }],
+  heap: {
+    w: { type: "InstrumentedSet", fields: { addCount: 3, s: { ref: "hs" } }, tag: "the wrapper" },
+    hs: { type: "HashSet", items: ['"snap"', '"crackle"', '"pop"'], tag: "the wrapped set" },
+  },
+};
+
+<InShort>
+inheriting from a class you don't control ties you to its **implementation**, not just its API. the classic: extend `HashSet`, override `add` and `addAll` to count elements, and you count every element **twice**, because `HashSet`'s inherited `addAll` quietly calls `add`. **composition** fixes it: hold a `Set` in a field and forward calls to it. the wrapper decides what it exposes, and the wrapped set's self-calls stay inside it.
+</InShort>
+
+## the picture
+
+inheritance is moving into someone's house and renovating one room. it works until you discover the kitchen's wiring runs through your room, and the owner rewires it next year without asking.
+
+composition is renting a desk in their office. you use the front door (the public API) and nothing else. what happens behind their walls is their business.
+
+## the bug that made the point
+
+effective java item 18's example: a `HashSet` that counts how many elements were ever added.
+
+```java title="Main.java" run output="6"
+import java.util.*;
+
+class InstrumentedHashSet<E> extends HashSet<E> {
+    private int addCount = 0;   // how many elements were ever added
+
+    @Override
+    public boolean add(E e) {
+        addCount++;
+        return super.add(e);
+    }
+
+    @Override
+    public boolean addAll(Collection<? extends E> c) {
+        addCount += c.size();
+        return super.addAll(c);
+    }
+
+    public int getAddCount() {
+        return addCount;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        InstrumentedHashSet<String> s = new InstrumentedHashSet<>();
+        s.addAll(List.of("snap", "crackle", "pop"));
+        System.out.println(s.getAddCount());
+    }
+}
+```
+
+three elements. it prints **6**, checked on jdk 25. step through why:
+
+<Figure wide caption={<>step with <kbd>→</kbd>. watch the call stack: <code>AbstractCollection.addAll</code> calls <code>add(e)</code> on <em>this</em>, and dynamic dispatch sends it back into <C k="dead">your override</C>. then flip to <code>wraps a Set</code>: the same self-call happens, but inside the wrapped HashSet, where your code isn't.</>}>
+<SelfUseTrace />
+</Figure>
+
+nothing in your class is wrong on its own. `HashSet` just happens to inherit an `addAll` that's built on `add`, a *self-use* pattern you never agreed to depend on. "fix" it by not overriding `addAll`, and you now depend on that detail staying true forever. reimplement `addAll` yourself, and you're rewriting the superclass. either way, the subclass is only correct for one particular version of the parent. that's the **fragile base class** problem.
+
+## the fix: wrap, don't extend
+
+two classes. a reusable `ForwardingSet` that implements `Set` by passing every call to a `Set` it holds, and the instrumented set on top of it:
+
+```java title="Main.java" run output="3\n3 [crackle, pop, snap]"
+import java.util.*;
+
+// a reusable forwarding class: implements Set by handing every call to the Set it holds
+class ForwardingSet<E> implements Set<E> {
+    private final Set<E> s;
+    ForwardingSet(Set<E> s) { this.s = s; }
+
+    public int size()                                   { return s.size(); }
+    public boolean isEmpty()                            { return s.isEmpty(); }
+    public boolean contains(Object o)                   { return s.contains(o); }
+    public Iterator<E> iterator()                       { return s.iterator(); }
+    public Object[] toArray()                           { return s.toArray(); }
+    public <T> T[] toArray(T[] a)                       { return s.toArray(a); }
+    public boolean add(E e)                             { return s.add(e); }
+    public boolean remove(Object o)                     { return s.remove(o); }
+    public boolean containsAll(Collection<?> c)         { return s.containsAll(c); }
+    public boolean addAll(Collection<? extends E> c)    { return s.addAll(c); }
+    public boolean retainAll(Collection<?> c)           { return s.retainAll(c); }
+    public boolean removeAll(Collection<?> c)           { return s.removeAll(c); }
+    public void clear()                                 { s.clear(); }
+    @Override public boolean equals(Object o)           { return s.equals(o); }
+    @Override public int hashCode()                     { return s.hashCode(); }
+    @Override public String toString()                  { return s.toString(); }
+}
+
+// the instrumented set, now a wrapper: it HAS a Set instead of BEING a HashSet
+class InstrumentedSet<E> extends ForwardingSet<E> {
+    private int addCount = 0;
+
+    InstrumentedSet(Set<E> s) { super(s); }
+
+    @Override
+    public boolean add(E e) {
+        addCount++;
+        return super.add(e);
+    }
+
+    @Override
+    public boolean addAll(Collection<? extends E> c) {
+        addCount += c.size();
+        return super.addAll(c);
+    }
+
+    public int getAddCount() {
+        return addCount;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        InstrumentedSet<String> s = new InstrumentedSet<>(new HashSet<>());
+        s.addAll(List.of("snap", "crackle", "pop"));
+        System.out.println(s.getAddCount());
+
+        InstrumentedSet<String> sorted = new InstrumentedSet<>(new TreeSet<>());
+        sorted.addAll(List.of("snap", "crackle", "pop"));
+        System.out.println(sorted.getAddCount() + " " + sorted);
+    }
+}
+```
+
+<Figure caption={<>composition in memory: the wrapper has its own counter and a <C k="ref">reference</C> to the set it wraps. the HashSet has no idea it's wrapped, so when it calls its own <code>add</code>, it calls its own <code>add</code>.</>}>
+<Memory frames={wrapper.frames} heap={wrapper.heap} />
+</Figure>
+
+and look what fell out for free: `InstrumentedSet` works on top of *any* `Set`. the `TreeSet` version on the last line kept its sorting, and you didn't write a second class. that's the decorator pattern, the same trick as `BufferedInputStream` wrapping any `InputStream` (see [i/o streams](/learn/io/io-streams)) and `Collections.synchronizedSet` wrapping any set.
+
+## the JDK learned this the hard way
+
+two old classes that extend when they should have wrapped, and still can't be fixed because of compatibility:
+
+```java title="Leaky.java" run output="localhost null\n[sneaky, a, b] pop=b"
+import java.util.*;
+
+public class Leaky {
+    public static void main(String[] args) {
+        Properties props = new Properties();
+        props.put("port", 8080);                    // Hashtable's put: any Object goes
+        props.setProperty("host", "localhost");
+        System.out.println(props.getProperty("host") + " " + props.getProperty("port"));
+
+        Stack<String> stack = new Stack<>();
+        stack.push("a");
+        stack.push("b");
+        stack.add(0, "sneaky");                     // Vector's add: not a stack operation
+        System.out.println(stack + " pop=" + stack.pop());
+    }
+}
+```
+
+`Properties` extends `Hashtable<Object, Object>`, so it inherits a `put` that accepts non-String values, which `getProperty` then refuses to see (`null`). `Stack` extends `Vector`, so every stack has `add(index, x)`, `get(i)` and `remove(i)`, and a stack is no longer a stack. both inherited a public API they never wanted. (use `ArrayDeque` for stacks, see [LinkedList and ArrayDeque](/learn/collections/linkedlist-and-arraydeque).)
+
+## so when is inheritance fine?
+
+<Compare>
+<Bad label="extend for reuse">
+```java
+// "i want HashSet's code, plus a counter"
+class CountingSet<E> extends HashSet<E> { ... }
+```
+you inherit its API (all of it, forever) and its implementation details (self-use, future changes).
+</Bad>
+<Good label="wrap for reuse">
+```java
+// "i want a Set, plus a counter"
+class CountingSet<E> extends ForwardingSet<E> { ... }
+```
+you pick the API, delegate the work, and work with any Set.
+</Good>
+</Compare>
+
+| inheritance is fine when... | prefer composition when... |
+| --- | --- |
+| B truly **is an** A, everywhere an A is expected (Liskov) | B just wants to **reuse** some of A's code |
+| A was designed and documented for extension | A is a concrete class from another team or library |
+| both classes live in the same package, under the same owner | A might change in a future release you don't control |
+| you're extending an abstract skeletal class (`AbstractList`) | you'd need to hide or disable some of A's methods |
+
+the test is the sentence "every B is an A", said out loud. "every Stack is a Vector" sounds wrong, and it was.
+
+<Gotcha title="the wrapper isn't the object it wraps">
+composition has one known gap: callbacks. if the wrapped object hands *itself* (`this`) to someone else, say registering itself as a listener, the callback goes to the inner object and skips your wrapper. it's called the SELF problem. rare in practice, but it's why some frameworks that rely on callbacks make wrapping awkward. and `equals` needs care: a wrapper usually isn't `equals` to anything but another wrapper, unless it forwards like `ForwardingSet` does.
+</Gotcha>
+
+<Effective item="18–19" title="favor composition over inheritance; design and document for inheritance or else prohibit it">
+inheriting across package boundaries from a concrete class breaks encapsulation: the subclass depends on implementation details of the superclass that can change between releases. instead, give the new class a private field holding an instance of the existing class and forward to it. only use inheritance when the subclass really is a subtype, and when the superclass was built (and documented) to be extended. if you write a class that isn't designed for that, make it final. the companion page: [classes and interfaces](/learn/effective-java/classes-and-interfaces).
+</Effective>
+
+<Interview q="what's the fragile base class problem?">
+a subclass can break when its superclass changes, even if the subclass's own code didn't, because overriding couples it to the superclass's implementation: which methods call which (self-use), and what new methods appear. the textbook case is overriding both `add` and `addAll` in a `HashSet` subclass, which double counts because `addAll` is implemented on top of `add`. the fix is composition and forwarding: hold the object in a field, implement the interface, delegate. then the inner object's self-calls never reach your code, and the wrapper works with any implementation of the interface.
+</Interview>
+
+<Keylines>
+- extending a concrete class couples you to its implementation, not just its API.
+- self-use plus dynamic dispatch: the parent calls your override when you least expect it.
+- composition: hold the object, implement the interface, forward the calls.
+- a wrapper works with any implementation of the interface. that's the decorator pattern.
+- inherit only for real "is-a", from classes designed for it. otherwise, wrap. :)
+</Keylines>

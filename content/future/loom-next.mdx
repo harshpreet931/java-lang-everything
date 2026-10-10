@@ -1,0 +1,85 @@
+import { ApiJourney } from "@/components/figures/future/ApiJourney";
+import { StatusBoard } from "@/components/figures/future/StatusBoard";
+
+export const board = [
+  { name: "virtual threads", jep: "JEP 444", status: "final", where: "java 21", note: "previewed in 19 and 20 (JEPs 425, 436). the headline feature: a Thread the JVM schedules, cheap enough to have millions." },
+  { name: "synchronize without pinning", jep: "JEP 491", status: "final", where: "java 24", note: "monitors reworked so a virtual thread can block inside synchronized, and in Object.wait(), without holding its carrier." },
+  { name: "scoped values", jep: "JEP 506", status: "final", where: "java 25", note: "an incubator in 20, previews in 21 to 24, final in 25 with one change: orElse no longer accepts null. the virtual-thread-friendly replacement for most ThreadLocals." },
+  { name: "structured concurrency", jep: "JEP 533", status: "preview", where: "jdk 27, seventh preview", note: "previews in every release from 21 to 27 (after incubating in 19 and 20). 27 added a type parameter for the exception join() throws." },
+  { name: "structured concurrency, final", jep: "JEP 543", status: "proposed", where: "jdk 28", note: "proposed to finalize the jdk 27 API without further change. as of october 10 it's in review, which ends october 13." },
+  { name: "the last pinning cases", status: "exploring", where: "future work in JEP 491", note: "blocking inside a class initializer, waiting for another thread to initialize a class, and blocking while the JVM resolves a class still pin. JEP 491 lists them as future work." },
+  { name: "custom schedulers", status: "exploring", where: "loom's fibers branch", note: "an experimental API for plugging in your own virtual thread scheduler exists in a branch. on loom-dev in 2025 the project described it as a research topic with no plan to expose it yet." },
+];
+
+<InShort>
+Project Loom's big pieces have landed: **virtual threads** (final in 21), **monitors that don't pin** (24), and **scoped values** (25). the last one is **structured concurrency**: seven previews from 21 to 27, an API that changed shape twice, and [JEP 543](https://openjdk.org/jeps/543) proposes making the jdk 27 version final in jdk 28 (as of october 10, 2026, it's in review).
+
+what's left after that is smaller and slower: the remaining pinning cases, and whether you'll ever get to plug in your own scheduler.
+</InShort>
+
+## the picture
+
+you know how [virtual threads](/learn/concurrency/virtual-threads) made "one thread per request" cheap again, and then you need to do three things concurrently inside that request? that's what's been in preview the longest. cheap threads were the engine; structured concurrency is the steering: a way to start several subtasks and be sure they all end (succeed, fail or get cancelled) before your method returns.
+
+think of building a house. virtual threads hired as many workers as you want for almost nothing. structured concurrency is the site manager who makes sure nobody's still pouring concrete for a house the client already cancelled. the [structured concurrency](/learn/concurrency/structured-concurrency) chapter covers how to use it; this one covers how it got here and where Loom goes next.
+
+## seven previews, two redesigns
+
+structured concurrency has been in preview longer than almost anything in java's history: incubating in 19 and 20, then a preview in every release from 21 to 27. that's not indecision, it's an API getting real use and being changed because of it. here's the same method in each era:
+
+<Figure wide caption={<>switch eras. the method does the same thing every time: fork two subtasks, wait for both, fail if either fails. what changed is how you pick the policy (<C k="hot">highlighted</C>) and how a failure reaches you.</>}>
+<ApiJourney />
+</Figure>
+
+two redesigns, then: jdk 25 replaced the policy subclasses with `open()` and joiners, and jdk 27 made failures arrive as a checked `ExecutionException`, the way `Future.get()` always did. both times, code written for the previous preview stopped compiling, which is the deal you take with previews (the full rules are in [preview features](/learn/modern/preview-features)). JEP 543 proposes making the jdk 27 shape final, unchanged. the jdk 25 version above compiles and runs on jdk 25 with `--enable-preview`; the full working example is in [structured concurrency](/learn/concurrency/structured-concurrency).
+
+<Quiz question="your jdk 25 code wraps scope.join() in a try that catches StructuredTaskScope.FailedException. what's different if JEP 543 ships in jdk 28 as proposed?" options={["nothing changes", "join() throws a checked exception", "join() stops throwing", "fork() returns a Future again"]} answer={1}>
+<Explain>
+jdk 27 (JEP 533) gave joiners a type parameter for the exception `join()` throws, and the default policy throws `ExecutionException`, a checked exception, with the failed subtask's exception as its cause. JEP 543 proposes finalizing exactly that, so the jdk 25 code needs its `catch` and `throws` updated. `fork()` returning a `Subtask` instead of a `Future` dates back to jdk 21 and stays.
+</Explain>
+</Quiz>
+
+## why it took this long
+
+structured concurrency touches things that are expensive to get wrong forever: what happens to a subtask when its parent is interrupted, how a failure is reported, how a policy like "first success wins" plugs in, how a thread dump shows the tree of tasks. each preview changed one of those. scoped values went through the same thing (an incubator in 20, four previews, final in 25), and they were designed together: a scope's subtasks see the parent's scoped value bindings, which is what makes the pair a replacement for `ThreadLocal`-based context passing.
+
+<Figure caption={<>Loom's arc. the dates are general availability of each release; the last stop is a proposal, not a promise.</>}>
+<Flow
+  vertical
+  stages={[
+    { label: "2017", sub: "project Loom proposed", note: "continuations and lightweight threads, in a branch" },
+    { label: "java 21", sub: "virtual threads, final", note: "and structured concurrency's first preview" },
+    { label: "java 24", sub: "monitors stop pinning", note: "synchronized and Object.wait() unmount" },
+    { label: "java 25", sub: "scoped values, final", note: "the context-passing half" },
+    { label: "jdk 28 (proposed)", sub: "structured concurrency, final", note: "JEP 543, due march 2027 if it stays targeted" },
+  ]}
+/>
+</Figure>
+
+## what's left
+
+after structured concurrency, Loom's remaining work is quieter: rough edges rather than features.
+
+<Figure caption={<>Loom's pieces and where each one stands, checked against the JEP pages, the jdk 28 project page and the loom-dev mailing list (october 2026). click a row.</>}>
+<StatusBoard rows={board} open={4} />
+</Figure>
+
+- **the last pinning cases.** JEP 491 fixed `synchronized`, but a virtual thread that blocks inside a class initializer, or waits for one, still pins its carrier (you can watch it happen in [virtual threads, inside](/learn/deep-dives/virtual-thread-internals)). JEP 491 lists these as future work.
+- **custom schedulers.** the scheduler is a fixed `ForkJoinPool` today. an experimental pluggable-scheduler API lives in a branch of the Loom repository, and the team's position on loom-dev in 2025 was that it's a research topic, with no plan to expose it yet: a scheduler runs arbitrary code at very sensitive moments.
+- **things nobody has proposed.** time-slicing (preempting a virtual thread that's hogging its carrier): JEP 444 noted the scheduler doesn't do it, and no JEP since has proposed it. virtual threads remain cooperative: they give up their carrier when they block.
+
+<Gotcha title="don't ship preview APIs in a library">
+a library compiled with `--enable-preview` on jdk 25 only runs on jdk 25, only with the flag, and every user has to add it. structured concurrency changed shape in 25 and again in 27, so even application code written against an earlier preview needs edits on every upgrade. use it, learn it, send feedback, and if it ships in jdk 28 as proposed, adopt the final API then.
+</Gotcha>
+
+<Interview q="what is structured concurrency, and what's its status?">
+it's an API, `StructuredTaskScope`, that treats a group of concurrent subtasks as one unit of work: subtasks are forked inside a scope, the scope's block can't exit until they've all finished, a failure cancels the siblings, and interrupting the owner cancels the children. it pairs with virtual threads (each subtask gets one) and scoped values (subtasks inherit the parent's bindings). as of october 2026 it's a preview API, previewed in every release from 21 to 27, with JEP 543 proposing to finalize the jdk 27 version in jdk 28. the API changed in 25 (open() and joiners) and in 27 (join() throws a checked ExecutionException), so preview code needs updating between releases.
+</Interview>
+
+<Keylines>
+- Loom shipped: virtual threads (21), monitors that don't pin (24), scoped values (25).
+- structured concurrency: previews from 21 to 27, JEP 543 proposes it final in jdk 28 (as of october 2026).
+- the API changed twice: `open()` and joiners in 25, a checked `ExecutionException` from `join()` in 27.
+- still open: pinning in class initializers, and custom schedulers (research, not planned).
+- virtual threads stay cooperative. no JEP proposes time slicing.
+</Keylines>

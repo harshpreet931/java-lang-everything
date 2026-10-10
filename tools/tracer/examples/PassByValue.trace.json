@@ -1,0 +1,234 @@
+{
+  "file": "PassByValue.java",
+  "source": "public class PassByValue {\n    static class Box {\n        int value;\n\n        Box(int value) {\n            this.value = value;\n        }\n    }\n\n    static void swap(int a, int b) {\n        int temp = a;\n        a = b;\n        b = temp;\n    }\n\n    static void fill(Box box) {\n        box.value = 99;\n    }\n\n    static void replace(Box box) {\n        box = new Box(-1);\n    }\n\n    public static void main(String[] args) {\n        int a = 1;\n        int b = 2;\n        swap(a, b);\n        System.out.println(a + \" \" + b);\n\n        Box box = new Box(7);\n        fill(box);\n        replace(box);\n        System.out.println(box.value);\n    }\n}\n",
+  "steps": [
+    {"line": 25, "frames": [{"name": "main", "line": 25, "locals": {}}], "heap": {}, "stdout": ""},
+    {
+      "line": 26,
+      "frames": [{"name": "main", "line": 26, "locals": {"a": 1}}],
+      "heap": {},
+      "stdout": "",
+      "changed": ["a"]
+    },
+    {
+      "line": 27,
+      "frames": [{"name": "main", "line": 27, "locals": {"a": 1, "b": 2}}],
+      "heap": {},
+      "stdout": "",
+      "changed": ["b"]
+    },
+    {
+      "line": 11,
+      "frames": [
+        {"name": "main", "line": 27, "locals": {"a": 1, "b": 2}},
+        {"name": "swap", "line": 11, "locals": {"a": 1, "b": 2}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 12,
+      "frames": [
+        {"name": "main", "line": 27, "locals": {"a": 1, "b": 2}},
+        {"name": "swap", "line": 12, "locals": {"a": 1, "b": 2, "temp": 1}}
+      ],
+      "heap": {},
+      "stdout": "",
+      "changed": ["temp"]
+    },
+    {
+      "line": 13,
+      "frames": [
+        {"name": "main", "line": 27, "locals": {"a": 1, "b": 2}},
+        {"name": "swap", "line": 13, "locals": {"a": 2, "b": 2, "temp": 1}}
+      ],
+      "heap": {},
+      "stdout": "",
+      "changed": ["a"]
+    },
+    {
+      "line": 14,
+      "frames": [
+        {"name": "main", "line": 27, "locals": {"a": 1, "b": 2}},
+        {"name": "swap", "line": 14, "locals": {"a": 2, "b": 1, "temp": 1}}
+      ],
+      "heap": {},
+      "stdout": "",
+      "changed": ["b"]
+    },
+    {
+      "line": 28,
+      "frames": [{"name": "main", "line": 28, "locals": {"a": 1, "b": 2}}],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 30,
+      "frames": [{"name": "main", "line": 30, "locals": {"a": 1, "b": 2}}],
+      "heap": {},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 5,
+      "frames": [
+        {"name": "main", "line": 30, "locals": {"a": 1, "b": 2}},
+        {"name": "new Box", "line": 5, "locals": {"this": {"ref": "o1"}, "value": 7}}
+      ],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 0}, "state": "new"}},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 30, "locals": {"a": 1, "b": 2}},
+        {"name": "new Box", "line": 6, "locals": {"this": {"ref": "o1"}, "value": 7}}
+      ],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 0}}},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 7,
+      "frames": [
+        {"name": "main", "line": 30, "locals": {"a": 1, "b": 2}},
+        {"name": "new Box", "line": 7, "locals": {"this": {"ref": "o1"}, "value": 7}}
+      ],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 7}}},
+      "stdout": "1 2\n",
+      "changed": ["o1.value"]
+    },
+    {
+      "line": 30,
+      "frames": [{"name": "main", "line": 30, "locals": {"a": 1, "b": 2}}],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 7}}},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 31,
+      "frames": [{"name": "main", "line": 31, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 7}}},
+      "stdout": "1 2\n",
+      "changed": ["box"]
+    },
+    {
+      "line": 17,
+      "frames": [
+        {"name": "main", "line": 31, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "fill", "line": 17, "locals": {"box": {"ref": "o1"}}}
+      ],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 7}}},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 18,
+      "frames": [
+        {"name": "main", "line": 31, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "fill", "line": 18, "locals": {"box": {"ref": "o1"}}}
+      ],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 99}}},
+      "stdout": "1 2\n",
+      "changed": ["o1.value"]
+    },
+    {
+      "line": 32,
+      "frames": [{"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 99}}},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 21,
+      "frames": [
+        {"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "replace", "line": 21, "locals": {"box": {"ref": "o1"}}}
+      ],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 99}}},
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 5,
+      "frames": [
+        {"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "replace", "line": 21, "locals": {"box": {"ref": "o1"}}},
+        {"name": "new Box", "line": 5, "locals": {"this": {"ref": "o2"}, "value": -1}}
+      ],
+      "heap": {
+        "o1": {"type": "Box", "fields": {"value": 99}},
+        "o2": {"type": "Box", "fields": {"value": 0}, "state": "new"}
+      },
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "replace", "line": 21, "locals": {"box": {"ref": "o1"}}},
+        {"name": "new Box", "line": 6, "locals": {"this": {"ref": "o2"}, "value": -1}}
+      ],
+      "heap": {
+        "o1": {"type": "Box", "fields": {"value": 99}},
+        "o2": {"type": "Box", "fields": {"value": 0}}
+      },
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 7,
+      "frames": [
+        {"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "replace", "line": 21, "locals": {"box": {"ref": "o1"}}},
+        {"name": "new Box", "line": 7, "locals": {"this": {"ref": "o2"}, "value": -1}}
+      ],
+      "heap": {
+        "o1": {"type": "Box", "fields": {"value": 99}},
+        "o2": {"type": "Box", "fields": {"value": -1}}
+      },
+      "stdout": "1 2\n",
+      "changed": ["o2.value"]
+    },
+    {
+      "line": 21,
+      "frames": [
+        {"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "replace", "line": 21, "locals": {"box": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Box", "fields": {"value": 99}},
+        "o2": {"type": "Box", "fields": {"value": -1}}
+      },
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 22,
+      "frames": [
+        {"name": "main", "line": 32, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}},
+        {"name": "replace", "line": 22, "locals": {"box": {"ref": "o2"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Box", "fields": {"value": 99}},
+        "o2": {"type": "Box", "fields": {"value": -1}}
+      },
+      "stdout": "1 2\n",
+      "changed": ["box"]
+    },
+    {
+      "line": 33,
+      "frames": [{"name": "main", "line": 33, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}}],
+      "heap": {
+        "o1": {"type": "Box", "fields": {"value": 99}},
+        "o2": {"type": "Box", "fields": {"value": -1}, "state": "dead"}
+      },
+      "stdout": "1 2\n"
+    },
+    {
+      "line": 34,
+      "frames": [{"name": "main", "line": 34, "locals": {"a": 1, "b": 2, "box": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "Box", "fields": {"value": 99}}},
+      "stdout": "1 2\n99\n"
+    },
+    {
+      "line": 34,
+      "frames": [],
+      "heap": {},
+      "stdout": "1 2\n99\n",
+      "note": "main returned, program ends"
+    }
+  ]
+}

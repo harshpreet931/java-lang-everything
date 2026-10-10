@@ -1,0 +1,145 @@
+import { BoundTester } from "@/components/figures/generics/BoundTester";
+import { Decoder } from "@/components/figures/generics/Decoder";
+import { sortSig } from "@/components/figures/generics/decoders";
+
+<InShort>
+a **bound** limits what a type parameter can be: `<T extends Number>` means callers may only pick `Number` or a subtype. in return, your code gets to call `Number`'s methods on a `T`. that's the trade.
+
+the famous one, `<T extends Comparable<? super T>>`, reads: "a `T` that can be compared with other `T`s, or with anything `T` inherits from". by the end of this page it'll look boring.
+</InShort>
+
+## the picture
+
+you know how a plain `<T>` can be anything, which sounds powerful until you try to do something with it? inside the method, javac only knows `T` is *some* object, so all you can call is `equals`, `hashCode`, `toString` and the rest of `Object`. ask a `T` for `compareTo` and javac says `cannot find symbol`.
+
+think of a job posting. "anyone can apply" gets you lots of applicants and no guarantees. "must hold a driving licence" turns some people away, but now you can hand any applicant the van keys. a bound is the requirement in the posting: callers have to meet it, and your code gets to rely on it.
+
+<Compare>
+<Bad label="unbounded: T is just an Object">
+```java
+static <T> T max(List<T> xs) {
+    T best = xs.get(0);
+    for (T x : xs)
+        if (x.compareTo(best) > 0) // [!code error]
+            best = x;
+    return best;
+}
+// error: cannot find symbol
+//   symbol:   method compareTo(T)
+```
+</Bad>
+<Good label="bounded: T is promised to be Comparable">
+```java
+static <T extends Comparable<T>>
+        T max(List<T> xs) {
+    T best = xs.get(0);
+    for (T x : xs)
+        if (x.compareTo(best) > 0)
+            best = x;
+    return best;
+}
+```
+</Good>
+</Compare>
+
+`extends` in a bound means "is a subtype of", for classes *and* interfaces. there's no `implements` here: `<T implements Comparable<T>>` isn't java.
+
+## decoding the scary one
+
+here's the real signature of `Collections.sort`. it looks like line noise until you read it in pieces:
+
+<Figure caption={<>click a piece, or press <strong>next piece</strong>. the <C k="hot">amber</C> part is the one being explained. this is jdk 25&apos;s real signature, from <code>javap -s java.util.Collections</code>.</>}>
+<Decoder parts={sortSig} read="sort a list of Ts, where a T knows how to compare itself with Ts, or with something T inherits from." />
+</Figure>
+
+the first half, `T extends Comparable<T>`, is a **recursive bound**: `T` shows up inside its own bound. it reads "a `T` that can be compared to other `T`s", which is exactly what `String` (`implements Comparable<String>`) and `Integer` are. it's how a method says "these things have a natural order" without knowing what they are.
+
+so why the `? super T`? because plenty of types inherit their `compareTo` from a parent, and then they're comparable to the *parent*, not to themselves.
+
+## why `? super T`
+
+`max` again, written both ways, called with five different lists:
+
+<Figure wide caption={<>pick an element type. the top box shows how that type gets its <code>compareTo</code>. the two boxes below are the same method with the strict bound and the loose one, and what javac 25 says about each call: <C k="live">compiles</C> or <C k="dead">doesn&apos;t</C>.</>}>
+<BoundTester />
+</Figure>
+
+`LocalDate` is the one that bites people. it's `Comparable<ChronoLocalDate>`, because `compareTo` is declared once, up in the `ChronoLocalDate` interface, for every calendar system. so `Comparable<T>` with `T = LocalDate` fails, and `Comparable<? super T>` (comparable to `LocalDate` or any supertype of it) passes. the same thing happens to your own classes the moment a subclass inherits `compareTo`. that's why the JDK writes `? super T` on every `Comparable` and `Comparator` it accepts, and you should too. the rule behind it, producer `extends` and consumer `super`, gets its own chapter: [wildcards and PECS](/learn/generics/wildcards-and-pecs).
+
+```java title="Main.java" run output="pear\n2026-09-15\n6.0 1.5"
+static <T extends Comparable<? super T>> T max(List<T> xs) {
+    T best = xs.get(0);
+    for (T x : xs) if (x.compareTo(best) > 0) best = x;   // compareTo: T is Comparable
+    return best;
+}
+
+static <T extends Number & Comparable<T>> double range(List<T> xs) {
+    T lo = xs.get(0), hi = xs.get(0);
+    for (T x : xs) {
+        if (x.compareTo(lo) < 0) lo = x;                  // from Comparable
+        if (x.compareTo(hi) > 0) hi = x;
+    }
+    return hi.doubleValue() - lo.doubleValue();           // from Number
+}
+
+void main() {
+    IO.println(max(List.of("pear", "apple", "fig")));
+    IO.println(max(List.of(LocalDate.of(2025, 9, 16), LocalDate.of(2026, 9, 15))));
+    IO.println(range(List.of(3, 9, 4)) + " " + range(List.of(2.5, 1.0)));
+}
+```
+
+<Predict options={["2.5", "2", "compile error"]} answer={2}>
+```java
+static <T extends Comparable<T>> T max(T a, T b) {
+    return a.compareTo(b) >= 0 ? a : b;
+}
+
+IO.println(max(1, 2.5));
+```
+<Explain>
+`T` has to be one type that both arguments fit, *and* that is comparable to itself. `Integer` is `Comparable<Integer>`, `Double` is `Comparable<Double>`, and their common supertype (`Number & ...`) isn't comparable at all. javac 25: `inference variable T has incompatible bounds, equality constraints: Integer,Double`. that's the bound working as intended: comparing an `Integer` to a `Double` with `compareTo` would throw at run time, so it never gets that far.
+</Explain>
+</Predict>
+
+## more than one bound
+
+that `range` method above wanted two things from `T`: `compareTo` and `doubleValue`. so it asked for both, with `&`:
+
+<Defs>
+<dt>`<T extends A & B & C>`</dt><dd>`T` must be a subtype of all of them. inside the method you can call methods from any of them.</dd>
+<dt>class first</dt><dd>at most one of them can be a class, and it has to come first. put `Number` after `Comparable<T>` and javac says `interface expected here`.</dd>
+<dt>erasure picks the first</dt><dd>at run time `T` is replaced by its first bound. that detail matters more than it looks, see the deep dive below.</dd>
+</Defs>
+
+<Deep title="why Collections.max says <T extends Object & Comparable<? super T>>">
+in the JDK source, `Collections.max` is declared like this:
+
+```java
+public static <T extends Object & Comparable<? super T>>
+        T max(Collection<? extends T> coll)
+```
+
+`extends Object` looks pointless, every type extends Object. it's there for [erasure](/learn/generics/type-erasure): a type parameter is erased to its first bound. with just `Comparable<? super T>`, the compiled method would return `Comparable`. but `max` existed before generics, returning `Object`, and old class files call it by that exact descriptor. putting `Object` first keeps the erased signature identical. you can see it with `javap -s`: `Collections.max` has descriptor `(Ljava/util/Collection;)Ljava/lang/Object;`, while a `max` you write with only the `Comparable` bound compiles to `(Ljava/util/List;)Ljava/lang/Comparable;`. generic source, 1998-compatible bytecode.
+</Deep>
+
+<Gotcha title="type parameters can't have a super bound">
+`? super Integer` is fine as a wildcard, so people try `<T super Integer>` on a method. it's not legal syntax at all (javac 25 gives up with `error: > expected`). bounds on type parameters only go upward. if you need "anything that can hold an Integer", that's a wildcard parameter: `List<? super Integer>`.
+</Gotcha>
+
+<Deep title="the strangest bound in the JDK: Enum<E extends Enum<E>>">
+every enum secretly extends `java.lang.Enum<E extends Enum<E>>`. so `enum Color` is really `class Color extends Enum<Color>`. the recursion lets the base class talk about the exact subclass: `compareTo(E o)` only accepts other `Color`s, and `getDeclaringClass()` returns a `Class<Color>`. a plain `Enum` base class couldn't stop you comparing a `Color` with a `Planet`. same trick, called "f-bounded" or the curiously recurring pattern, shows up in builder hierarchies. more in [enums](/learn/oop/enums).
+</Deep>
+
+<Interview q="what does <T extends Comparable<? super T>> mean, and why not just <T extends Comparable<T>>?">
+it declares a type parameter `T` that must be comparable to `T` or to some supertype of `T`. the plain `Comparable<T>` version rejects types that inherit `compareTo` from a parent, like `LocalDate` (comparable to `ChronoLocalDate`) or a subclass of a comparable class, because they implement `Comparable<Parent>`, not `Comparable<Self>`. a `Comparable` only consumes `T`s, so by PECS it gets `super`. bonus point: `Collections.max` adds `Object &` in front so its erased return type stays `Object`, for binary compatibility with pre-generics code.
+</Interview>
+
+<Keylines>
+- a bound limits what callers can pick, and unlocks methods your code can call.
+- `extends` in a bound means subtype: classes and interfaces alike.
+- `T extends Comparable<T>`: a recursive bound, "comparable to itself".
+- add `? super T` so types that inherit `compareTo` (LocalDate, subclasses) still fit.
+- `<T extends A & B>`: class first, at most one class. erasure uses the first bound.
+- type parameters only have upper bounds. `super` is for wildcards.
+</Keylines>

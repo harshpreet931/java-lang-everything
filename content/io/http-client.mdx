@@ -1,0 +1,244 @@
+import { SyncAsync } from "@/components/figures/io/SyncAsync";
+import { ProtocolLanes } from "@/components/figures/io/ProtocolLanes";
+
+<InShort>
+**`java.net.http.HttpClient`** <Since v={11} /> is the JDK's built-in HTTP client. you build an immutable **`HttpRequest`**, hand it to a client with a **`BodyHandler`** (what to turn the body into), and get an `HttpResponse<T>` back, either blocking with `send` or as a `CompletableFuture` with **`sendAsync`**.
+
+it speaks HTTP/1.1 and HTTP/2 out of the box, and **HTTP/3** since java 26. make one client and reuse it.
+</InShort>
+
+## the picture
+
+you know how a restaurant works? you write your order on a slip (the `HttpRequest`: method, URL, headers, body), hand it to the waiter (the `HttpClient`, who knows the kitchen and keeps the doors open between trips), and say how you want it served (the `BodyHandler`: as a string, into a file, as a stream). you can stand at the counter until it's ready (`send`), or take a buzzer and sit down (`sendAsync`).
+
+<Figure caption="hover a stage. the request and the client are built once and reused; everything right of the client happens per call, on the client's own threads.">
+<Flow
+  stages={[
+    { label: "HttpRequest", sub: "immutable", note: "a builder makes it: URI, method, headers, a BodyPublisher for the body, a timeout, a preferred version. safe to keep and send again." },
+    { label: "HttpClient", sub: "pool + selector", note: "thread-safe, holds a connection pool, cookies, redirect and auth policy, and one selector thread that drives every connection (non-blocking NIO underneath)." },
+    { label: "connection", sub: "reuse or open", note: "an idle pooled connection to the same host is reused. otherwise TCP, then TLS for https, where ALPN agrees on h2 or http/1.1 during the handshake." },
+    { label: "BodyHandler", sub: "sees the status first", note: "once the status and headers arrive, the handler picks a BodySubscriber: ofString, ofByteArray, ofFile, ofLines, ofInputStream, discarding..." },
+    { label: "HttpResponse", sub: "status, headers, body", note: "the body is whatever the handler made, typed: HttpResponse of String, of Path, of Stream. for sendAsync, this is what the CompletableFuture completes with." },
+  ]}
+/>
+</Figure>
+
+examples that call the real internet can't run in a checker (or on a plane), so this chapter brings its own server: `com.sun.net.httpserver.HttpServer`, a small HTTP/1.1 server that has shipped in the JDK since java 6. everything below runs against `localhost`:
+
+```java title="Main.java" run output="200 HTTP_1_1\nhi! you asked to upgrade to: h2c"
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.*;
+
+void main() throws Exception {
+    // a tiny local server, so this runs without the internet
+    HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    server.createContext("/hello", exchange -> {
+        String upgrade = exchange.getRequestHeaders().getFirst("Upgrade");
+        byte[] body = ("hi! you asked to upgrade to: " + upgrade).getBytes();
+        exchange.sendResponseHeaders(200, body.length);
+        try (var out = exchange.getResponseBody()) { out.write(body); }
+    });
+    server.start();
+    URI uri = URI.create("http://localhost:" + server.getAddress().getPort() + "/hello");
+
+    try (HttpClient client = HttpClient.newHttpClient()) {
+        HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+        IO.println(response.statusCode() + " " + response.version());
+        IO.println(response.body());
+    }
+    server.stop(0);
+}
+```
+
+look at that second line. the client prefers HTTP/2 by default, so on a plain `http://` URL it sends an `Upgrade: h2c` header ("can we switch to cleartext HTTP/2?"). the JDK's little server doesn't do HTTP/2, ignores it, and answers in HTTP/1.1, so the response says `HTTP_1_1`. on `https://` the negotiation happens inside the TLS handshake instead (ALPN), and most real servers say yes.
+
+`HttpClient` is `AutoCloseable` since java 21, which is why it sits in a try-with-resources here. in a real app you'd build one at startup and close it at shutdown.
+
+## sending things
+
+a `POST` is the same builder with a `BodyPublisher`. timeouts come in two flavours: `connectTimeout` on the client (how long to wait for TCP and TLS), and `timeout` on the request (how long to wait for the response headers):
+
+```java title="Main.java" run output="201 /orders/42\ncreated {\"item\":\"chai\",\"qty\":2} as application/json\nHttpTimeoutException: request timed out"
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.*;
+import java.time.Duration;
+
+void main() throws Exception {
+    HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    server.createContext("/orders", exchange -> {
+        String json = new String(exchange.getRequestBody().readAllBytes());
+        String type = exchange.getRequestHeaders().getFirst("Content-Type");
+        byte[] reply = ("created " + json + " as " + type).getBytes();
+        exchange.getResponseHeaders().add("Location", "/orders/42");
+        exchange.sendResponseHeaders(201, reply.length);
+        try (var out = exchange.getResponseBody()) { out.write(reply); }
+    });
+    server.createContext("/slow", exchange -> {
+        try { Thread.sleep(2000); } catch (InterruptedException e) { }
+        exchange.sendResponseHeaders(204, -1);
+        exchange.close();
+    });
+    server.start();
+    String base = "http://localhost:" + server.getAddress().getPort();
+
+    try (HttpClient client = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(2))
+            .build()) {
+        HttpRequest post = HttpRequest.newBuilder(URI.create(base + "/orders"))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"item\":\"chai\",\"qty\":2}"))
+            .build();
+        HttpResponse<String> r = client.send(post, HttpResponse.BodyHandlers.ofString());
+        IO.println(r.statusCode() + " " + r.headers().firstValue("Location").orElse("?"));
+        IO.println(r.body());
+
+        HttpRequest slow = HttpRequest.newBuilder(URI.create(base + "/slow"))
+            .timeout(Duration.ofMillis(200))
+            .build();
+        try {
+            client.send(slow, HttpResponse.BodyHandlers.discarding());
+        } catch (HttpTimeoutException e) {
+            IO.println(e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+    server.stop(0);
+}
+```
+
+<Gotcha title="a 404 is not an exception">
+`send` throws only when there's no HTTP response at all (connection refused, timeout, TLS failure). a `404` or `500` is a perfectly successful exchange that happens to carry bad news, so it comes back as a normal `HttpResponse`. always check `statusCode()`. the other surprise: **there's no default request timeout**. without `.timeout(...)`, a server that accepts the connection and never answers keeps your thread waiting forever.
+</Gotcha>
+
+## sync or async
+
+`send` blocks the calling thread until the response is in. `sendAsync` returns a `CompletableFuture` immediately and finishes the work on the client's own threads. one request, no difference. many requests, a huge one:
+
+<Figure caption={<>five requests to a local server that takes 300 ms each. switch between the two calls. measured on jdk 25 (M4 Pro): <C k="dead">about 1,500 ms</C> in a send loop, <C k="live">about 300 ms</C> with sendAsync. <C k="ref">blue</C> bars are requests in flight.</>}>
+<SyncAsync />
+</Figure>
+
+```java title="Main.java" run output="[r0, r1, r2, r3, r4]\nasync was at least 3x faster: true"
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.*;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.stream.IntStream;
+
+void main() throws Exception {
+    HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+    server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+    server.createContext("/slow", exchange -> {
+        try { Thread.sleep(300); } catch (InterruptedException e) { }   // a 300 ms backend
+        byte[] body = exchange.getRequestURI().getQuery().getBytes();
+        exchange.sendResponseHeaders(200, body.length);
+        try (var out = exchange.getResponseBody()) { out.write(body); }
+    });
+    server.start();
+    String base = "http://localhost:" + server.getAddress().getPort() + "/slow?";
+    List<HttpRequest> requests = IntStream.range(0, 5)
+        .mapToObj(i -> HttpRequest.newBuilder(URI.create(base + "r" + i)).build())
+        .toList();
+
+    try (HttpClient client = HttpClient.newHttpClient()) {
+        long t0 = System.nanoTime();
+        for (var r : requests) client.send(r, HttpResponse.BodyHandlers.ofString());
+        long sync = System.nanoTime() - t0;
+
+        t0 = System.nanoTime();
+        List<CompletableFuture<String>> futures = requests.stream()
+            .map(r -> client.sendAsync(r, HttpResponse.BodyHandlers.ofString())
+                            .thenApply(HttpResponse::body))
+            .toList();
+        List<String> bodies = futures.stream().map(CompletableFuture::join).toList();
+        long async = System.nanoTime() - t0;
+
+        IO.println(bodies);
+        IO.println("async was at least 3x faster: " + (async * 3 < sync));
+    }
+    server.stop(0);
+}
+```
+
+the futures compose like any other [CompletableFuture](/learn/concurrency/completablefuture): `thenApply` to parse, `thenCompose` to chain a second call, `allOf` to wait for a batch. and since java 21 there's a third option that reads like the sync version: call `send` from many [virtual threads](/learn/concurrency/virtual-threads). blocking a virtual thread is cheap, so plain loops get async-like throughput.
+
+<Predict options={["1", "3", "it depends on the JVM"]} answer={1}>
+```java
+for (int i = 0; i < 3; i++) {
+    HttpClient.newHttpClient();     // and never closed
+}
+long n = Thread.getAllStackTraces().keySet().stream()
+    .filter(t -> t.getName().contains("SelectorManager")).count();
+IO.println(n);
+```
+<Explain>
+every `HttpClient` starts its own selector thread (`HttpClient-1-SelectorManager`, `-2-`, `-3-`) and its own connection pool. three clients, three threads, three pools that can't share connections. that's why "a new client per request" is the classic misuse: no connection reuse, and threads that pile up until the clients are garbage collected or closed.
+</Explain>
+</Predict>
+
+## http/1.1, http/2, http/3
+
+the client picks the protocol for you (HTTP/2 when the server agrees, otherwise HTTP/1.1), but the difference shows up in latency the moment you make several requests to one host.
+
+<Figure wide caption={<>three responses, nine frames, a conceptual model of who waits for whom. turn on packet loss and compare http/2 with http/3: <C k="dead">red</C> is the lost frame's resend, <C k="hot">amber</C> frames arrived fine but are held back waiting for it.</>}>
+<ProtocolLanes />
+</Figure>
+
+| version | transport | in the JDK client | what it fixed |
+| --- | --- | --- | --- |
+| HTTP/1.1 | TCP | since 11 | one request at a time per connection; parallelism means more connections |
+| HTTP/2 | TCP (+TLS) | since 11, the default | many streams on one connection, binary frames, compressed headers |
+| HTTP/3 | QUIC over UDP | <Since v={26} /> opt-in | no TCP head-of-line blocking, faster handshakes |
+
+HTTP/3 came in java 26 ([JEP 517](https://openjdk.org/jeps/517)) and stays opt-in: the default is still HTTP/2. you ask for it on the client or per request, and optionally say how the client should find out the server speaks it:
+
+```java title="Http3.java"
+// java 26+. not runnable on 25
+HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_3)
+    .build();
+
+HttpRequest req = HttpRequest.newBuilder(URI.create("https://example.com/"))
+    .setOption(HttpOption.H3_DISCOVERY, HttpOption.Http3DiscoveryMode.ALT_SVC)
+    .build();
+```
+
+there are three discovery modes. `ANY` (what you get if you don't set one) lets the client try QUIC and TCP side by side and keep whichever wins. `ALT_SVC` starts on HTTP/2 or 1.1 and switches once the server advertises HTTP/3 in an `Alt-Svc` header. `HTTP_3_URI_ONLY` goes straight to HTTP/3 and fails if the server doesn't speak it. HTTP/3 doesn't go through proxies: with one configured, the client quietly drops back to HTTP/2.
+
+## a server for when you need one
+
+the JDK ships two servers you can use without a framework. `com.sun.net.httpserver.HttpServer`, used all over this chapter, for tests and tiny tools. and since java 18, **`jwebserver`** ([JEP 408](https://openjdk.org/jeps/408)): a command-line static file server for prototyping, demos and serving a folder to your phone. real output from jdk 25:
+
+```bash
+$ jwebserver -p 8765
+Binding to loopback by default. For all interfaces use "-b 0.0.0.0" or "-b ::".
+Serving /Users/ada/site and subdirectories on 127.0.0.1 port 8765
+URL http://127.0.0.1:8765/
+127.0.0.1 - - [09/Oct/2026:09:53:51 +0530] "GET /index.html HTTP/1.1" 200 -
+```
+
+it's HTTP/1.1 only, serves files and nothing else, and deliberately has no TLS. not for production, and it says so.
+
+<Deep title="why HttpClient and not HttpURLConnection">
+`HttpURLConnection` dates from java 1.1: one blocking call per request, a mutable object you configure by side effect, no HTTP/2, a `URL`-based API that throws `IOException` for a 404 when you read the body, and handlers chosen through global factories. `HttpClient` was written from scratch on NIO, incubated in java 9 and became standard in java 11 ([JEP 321](https://openjdk.org/jeps/321)). it's immutable, async-first, HTTP/2 native, and uses the `Flow` reactive-streams interfaces for bodies, which is why you can stream a gigabyte download into a file without holding it in memory (`BodyHandlers.ofFile(path)`).
+</Deep>
+
+<Interview q="how do you make 100 http calls in parallel in java?">
+with one shared `HttpClient`: either `sendAsync` for each and combine the futures with `CompletableFuture.allOf`, or a virtual thread per call doing a blocking `send` (java 21+). both reuse pooled connections, and with HTTP/2 the calls to one host multiplex over a single connection. bonus point: set a request `timeout` (there's none by default), check `statusCode()` because 4xx and 5xx don't throw, and cap concurrency (a `Semaphore`) so you don't flood the server.
+</Interview>
+
+<Keylines>
+- `HttpRequest` is immutable, `HttpClient` is thread-safe with a pool: build one, reuse it.
+- a `BodyHandler` decides what the body becomes: string, bytes, file, lines, stream.
+- `send` blocks, `sendAsync` returns a `CompletableFuture`. virtual threads make blocking `send` cheap too.
+- HTTP/2 is the default; HTTP/3 (java 26, JEP 517) is opt-in.
+- 404s don't throw, and there's no default timeout. check status, set timeouts.
+</Keylines>

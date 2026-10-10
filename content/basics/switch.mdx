@@ -1,0 +1,151 @@
+import { SwitchFallthrough } from "@/components/figures/basics/SwitchFallthrough";
+import { SwitchExhaustive } from "@/components/figures/basics/SwitchExhaustive";
+
+<InShort>
+`switch` picks one branch by matching a value against **cases**. the old colon form **falls through** from one case into the next unless you `break`. the arrow form (`case X ->`) runs exactly one arm, and as a **switch expression** it produces a value, and the compiler checks you've covered every input. prefer arrows.
+</InShort>
+
+## the picture
+
+an `if / else if` chain asks a question at every step. a `switch` is more like a train station departure board: look up the value once, go straight to the matching platform.
+
+java has two kinds of switch that look almost the same and behave very differently. the old one is from 1996 and copies C, fallthrough and all. the new one arrived in java 14 ([JEP 361](https://openjdk.org/jeps/361)) and fixes it.
+
+## fallthrough, the old trap
+
+in the colon form, `case "sat":` is just a **label**: a place to jump to. once execution lands there, it runs every line below it, straight through the next `case` labels, until it hits a `break` or the end of the switch.
+
+<Figure wide caption={<>pick a day. on the left, the lines that run are <C k="hot">amber</C>, and the ones that only run because of the missing <code>break</code> are <C k="dead">red</C>. on the right, the arrow version runs one <C k="live">arm</C> and stops. both outputs were checked on jdk 25.</>}>
+<SwitchFallthrough />
+</Figure>
+
+fallthrough is occasionally what you want (that's how `case "sat":` and `case "sun":` share one body), but forgetting a `break` is far more common than wanting one. it's been a top bug in C-family languages for fifty years.
+
+## the arrow form
+
+```java title="Main.java" run output="sat weekend\nfri almost\nmon weekday"
+void main() {
+    for (String day : new String[] {"sat", "fri", "mon"}) {
+        String type = switch (day) {
+            case "sat", "sun" -> "weekend";
+            case "fri" -> "almost";
+            default -> "weekday";
+        };
+        IO.println(day + " " + type);
+    }
+}
+```
+
+three upgrades in one:
+
+- **no fallthrough.** each `->` arm runs on its own. no `break` needed, ever.
+- **several labels per case:** `case "sat", "sun" ->`.
+- **it's an expression.** the whole `switch` has a value you can assign, return or pass, instead of setting a variable in every branch.
+
+when an arm needs more than one line, give it a block and say which value it produces with `yield`:
+
+```java title="Main.java" run output="not found: /missing"
+void main() {
+    int code = 404;
+    String msg = switch (code) {
+        case 200 -> "ok";
+        case 404 -> {
+            String path = "/missing";
+            yield "not found: " + path;
+        }
+        default -> "status " + code;
+    };
+    IO.println(msg);
+}
+```
+
+(`yield` instead of `return`, because `return` would leave the whole method.)
+
+## covering every case
+
+a switch *expression* has to produce a value for every possible input, so the compiler checks. for an enum, listing every constant counts as complete, no `default` needed.
+
+<Figure wide caption={<>toggle the cases and switch between an expression and a statement. the error is the one javac 25 prints. the old-style statement compiles no matter what you leave out: unmatched values just fall out the bottom.</>}>
+<SwitchExhaustive />
+</Figure>
+
+this is the quiet superpower of switch expressions: add `XL` to the enum next year, and every switch expression that forgot it becomes a compile error instead of a silent bug. (that's also why it's often better to leave out `default` on enums: a default would catch `XL` and hide it.)
+
+<Predict options={['"weekend"', '"almost"', '"weekday"']} answer={1}>
+```java
+String day = "sun";
+String type = "?";
+switch (day) {
+    case "sat":
+    case "sun":
+        type = "weekend";
+    case "fri":
+        type = "almost";
+        break;
+    default:
+        type = "weekday";
+}
+IO.println(type);
+```
+<Explain>
+`"almost"`. execution jumps to `case "sun":`, sets `"weekend"`, and with no `break` it keeps going into `case "fri":` and overwrites it. the arrow form can't make this mistake.
+</Explain>
+</Predict>
+
+## what you can switch on
+
+| type | since |
+| --- | --- |
+| `int`, `short`, `byte`, `char` (and their wrappers) | always |
+| enums | java 5 |
+| `String` | java 7 (compared with `equals`, after a `hashCode` check) |
+| any object, with type patterns: `case Integer i when i > 40 ->` | java 21 ([pattern matching](/learn/modern/pattern-matching)) |
+| `long`, `float`, `double`, `boolean` | preview only, still in 27 |
+
+```java title="Main.java" run output="big int 42"
+void main() {
+    Object o = 42;
+    String d = switch (o) {
+        case Integer i when i > 40 -> "big int " + i;
+        case Integer i -> "int " + i;
+        case String s -> "string of length " + s.length();
+        default -> "something else";
+    };
+    IO.println(d);
+}
+```
+
+that last form is a different beast: it checks the **type** of the value, binds it to a variable, and can add a `when` condition. it gets its own chapter in [pattern matching](/learn/modern/pattern-matching).
+
+<Gotcha title="switching on null">
+`switch` on a `null` String or enum throws `NullPointerException` before any case is checked, even with a `default`. since java 21 you can handle it explicitly with `case null ->` (it only works in the new style). otherwise, check for null first.
+</Gotcha>
+
+<Deep title="how a switch compiles">
+for `int` cases, javac emits one of two bytecode instructions. when the cases are dense (1, 2, 3), it uses `tableswitch`: an array of jump targets indexed by the value, one bounds check and one jump, no matter how many cases. when they're sparse (1, 1000, 1000000), it uses `lookupswitch`: a sorted list of keys the JVM can binary-search. you can see both with `javap -c`. a `String` switch compiles to a switch on `hashCode()` first, then an `equals` check to rule out collisions, then a second switch on the result:
+
+<Figure caption="hover a stage. what javac 25 emits for switch (day) { case &quot;sat&quot; ... case &quot;sun&quot; ... }, read off javap -c.">
+<Flow
+  stages={[
+    { label: "day.hashCode()", sub: "one int", note: "every string has a hash. two different strings can share one, so this alone can't decide." },
+    { label: "lookupswitch", sub: "on the hash", note: "jump straight to the cases whose label has this hash." },
+    { label: "equals", sub: "confirm", note: "check the actual text, to rule out a hash collision. a match sets a small index." },
+    { label: "switch #2", sub: "on the index", note: "a second switch on that index jumps to your case's code." },
+  ]}
+/>
+</Figure>
+
+all of which is why a switch can be faster than a long `if / else if` chain, though the JIT often makes the difference disappear.
+</Deep>
+
+<Interview q="what's the difference between a switch statement and a switch expression?">
+a statement does something; an expression produces a value (`String x = switch (...) {...};`). expressions use arrows or `yield`, never fall through, and must be exhaustive: the compiler rejects one that doesn't cover every input. arrows also work in statements (no fallthrough there either), but only expressions, and switches with patterns or `case null`, are checked for exhaustiveness. since java 21 both can match on types with patterns.
+</Interview>
+
+<Keylines>
+- old colon `case`s are labels: execution falls through until a `break`.
+- arrow `case X ->` runs one arm. no fallthrough, no break.
+- a switch expression produces a value. use `yield` to return one from a block.
+- switch expressions must be exhaustive, and the compiler checks. enums don't need a default.
+- switch on a null throws, unless there's a `case null` (java 21+).
+</Keylines>

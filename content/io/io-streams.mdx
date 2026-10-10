@@ -1,0 +1,271 @@
+import { DecoratorOnion } from "@/components/figures/io/DecoratorOnion";
+import { BufferMeter } from "@/components/figures/io/BufferMeter";
+
+<InShort>
+an **InputStream** hands you bytes, a **Reader** hands you chars (bytes run through a charset). real code never uses just one: it stacks them, each layer wrapping the next and adding exactly one thing (a buffer, a charset, a way to read an `int`). that stack is the **decorator** pattern, and it's the whole design of `java.io`.
+</InShort>
+
+## the picture
+
+you know that line everyone copies from stack overflow, `new BufferedReader(new InputStreamReader(new FileInputStream(f)))`? three constructors deep, just to read a file. kinda cursed. but every layer is doing a different job, and once you see the jobs it stops looking silly.
+
+think of plumbing. the file is the water main (raw bytes, whatever's in the pipe). `FileInputStream` is the tap (the only part connected to the outside world, the OS). `InputStreamReader` is a filter screwed onto the tap (turns bytes into chars using a charset). `BufferedReader` is a tank on top (fills up in big gulps so you can take a cup at a time). you drink from the outermost piece. it pulls from the one inside it, which pulls from the one inside that.
+
+<Figure wide caption={<>step through three <code>readLine()</code> calls on a real 5-byte file. watch the <C k="hot">active layer</C>, and watch the syscall counter not move on step 8: that line was <C k="live">already in the buffer</C>.</>}>
+<DecoratorOnion />
+</Figure>
+
+here's the code that figure is running. it really does print what the stepper says:
+
+```java title="Main.java" run output="hi (2 chars)\né (1 chars)"
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+
+void main() throws IOException {
+    Path file = Files.createTempFile("onion", ".txt");
+    Files.write(file, new byte[] { 0x68, 0x69, 0x0a, (byte) 0xc3, (byte) 0xa9 });
+
+    try (var in = new BufferedReader(
+            new InputStreamReader(
+                new FileInputStream(file.toFile()), StandardCharsets.UTF_8))) {
+        String line;
+        while ((line = in.readLine()) != null) {
+            IO.println(line + " (" + line.length() + " chars)");
+        }
+    }
+    Files.delete(file);
+}
+```
+
+5 bytes in, 4 chars out, 2 lines. `é` took two bytes and became one char. that gap between bytes and chars gets its own chapter: [charsets and encoding](/learn/io/charsets-and-encoding).
+
+## two families
+
+`java.io` is two parallel trees. **byte streams** (`InputStream`, `OutputStream`) move raw `byte`s and don't care what they mean: images, zip files, class files, network packets. **char streams** (`Reader`, `Writer`) move `char`s and always have a charset somewhere underneath doing the translation.
+
+<Figure caption={<>click a node to fold it. sources (they produce bytes from somewhere) sit at the top of each tree. everything under <code>Filter...</code> or with <code>Buffered</code> in the name is a decorator: it needs another stream to wrap. the two <C k="hot">bridges</C> are where bytes become chars.</>}>
+<Tree>{`
+InputStream                      // bytes in
+    FileInputStream              // a file on disk
+    ByteArrayInputStream         // a byte[] in memory
+    FilterInputStream            // base class for decorators
+        BufferedInputStream      // adds a buffer
+        DataInputStream          // adds readInt, readDouble...
+    ObjectInputStream            // whole objects. see serialization
+    SequenceInputStream          // glues streams end to end
+Reader                           // chars in
+    InputStreamReader #hot       // bridge: bytes → chars
+        FileReader               // InputStreamReader over a file
+    BufferedReader               // adds a buffer and readLine()
+    StringReader                 // a String in memory
+OutputStream                     // bytes out
+    FileOutputStream
+    ByteArrayOutputStream
+    FilterOutputStream
+        BufferedOutputStream
+        DataOutputStream
+        PrintStream              // System.out. swallows exceptions
+Writer                           // chars out
+    OutputStreamWriter #hot      // bridge: chars → bytes
+        FileWriter
+    BufferedWriter
+    PrintWriter
+    StringWriter
+`}</Tree>
+</Figure>
+
+the rule for picking one is short:
+
+| you have | use |
+| --- | --- |
+| text, and you know the charset | `Reader` / `Writer` (and say the charset out loud) |
+| anything that isn't text | `InputStream` / `OutputStream` |
+| text, but you're just copying it somewhere | bytes. decoding and re-encoding for nothing is wasted work |
+
+<Defs>
+<dt>source / sink</dt><dd>a stream that talks to something real: a file, a socket, a byte array. you can't wrap one around another stream.</dd>
+<dt>decorator</dt><dd>a stream whose constructor takes another stream. it forwards every call and adds one behaviour on the way.</dd>
+<dt>bridge</dt><dd>`InputStreamReader` and `OutputStreamWriter`: the only places a byte stream becomes a char stream (or back). the charset lives here.</dd>
+</Defs>
+
+## the read loop
+
+the most basic call there is: `int read()`. one byte, please. it returns an `int`, not a `byte`, and that's not an accident.
+
+```java title="Main.java" run output="65 255 10 | then -1"
+import java.io.*;
+
+void main() throws IOException {
+    var in = new ByteArrayInputStream(new byte[] { 65, -1, 10 });
+    int b;
+    while ((b = in.read()) != -1) {
+        IO.print(b + " ");
+    }
+    IO.println("| then " + in.read());
+}
+```
+
+see the `255`? the byte was `-1` (all eight bits set, `0xFF`), but `read()` hands it back as an unsigned value from 0 to 255. that leaves `-1` free to mean one thing only: "the stream is over". if `read()` returned a `byte`, a file containing `0xFF` would look exactly like the end of the file.
+
+<Predict options={["it prints nothing", "it loops forever", "it stops at the first 0xFF byte"]} answer={2}>
+```java
+byte b;
+while ((b = (byte) in.read()) != -1) {
+    out.write(b);
+}
+```
+<Explain>
+casting to `byte` throws away the distinction `read()` worked so hard to keep. a real `0xFF` byte comes back as `255`, the cast turns it into `-1`, and the loop thinks the stream is over. images and zip files are full of `0xFF`, so this "works" on text files and silently truncates everything else. (and at the real end of the stream, `-1` still casts to `-1`, so it doesn't loop forever.)
+</Explain>
+</Predict>
+
+the bulk version, `read(byte[] buf)`, fills as much of the array as it can and returns how many bytes it actually put there. **it can be fewer than you asked for**, even mid-file (sockets do this all the time). so the loop always uses the count:
+
+```java title="Copy.java"
+byte[] buf = new byte[8192];
+int n;
+while ((n = in.read(buf)) != -1) {
+    out.write(buf, 0, n);   // only the first n bytes are new
+}
+```
+
+you rarely write that loop anymore: `in.transferTo(out)` <Since v={9} /> does exactly this.
+
+## why buffering matters
+
+a `FileInputStream` has no memory. every `read()` goes down into the OS as a system call, and a system call is expensive: the CPU switches into the kernel, does the work, and switches back. read a file one byte at a time with no buffer and you pay that toll once per byte.
+
+`BufferedInputStream` fixes it with one array. the first `read()` asks the stream inside for 8192 bytes in one go, and the next 8191 `read()`s are just array lookups.
+
+<Figure caption={<>pick a buffer size. the counts are real (a counting wrapper around the source) and so are the times: median of 9 runs reading a 1 MiB temp file byte by byte, jdk 25 on an M4 Pro. no buffer is about <C k="dead">85× slower</C> than the default.</>}>
+<BufferMeter />
+</Figure>
+
+notice the curve flattens fast. going from 512 bytes to 64 KiB barely moves the time, because the syscalls are already rare and what's left is the cost of calling `read()` a million times. the fix for that is reading in chunks yourself (`read(byte[])`, `readAllBytes()`), or dropping down to [buffers and channels](/learn/io/buffers-and-channels).
+
+<Compare>
+<Bad label="a syscall per byte">
+```java
+try (var in = new FileInputStream(f)) {
+    int b;
+    while ((b = in.read()) != -1) count(b);
+}
+```
+</Bad>
+<Good label="one syscall per 8 KiB">
+```java
+try (var in = new BufferedInputStream(
+        new FileInputStream(f))) {
+    int b;
+    while ((b = in.read()) != -1) count(b);
+}
+```
+</Good>
+</Compare>
+
+## closing and flushing
+
+closing the outermost layer closes everything inside it. that's the other reason the onion works: you hold one reference, you close one thing. use [try-with-resources](/learn/core-api/try-with-resources) and stop thinking about it.
+
+output buffers have the opposite problem. a `BufferedWriter` holds your text in memory until the buffer fills, you call `flush()`, or you `close()`. until then, the file doesn't have it.
+
+```java title="Main.java" run output="before flush: 0 bytes\nafter flush:  17 bytes"
+import java.io.*;
+import java.nio.file.*;
+
+void main() throws IOException {
+    Path file = Files.createTempFile("log", ".txt");
+
+    var out = new BufferedWriter(new FileWriter(file.toFile()));
+    out.write("order 42 shipped\n");
+    IO.println("before flush: " + Files.size(file) + " bytes");
+
+    out.flush();
+    IO.println("after flush:  " + Files.size(file) + " bytes");
+
+    out.close();
+    Files.delete(file);
+}
+```
+
+<Gotcha title="the program exited and the file is empty">
+forget to close a buffered writer and the last chunk of output just never gets written. the JVM does not flush your buffers on exit. classic symptom: a log or a csv that's missing its last few lines, or is 0 bytes when it's small. try-with-resources makes this impossible to forget.
+
+second trap: `PrintStream` and `PrintWriter` (that's `System.out`) **never throw** `IOException`. they swallow it and set an internal flag you have to poll with `checkError()`. great for console output, terrible for writing a file you care about.
+</Gotcha>
+
+<Gotcha title="FileReader used to guess the charset">
+`new FileReader(file)` decodes with the platform default charset. before java 18 that was whatever the OS felt like (windows-1252 on a lot of windows machines), so the same program read the same file differently on different laptops. since java 18 the default is UTF-8 everywhere ([JEP 400](https://openjdk.org/jeps/400)). still, pass the charset explicitly: `new FileReader(file, StandardCharsets.UTF_8)` <Since v={11} />.
+</Gotcha>
+
+## the shortcuts you actually use
+
+most code today never builds the onion by hand. the JDK grew one-liners for the common jobs, and they pick sane defaults (UTF-8, a buffer, closing for you):
+
+| job | call | since |
+| --- | --- | --- |
+| a whole file as a `String` | `Files.readString(path)` | 11 |
+| a file as lines | `Files.readAllLines(path)` / `Files.lines(path)` | 8 |
+| a buffered reader on a file | `Files.newBufferedReader(path)` | 8 |
+| copy a stream into another | `in.transferTo(out)` | 9 |
+| everything left in a stream | `in.readAllBytes()` | 9 |
+| a `Reader` over a `String` | `Reader.of(text)` | 24 |
+| everything left in a reader | `reader.readAllAsString()` | 25 |
+| a line from the console | `IO.readln("name? ")` | 25 |
+
+```java title="Main.java" run output="14 bytes: hello, streams"
+import java.io.*;
+
+void main() throws IOException {
+    var in = new ByteArrayInputStream("hello, streams".getBytes());
+    var out = new ByteArrayOutputStream();
+    long n = in.transferTo(out);
+    IO.println(n + " bytes: " + out);
+}
+```
+
+the `Files` side of this (paths, walking directories, watching for changes) is in [files and paths](/learn/io/files-and-paths). console input and `printf` are in [reading and printing](/learn/basics/console-io).
+
+<Deep title="DataOutputStream: the decorator that writes numbers">
+streams only know bytes. `DataOutputStream` adds "write this `int`" on top, as 4 big-endian bytes. it's how binary formats get written by hand, and it's the bottom layer of [serialization](/learn/io/serialization).
+
+```java title="Main.java" run output="17 bytes: 00 00 03 e8 3f e0 00 00 00 00 00 00 00 03 68 c3 a9\n1000 0.5 hé"
+import java.io.*;
+
+void main() throws IOException {
+    var bytes = new ByteArrayOutputStream();
+    try (var out = new DataOutputStream(bytes)) {
+        out.writeInt(1000);
+        out.writeDouble(0.5);
+        out.writeUTF("hé");
+    }
+    byte[] raw = bytes.toByteArray();
+    IO.println(raw.length + " bytes: " + java.util.HexFormat.ofDelimiter(" ").formatHex(raw));
+
+    try (var in = new DataInputStream(new ByteArrayInputStream(raw))) {
+        IO.println(in.readInt() + " " + in.readDouble() + " " + in.readUTF());
+    }
+}
+```
+
+`00 00 03 e8` is 1000. `3f e0 00 ...` is the IEEE 754 bits of 0.5 (see [floating point](/learn/basics/floating-point)). `writeUTF` writes a 2-byte length (`00 03`) and then the string in a slightly modified UTF-8. there's no type information anywhere: read them back in a different order and you get garbage, not an error.
+</Deep>
+
+## why not one big class?
+
+because the combinations explode. buffered or not, × which charset, × reading numbers or lines, × file or socket or byte array or zip entry. one class per combination would be hundreds of classes. with decorators it's one class per *feature*, and you compose them like lego. the same `BufferedReader` works on a file, a socket, a gzip stream or a `String`, because all it needs is "a `Reader` inside me".
+
+the price is the onion syntax, and having to know which layer does what. which is this whole chapter :)
+
+<Interview q="what design pattern is java.io built on, and why?">
+the decorator pattern. every `FilterInputStream` or `BufferedReader` wraps another stream of the same base type and adds one behaviour (buffering, decoding, primitives, compression) while forwarding everything else. it avoids a subclass for every combination of features, and lets you stack them at runtime. bonus point: `InputStreamReader` is also an adapter, since it turns one interface (bytes) into another (chars). and closing the outer decorator closes the whole chain.
+</Interview>
+
+<Keylines>
+- `InputStream` / `OutputStream` move bytes. `Reader` / `Writer` move chars, with a charset underneath.
+- each wrapper adds one thing: a buffer, a charset, numbers. you read from the outside, it pulls from the inside.
+- `read()` returns an `int` so that `-1` can mean "done" and `255` can still be a byte.
+- unbuffered byte-by-byte reads are a syscall each. wrap it, or read in chunks.
+- close the outer layer (try-with-resources). unflushed output is lost output.
+</Keylines>

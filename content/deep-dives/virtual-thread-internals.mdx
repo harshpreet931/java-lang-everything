@@ -1,0 +1,187 @@
+import { MountStepper } from "@/components/figures/deep-dives/MountStepper";
+import { VtStates } from "@/components/figures/deep-dives/VtStates";
+
+<InShort>
+a virtual thread is three things: a `java.lang.VirtualThread` object, a **continuation** (a piece of code you can pause and resume), and a **scheduler** (a `ForkJoinPool` of carrier threads). **mount** means running the continuation on a carrier. when it blocks, the continuation **yields**: its frames are frozen into a **StackChunk** object on the heap and the carrier moves on.
+
+if the frames can't be moved (a VM frame like a class initializer, or native code on the stack), the thread blocks on its carrier instead. that's **pinning**.
+</InShort>
+
+## the picture
+
+you know how [virtual threads](/learn/concurrency/virtual-threads) make blocking "cheap", and that sounds like it can't possibly be true? the trick is that nothing actually blocks. the thread's stack gets packed up and put away, and the OS thread underneath goes off to do something else.
+
+think of reading at a library with only a few desks. you don't own a desk (a carrier). when you have to wait for a book from the stacks (I/O), you put a bookmark in, pack your notes into a folder on the shelf (the heap), and give the desk to someone else. when the book arrives, you take any free desk, open the folder, and carry on from the bookmark. the bookmark is the continuation. the folder is the stack chunk.
+
+## a continuation, by hand
+
+the JDK has the primitive itself, `jdk.internal.vm.Continuation`. it's internal (you need `--add-exports` to touch it, and you should never use it in real code), but it shows the whole idea in a dozen lines: `run()` runs until the code calls `yield`, and the next `run()` picks up right after that `yield`, locals and all.
+
+```java title="Gen.java"
+import jdk.internal.vm.Continuation;
+import jdk.internal.vm.ContinuationScope;
+
+// the primitive under every virtual thread: a function you can pause and resume.
+public class Gen {
+    public static void main(String[] args) {
+        var scope = new ContinuationScope("demo");
+        var c = new Continuation(scope, () -> {
+            for (int i = 1; i <= 3; i++) {
+                System.out.println("  inside:  step " + i);
+                Continuation.yield(scope);          // freeze the frames, return from run()
+            }
+            System.out.println("  inside:  done");
+        });
+        while (!c.isDone()) {
+            System.out.println("outside: run()");
+            c.run();                                // thaw the frames, continue after yield
+        }
+    }
+}
+```
+
+<Predict options={["1", "3", "4", "an exception: you can't call run() twice"]} answer={2} question="running it with java --add-exports java.base/jdk.internal.vm=ALL-UNNAMED Gen.java, how many times does it print outside: run()?">
+<Explain>
+4. the first `run()` prints step 1 and yields. the second resumes inside the loop with `i` still 1, increments it, prints step 2, yields. the third prints step 3. the fourth resumes after the last yield, leaves the loop, prints done, and the lambda returns, so `isDone()` turns true. the real output on jdk 25 is exactly that: `outside: run()` and `inside: step 1` alternating, ending with `inside: done`. the loop variable survived three trips off the stack and back.
+</Explain>
+</Predict>
+
+a virtual thread is that, plus a scheduler that calls `run()` for you on whichever carrier is free, plus a `LockSupport.park()` that calls `yield` instead of blocking the OS thread. every blocking API in the JDK ends in a yield: sockets, `Thread.sleep`, locks and `BlockingQueue` through that park, and monitors (since java 24) through the JVM itself.
+
+## mounting and unmounting
+
+<Figure wide caption={<>step through it. three virtual threads, two carriers. a blocked thread's frames move to a <C k="meta">StackChunk</C> on the heap and the carrier picks up someone else. the last step is <C k="dead">pinning</C>: a frame that can't be frozen, so the carrier is stuck.</>}>
+<MountStepper />
+</Figure>
+
+freezing is a memory copy: the frames between the continuation's entry point and the `yield` are copied off the carrier's stack into a `StackChunk`. thawing copies them back, but lazily: only the top frames go back eagerly, and a "return barrier" thaws the next ones as the code returns into them. so mounting a thread that's 500 frames deep doesn't copy 500 frames, which is what keeps it cheap.
+
+stack chunks are ordinary heap objects. the GC traces them like any other object (with a special walker that knows where the references are inside the frames), so a parked virtual thread's locals keep their objects alive, exactly like a platform thread's stack does.
+
+## the state machine
+
+`VirtualThread` keeps one `int` of state, and every mount, park and wake-up is a transition with a compare-and-set. here's the park path, with the method that makes each move:
+
+<Figure wide caption={<>step through a normal park, then switch to a pinned one. rounded pills are unmounted states, square boxes are states where the thread holds a carrier. the only difference between the two paths is whether <code>yieldContinuation()</code> returned true.</>}>
+<VtStates />
+</Figure>
+
+stripped of JVMTI hooks and timeouts, the heart of it is this (paraphrased from jdk 25's `VirtualThread.park()`):
+
+```java
+void park() {
+    if (parkPermitAvailable() || interrupted) return;  // nothing to wait for
+    setState(PARKING);
+    boolean yielded = yieldContinuation();   // freeze to the heap, free the carrier
+    if (!yielded) {                          // couldn't freeze: pinned
+        setState(RUNNING);
+        parkOnCarrierThread();               // block the carrier itself
+    }
+}
+```
+
+that `if (!yielded)` is the entire difference between a virtual thread and a platform thread in a trench coat.
+
+## what a parked thread costs
+
+i parked 10,000 virtual threads at different stack depths and asked `jcmd GC.class_histogram` what they cost. besides the chunk, every thread is a `VirtualThread` (168 bytes) and its continuation (72 bytes in two objects).
+
+<Figure caption={<>heap per parked virtual thread on jdk 25 (StackChunk plus 240 bytes of thread and continuation objects), averaged over 10,000. the frames were JIT-compiled, so about 17 bytes per extra frame; interpreted frames are bigger. the platform thread is resident memory per idle thread from <a href="/learn/gc/native-memory">native memory</a>, plus a 2 MB stack reserved.</>}>
+<Bars
+  unit="KB"
+  log
+  data={[
+    { label: "virtual, shallow stack", value: 1.5, tone: "live" },
+    { label: "virtual, 100 frames deep", value: 3.3 },
+    { label: "virtual, 1,000 frames deep", value: 18.0 },
+    { label: "platform thread, idle", value: 100, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+a deep stack still costs memory, it just costs heap instead of an OS thread. and heap is collected, resized and visible in a heap dump, which a thread stack never was.
+
+## the scheduler
+
+the default scheduler is a `ForkJoinPool` in FIFO mode (`asyncMode = true`), separate from the [common pool](/learn/concurrency/fork-join). you can ask a running JVM about it:
+
+```text title="jcmd <pid> Thread.vthread_scheduler" nolines
+java.util.concurrent.ForkJoinPool@7e59d0b1[Running, parallelism = 14, size = 14, active = 0, running = 0, steals = 10293, tasks = 0, submissions = 0, delayed = 10000]
+```
+
+that's a program with 10,000 virtual threads in `Thread.sleep` and 100 blocked on socket reads, on a 14-core mac. 14 carriers, none of them busy. the 10,000 sleepers are `delayed` tasks: on jdk 25, `ForkJoinPool` implements `ScheduledExecutorService` itself, and a sleeping virtual thread is just a wake-up task scheduled in its pool. the socket readers are somewhere else:
+
+```text title="jcmd <pid> Thread.vthread_pollers" nolines
+Read I/O pollers:
+[0] sun.nio.ch.KQueuePoller@5d666d5b [registered = 100, owner = Thread[#10141,Read-Poller,5,InnocuousThreadGroup]]
+
+Write I/O pollers:
+[0] sun.nio.ch.KQueuePoller@7f51c72b [registered = 0, owner = Thread[#10142,Write-Poller,5,InnocuousThreadGroup]]
+```
+
+a socket read with no data registers the socket with a poller (kqueue on macOS, epoll on linux) and parks. one `Read-Poller` platform thread waits on all 100 sockets at once and unparks each thread when its socket is ready. the knobs, all system properties read once at startup:
+
+| property | default | what it does |
+| --- | --- | --- |
+| `jdk.virtualThreadScheduler.parallelism` | number of cores | carriers that run at the same time |
+| `jdk.virtualThreadScheduler.maxPoolSize` | max(parallelism, 256) | ceiling when the pool adds carriers to compensate for blocking file I/O or pinning |
+| `jdk.virtualThreadScheduler.minRunnable` | max(parallelism / 2, 1) | how few runnable carriers the pool tolerates before compensating |
+
+<Gotcha title="virtual threads are never preempted">
+the scheduler has no time slicing. a virtual thread gives its carrier back only when it parks. a virtual thread spinning in a CPU loop holds its carrier until the loop ends, and if every carrier is doing that, every other virtual thread waits, no matter how many there are. that's why virtual threads are for code that waits, not code that computes.
+</Gotcha>
+
+## pinning, caught in the act
+
+java 24 ([JEP 491](https://openjdk.org/jeps/491)) taught monitors to work with virtual threads: blocking to enter a `synchronized` block, holding one while you block, and `Object.wait()` all unmount now. what still pins, per the JEP: blocking inside a class initializer, waiting for another thread to initialize a class, blocking while the JVM resolves (loads) a class, and native code (JNI or a foreign function) that calls back into java which then blocks. here's the first one:
+
+```java title="Pin.java"
+public class Pin {
+    static class Config {
+        static final String VALUE = load();
+        static String load() {
+            try { Thread.sleep(200); } catch (InterruptedException e) { }   // slow init: a file, a network call...
+            return "loaded";
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Thread.ofVirtual().start(() -> System.out.println(Config.VALUE)).join();
+    }
+}
+```
+
+run it with flight recorder on, and JFR names the reason:
+
+```text title="java -XX:StartFlightRecording=filename=pin.jfr Pin.java; jfr print --events jdk.VirtualThreadPinned pin.jfr" nolines
+jdk.VirtualThreadPinned {
+  duration = 210 ms
+  blockingOperation = "LockSupport.park"
+  pinnedReason = "VM call to Pin$Config.<clinit> on stack"
+  carrierThread = "ForkJoinPool-1-worker-1" (javaThreadId = 31)
+  eventThread = "" (javaThreadId = 30, virtual)
+  stackTrace = [
+    java.lang.VirtualThread.parkOnCarrierThread(boolean, long) line: 833
+    java.lang.VirtualThread.parkNanos(long) line: 801
+    java.lang.VirtualThread.sleepNanos(long) line: 983
+    ...
+```
+
+`<clinit>` is called by the JVM, not by java code, so there's a VM frame in the middle of the stack that freeze can't copy. the event fires for pins longer than 20 ms by default. for one slow config class at startup it doesn't matter. for a static initializer that every request might trigger, behind a 1-carrier scheduler in a small container, it does.
+
+<Deep title="why not just make the JVM preempt and move native frames too?">
+a native frame holds raw pointers into itself (C code can take the address of a local and store it anywhere), so its memory can't be moved without breaking them. java frames are different: the JIT and interpreter know exactly where every reference and every saved value lives, which is what lets freeze copy them and the GC walk them in a chunk. class initialization is pinned because the JVM's own C++ code for running `<clinit>` is on the stack. JEP 491 removed the biggest case (monitors were implemented in C++ too, and had to be rewritten so a monitor's owner can be a virtual thread rather than a carrier).
+</Deep>
+
+<Interview q="how are virtual threads implemented in the JVM?">
+a virtual thread is a `Thread` subclass that wraps a continuation and is scheduled on a `ForkJoinPool` of platform carrier threads. to run, a carrier mounts it: sets it as the current thread and runs the continuation. when the code blocks, the JDK's blocking primitives call `LockSupport.park`, which for a virtual thread yields the continuation: its stack frames are copied into a `StackChunk` object on the heap and the carrier returns to the pool. sockets are registered with a poller thread that unparks the thread when data arrives; sleeps are scheduled as delayed tasks. on resume, any carrier mounts it and thaws the frames, lazily. if the frames can't be frozen (a native or VM frame such as a class initializer), it pins: blocks the carrier instead, which JFR reports as `jdk.VirtualThreadPinned`. there's no preemption; a thread only gives up its carrier when it parks.
+</Interview>
+
+<Keylines>
+- virtual thread = `VirtualThread` + `Continuation` + a FIFO `ForkJoinPool` of carriers.
+- blocking means park, park means yield: frames frozen into a heap `StackChunk`, carrier freed.
+- thaw is lazy: the top frames eagerly, the rest as the code returns into them.
+- a parked thread costs about 1.5 KB of heap when shallow, more per frame. a platform thread, ~100 KB of RAM.
+- since java 24 monitors don't pin. class initializers and native frames still do. JFR shows each one.
+- no time slicing: a CPU-bound virtual thread keeps its carrier until it parks.
+</Keylines>

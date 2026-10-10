@@ -1,0 +1,168 @@
+import { FibTree } from "@/components/figures/basics/FibTree";
+
+export const fact = {
+  file: "Main.java",
+  source: `public class Main {
+    static int factorial(int n) {
+        if (n <= 1) {
+            return 1;
+        }
+        return n * factorial(n - 1);
+    }
+
+    public static void main(String[] args) {
+        int result = factorial(4);
+        System.out.println("4! = " + result);
+    }
+}`,
+  steps: [
+    {"line": 10, "frames": [{"name": "main", "locals": {}}], "heap": {}, "note": "main calls factorial(4)."},
+    {"line": 3, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}], "heap": {}, "note": "factorial(4) gets a frame. is n <= 1? no."},
+    {"line": 6, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}], "heap": {}, "note": "so the answer is 4 * factorial(3). it can't multiply yet, it needs that answer first. so it calls itself."},
+    {"line": 3, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}], "heap": {}, "note": "a second frame for the same method, with its own n = 3. the first frame is paused halfway through line 6."},
+    {"line": 6, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}], "heap": {}},
+    {"line": 3, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}, {"name": "factorial(2)", "locals": {"n": 2}}], "heap": {}, "note": "a third frame, n = 2. same code, another copy of the locals."},
+    {"line": 6, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}, {"name": "factorial(2)", "locals": {"n": 2}}], "heap": {}},
+    {"line": 3, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}, {"name": "factorial(2)", "locals": {"n": 2}}, {"name": "factorial(1)", "locals": {"n": 1}}], "heap": {}, "note": "a fourth frame, n = 1. four calls to factorial are alive at once, each waiting for the one above it."},
+    {"line": 4, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}, {"name": "factorial(2)", "locals": {"n": 2}}, {"name": "factorial(1)", "locals": {"n": 1}}], "heap": {}, "note": "n <= 1: the base case. no more calls. return 1."},
+    {"line": 6, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}, {"name": "factorial(2)", "locals": {"n": 2}}], "heap": {}, "note": "factorial(1) is popped. factorial(2) gets its answer and finishes the multiplication: 2 * 1 = 2."},
+    {"line": 6, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}, {"name": "factorial(3)", "locals": {"n": 3}}], "heap": {}, "note": "returns 2. factorial(3) can now do 3 * 2 = 6."},
+    {"line": 6, "frames": [{"name": "main", "locals": {}}, {"name": "factorial(4)", "locals": {"n": 4}}], "heap": {}, "note": "returns 6. factorial(4) does 4 * 6 = 24."},
+    {"line": 10, "frames": [{"name": "main", "locals": {}}], "heap": {}, "note": "back in main with 24. the stack unwound in exactly the reverse order it was built."},
+    {"line": 11, "frames": [{"name": "main", "locals": {"result": 24}}], "heap": {}},
+    {"line": 12, "frames": [{"name": "main", "locals": {"result": 24}}], "heap": {}, "stdout": "4! = 24\n", "note": "done."},
+  ],
+};
+
+<InShort>
+every method call pushes a **frame** onto the **call stack**, and every return pops one: last in, first out. **recursion** is a method calling itself, which works because each call gets its own frame. it needs a **base case** to stop, and java will **not** turn deep recursion into a loop for you, so very deep recursion ends in `StackOverflowError`.
+</InShort>
+
+## the picture
+
+a stack of plates. you can only put a plate on top, and only take the top one off. a method call puts a plate on (with that call's local variables written on it), and returning takes it off. whatever plate is on top is the method running right now. everything underneath is paused, waiting.
+
+recursion is when the method on top calls *itself*: another plate, same recipe, its own copy of the variables. the plates keep piling up until some call can answer without calling again (the **base case**), and then they come off one by one, each finishing the work it paused.
+
+## watching it stack up and unwind
+
+<Figure wide caption={<>a real recording of <code>factorial(4)</code> from the JVM. step through: four frames for the same method pile up, each with its own <code>n</code>, then unwind in reverse as each multiplication finally gets its answer.</>}>
+<MemoryStepper trace={fact} />
+</Figure>
+
+notice what each frame is doing while it waits: `factorial(4)` is stuck in the middle of `4 * factorial(3)`. the `4` is saved in its frame, the multiplication is on hold, and it resumes the instant `factorial(3)` returns. that "remember where i was" is exactly what the stack is for.
+
+<Predict options={["3 2 1", "1 2 3", "nothing, it never gets past show(n - 1)"]} answer={1}>
+```java
+void show(int n) {
+    if (n == 0) return;
+    show(n - 1);
+    IO.print(n + " ");
+}
+
+void main() {
+    show(3);
+}
+```
+<Explain>
+`1 2 3`. `show(3)` calls `show(2)` *before* printing, which calls `show(1)` before printing, which calls `show(0)`, which returns immediately. then the prints happen on the way back down the stack: `show(1)` prints first, `show(3)` last. code after the recursive call runs during the unwinding. move the print above the call and you get `3 2 1`.
+</Explain>
+</Predict>
+
+## the two rules
+
+every recursive method needs both:
+
+1. **a base case** that returns without recursing (`if (n <= 1) return 1;`).
+2. **progress**: each recursive call must get closer to the base case (`factorial(n - 1)`, not `factorial(n)`).
+
+break either rule and the calls never stop. the stack is a fixed-size block of memory (1 to 2 MB per thread by default, depending on the platform, and `-Xss` changes it), so eventually there's no room for the next frame:
+
+```text
+Exception in thread "main" java.lang.StackOverflowError
+	at Main.factorial(Main.java:6)
+	at Main.factorial(Main.java:6)
+	at Main.factorial(Main.java:6)
+	...
+```
+
+how deep you can go before that depends on the frame size and the JIT, more than on your code. [stack and heap](/learn/basics/stack-and-heap#when-the-stack-runs-out) has a meter you can drag to the edge.
+
+## recursion trees and repeated work
+
+some problems split into two smaller copies of themselves, so the calls form a tree. fibonacci is the classic: `fib(n) = fib(n - 1) + fib(n - 2)`.
+
+```java
+static long fib(int n) {
+    if (n < 2) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+```
+
+<Figure wide caption={<>step through every call <code>fib(5)</code> makes. the <C k="hot">amber</C> path is the call stack at that moment: only one branch is ever active. then switch on the cache and watch whole subtrees disappear: the <C k="meta">dashed</C> nodes are answers looked up instead of recomputed.</>}>
+<FibTree />
+</Figure>
+
+the naive version computes `fib(3)` twice, `fib(2)` three times, and it gets exponentially worse. the stack never gets deep (at most n frames), but the tree gets enormous:
+
+<Figure caption={<>calls made to compute <code>fib(40)</code>, measured on jdk 25 (apple silicon). the cached version stores each answer in a <code>HashMap</code> the first time it's computed. log scale.</>}>
+<Bars
+  log
+  unit="calls"
+  data={[
+    { label: "naive", value: 331160281, tone: "dead" },
+    { label: "with a cache", value: 79, tone: "live" },
+  ]}
+/>
+</Figure>
+
+331 million calls (about 370 ms) versus 79 (about 0.03 ms), same answer: 102,334,155. remembering answers you've already computed is called **memoization**, and it's the first step toward dynamic programming. (and for fibonacci, a plain loop with two variables beats both.)
+
+## java doesn't optimize tail calls
+
+a call is a **tail call** when it's the very last thing a method does: `return countDown(n - 1);`. some languages notice that the current frame isn't needed anymore and reuse it, so tail recursion runs in constant stack space. java doesn't. every call gets a new frame, tail position or not:
+
+```java title="Main.java"
+public class Main {
+    static int depth = 0;
+    static long countDown(long n) {
+        depth++;
+        if (n == 0) return 0;
+        return countDown(n - 1); // a tail call. java still pushes a frame.
+    }
+    public static void main(String[] args) {
+        try {
+            countDown(1_000_000);
+        } catch (StackOverflowError e) {
+            System.out.println("StackOverflowError after " + depth + " calls");
+        }
+    }
+}
+```
+
+```bash
+$ java Main.java
+StackOverflowError after 32710 calls
+```
+
+(32,606 on the next run: the exact depth wobbles with JIT timing.) if the recursion can be millions deep (walking a long linked list, processing a big file line by line), write it as a loop. a loop needs one frame no matter how many times it goes around.
+
+<Gotcha title="recursion depth is input-controlled">
+a recursive parser, tree walker or JSON reader works fine in every test, then gets a document nested 50,000 levels deep and dies with `StackOverflowError`. if the depth comes from input you don't control, either use an explicit stack (an `ArrayDeque` you push and pop yourself, on the heap) or put a depth limit in and reject anything deeper.
+</Gotcha>
+
+<Deep title="why no tail call optimization?">
+HotSpot never did it, and the language has no way to ask for it. a long-cited reason is that parts of the JDK look at the call stack (stack traces, and APIs that ask "who called me?"), and silently removing frames would change what they see. a stack trace with half its frames missing would also be miserable to debug. so if you want constant-space iteration in java, you write a loop. (kotlin's `tailrec` keyword does exactly that conversion at compile time, on the same JVM.)
+</Deep>
+
+<Interview q="what happens on the stack when a recursive method runs?">
+each call pushes a new frame holding that call's parameters, locals and the point to resume at in the caller. the calls pile up until one hits the base case and returns, then the frames pop in reverse order, each finishing the work it paused (like the `n *` in factorial). stack space used is proportional to the maximum depth, not the total number of calls, which is why naive fibonacci is slow (exponential calls) but never overflows (depth n), and a simple countdown to a million overflows (depth a million) even though it does trivial work.
+</Interview>
+
+<Keylines>
+- every call pushes a frame, every return pops one. the top frame is what's running.
+- recursion works because each call has its own frame and its own copy of the locals.
+- a base case to stop, and progress toward it, every time.
+- work after the recursive call happens during unwinding, in reverse order.
+- java never optimizes tail calls. deep recursion overflows, a loop doesn't.
+</Keylines>

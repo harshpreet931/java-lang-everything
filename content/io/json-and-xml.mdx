@@ -1,0 +1,207 @@
+import { ParseModes } from "@/components/figures/io/ParseModes";
+import { JsonMapping } from "@/components/figures/io/JsonMapping";
+
+<InShort>
+the JDK has had **XML** built in for twenty years (`java.xml`): a **DOM** tree, **SAX** push events, a **StAX** pull cursor, plus XPath and XSLT. it has **no JSON** API you can use today: everyone uses a library, usually **Jackson**, which maps JSON straight onto your records.
+
+that's changing: a small standard JSON API is incubating in **jdk 28** ([JEP 540](https://openjdk.org/jeps/540)).
+</InShort>
+
+## the picture
+
+you know how you can read a book by photocopying the whole thing first, by having someone read it aloud to you, or by turning the pages yourself? those are the three ways to parse a document. DOM photocopies it (the whole tree in memory, then you browse). SAX reads it aloud (it calls you, event by event, and doesn't stop). StAX hands you the book (you call `next()` when you're ready).
+
+<Figure wide caption={<>pick an API and step through the same document. the <C k="hot">amber</C> line is where the parser is. watch <em>who calls whom</em>: SAX calls your handler, your StAX loop calls the reader, and DOM doesn't let your code run until it's <C k="live">finished</C>.</>}>
+<ParseModes />
+</Figure>
+
+| | DOM | SAX | StAX |
+| --- | --- | --- | --- |
+| model | a tree of nodes in memory | callbacks pushed at you | a cursor you pull |
+| memory | the whole document, several times its size | constant | constant |
+| random access, editing | yes | no | no |
+| control flow | yours, after parsing | the parser's | yours |
+| use it for | config files, small documents, editing | huge files, simple extraction | huge files, real logic |
+
+## XML in the JDK
+
+DOM is the easiest to start with, and has the most famous trap:
+
+```java title="Main.java" run output="order 42\n  chai x2\n  samosa x1\nchildren of <order>: 5"
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.*;
+import java.io.ByteArrayInputStream;
+
+void main() throws Exception {
+    String xml = """
+        <order id="42">
+          <item qty="2">chai</item>
+          <item qty="1">samosa</item>
+        </order>
+        """;
+    Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
+        .parse(new ByteArrayInputStream(xml.getBytes()));
+
+    Element order = doc.getDocumentElement();
+    IO.println("order " + order.getAttribute("id"));
+    NodeList items = order.getElementsByTagName("item");
+    for (int i = 0; i < items.getLength(); i++) {
+        Element item = (Element) items.item(i);
+        IO.println("  " + item.getTextContent() + " x" + item.getAttribute("qty"));
+    }
+    IO.println("children of <order>: " + order.getChildNodes().getLength());
+}
+```
+
+two items, **five** children. the line breaks and indentation between tags are text nodes too: whitespace, item, whitespace, item, whitespace. code that does `getFirstChild()` expecting an element gets a newline instead. use `getElementsByTagName`, check `getNodeType()`, or use XPath, which ignores all that:
+
+```java title="Main.java" run output="3\nchai"
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.xpath.*;
+import java.io.ByteArrayInputStream;
+
+void main() throws Exception {
+    String xml = "<order id=\"42\"><item qty=\"2\">chai</item><item qty=\"1\">samosa</item></order>";
+    var doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(new ByteArrayInputStream(xml.getBytes()));
+    XPath xpath = XPathFactory.newInstance().newXPath();
+    IO.println(xpath.evaluate("sum(/order/item/@qty)", doc));
+    IO.println(xpath.evaluate("/order/item[@qty > 1]", doc));
+}
+```
+
+for big inputs, StAX keeps memory flat and still reads like normal code. `getElementText()` reads everything up to the matching end tag in one call:
+
+```java title="Main.java" run output="chai x2\nsamosa x1\ntotal items: 3"
+import javax.xml.stream.*;
+import java.io.StringReader;
+
+void main() throws Exception {
+    String xml = "<order id=\"42\"><item qty=\"2\">chai</item><item qty=\"1\">samosa</item></order>";
+    XMLStreamReader r = XMLInputFactory.newInstance().createXMLStreamReader(new StringReader(xml));
+    int total = 0;
+    while (r.hasNext()) {
+        int event = r.next();                                   // you pull the next event
+        if (event == XMLStreamConstants.START_ELEMENT && r.getLocalName().equals("item")) {
+            int qty = Integer.parseInt(r.getAttributeValue(null, "qty"));
+            String name = r.getElementText();                   // reads up to </item>
+            IO.println(name + " x" + qty);
+            total += qty;
+        }
+    }
+    IO.println("total items: " + total);
+}
+```
+
+and for writing, never build XML with string concatenation, for the same reason you don't build SQL that way: `&` and `<` in your data. a writer escapes for you:
+
+```java title="Main.java" run output="<note from=\"ada &amp; co\">1 &lt; 2, obviously</note>"
+import javax.xml.stream.*;
+import java.io.StringWriter;
+
+void main() throws Exception {
+    var out = new StringWriter();
+    XMLStreamWriter w = XMLOutputFactory.newInstance().createXMLStreamWriter(out);
+    w.writeStartElement("note");
+    w.writeAttribute("from", "ada & co");
+    w.writeCharacters("1 < 2, obviously");
+    w.writeEndElement();
+    w.close();
+    IO.println(out);
+}
+```
+
+<Gotcha title="XXE: the parser that reads your files for the attacker">
+XML has a feature most people have never used on purpose: a `DOCTYPE` can declare **external entities**, which the parser fetches from a URL or a file and pastes into the document. parse untrusted XML with a default factory and the sender can make your server read its own files (or call internal URLs) and echo them back. this program reads a "secret" file it created itself, but `file:///etc/passwd` works the same way:
+
+```java title="Main.java" run output="default parser: db-password=hunter2\nhardened: DOCTYPE is disallowed when the feature \"http://apache.org/xml/features/disallow-doctype-decl\" set to true."
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.xml.sax.SAXParseException;
+import org.xml.sax.helpers.DefaultHandler;
+import java.io.ByteArrayInputStream;
+import java.nio.file.*;
+
+void main() throws Exception {
+    Path secret = Files.createTempFile("secret", ".txt");
+    Files.writeString(secret, "db-password=hunter2");
+
+    String evil = """
+        <?xml version="1.0"?>
+        <!DOCTYPE order [ <!ENTITY leak SYSTEM "%s"> ]>
+        <order><note>&leak;</note></order>
+        """.formatted(secret.toUri());
+
+    var factory = DocumentBuilderFactory.newInstance();
+    var doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(evil.getBytes()));
+    IO.println("default parser: " + doc.getDocumentElement().getTextContent());
+
+    factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+    var builder = factory.newDocumentBuilder();
+    builder.setErrorHandler(new DefaultHandler());      // throw quietly instead of printing
+    try {
+        builder.parse(new ByteArrayInputStream(evil.getBytes()));
+    } catch (SAXParseException e) {
+        IO.println("hardened: " + e.getMessage());
+    }
+    Files.delete(secret);
+}
+```
+
+disallowing `DOCTYPE` entirely is the standard fix, per factory. you can also do it JVM-wide: `-Djdk.xml.dtd.support=deny` makes every JDK parser reject DTDs, and the JDK ships `conf/jaxp-strict.properties.template`, a locked-down configuration you can point `-Djava.xml.config.file` at.
+</Gotcha>
+
+## JSON: use a library
+
+there's no JSON parser in java 25. the ecosystem filled the gap long ago: **Jackson** (the default in Spring), **Gson**, and the Jakarta specs **JSON-P** (tree and streaming) and **JSON-B** (binding). they all offer the same three levels as XML: a streaming parser, a tree (`JsonNode`), and **data binding**, which is what you use 90% of the time: JSON in, your record out.
+
+<Figure caption={<>click a line on either side. data binding matches JSON keys to record components <C k="ref">by name</C>, recursing into nested objects and lists. the <C k="hot">unknown key</C> is the part that changes between Jackson versions.</>}>
+<JsonMapping />
+</Figure>
+
+```java title="OrderJson.java"
+// Jackson 3 (tools.jackson), the current major version. not part of the JDK
+JsonMapper mapper = JsonMapper.builder().build();          // immutable, thread-safe: make one
+
+Order order = mapper.readValue(json, Order.class);         // JSON → record
+String out = mapper.writeValueAsString(order);             // record → JSON
+
+JsonNode tree = mapper.readTree(json);                     // or no classes at all
+int qty = tree.get("items").get(0).get("qty").asInt();
+```
+
+records and data binding fit perfectly: a record's components are its JSON shape, the canonical constructor validates on the way in, and there's no setter soup. Jackson has handled records since 2.12. Jackson 3 (October 2025) moved to the `tools.jackson` packages, requires java 17, made mappers immutable, and builds in `java.time` support.
+
+<Gotcha title="polymorphic typing is serialization's gadget problem again">
+if you let JSON choose which class to instantiate (Jackson's old "default typing", or `@JsonTypeInfo` with class names), the input is choosing classes from your classpath, and you're back to the [deserialization gadget](/learn/io/serialization) problem: that's exactly where Jackson's long list of CVEs came from. bind to concrete types, or to a sealed interface with an explicit list of allowed subtypes.
+</Gotcha>
+
+## the JSON API on its way
+
+[JEP 540](https://openjdk.org/jeps/540) adds a deliberately small JSON API as an incubator module in **jdk 28** (in development, due march 2027). it parses RFC 8259 JSON into a tree of immutable values and writes them back. that's it: no data binding, no streaming, both listed as non-goals, so libraries aren't going anywhere. the point is that a script or a small tool can read JSON without adding a dependency.
+
+```java title="Weather.java"
+// jdk 28, incubating: needs --add-modules jdk.incubator.json. not runnable on 25
+JsonValue json = Json.parse(body);
+json.get("properties").get("periods").asList().stream()
+    .mapToInt(p -> p.get("temperature").asInt())
+    .average()
+    .ifPresent(IO::println);
+```
+
+`JsonValue` is a sealed interface with six subtypes (`JsonObject`, `JsonArray`, `JsonString`, `JsonNumber`, `JsonBoolean`, `JsonNull`), so it plays well with [pattern matching](/learn/modern/pattern-matching). malformed input throws an unchecked `JsonParseException` that says where it went wrong. as an incubator API it can still change before it's final.
+
+<Deep title="why there are so many XML APIs">
+XML arrived in java in pieces. JAXP (java 1.4, 2002) bundled DOM and SAX, the two W3C-era standards. StAX (JSR 173) came in java 6, after people got tired of writing SAX state machines. JAXB, the XML data binding, was in the JDK from 6 to 10 and was **removed in java 11** along with the rest of the Java EE modules ([JEP 320](https://openjdk.org/jeps/320)), so on modern java it's a dependency (`jakarta.xml.bind`). the JDK's parser itself is a repackaged Apache Xerces, which is why the feature names are `http://apache.org/xml/features/...`.
+</Deep>
+
+<Interview q="DOM, SAX or StAX: which would you use to process a 5 GB XML file?">
+not DOM: it loads the whole document as a tree, typically several times the file size in heap. SAX or StAX both stream with constant memory. i'd pick StAX: it's a pull parser, so my loop asks for the next event and can stop, skip subtrees or delegate to other methods, while with SAX the parser pushes callbacks at me and all context lives in handler fields. bonus point: whichever parser, disable DTDs (`disallow-doctype-decl`) on untrusted input, because of XXE.
+</Interview>
+
+<Keylines>
+- DOM is a tree in memory, SAX pushes events at you, StAX lets you pull them.
+- DOM counts whitespace between tags as text nodes. XPath sidesteps it.
+- build XML and JSON with a writer or a library, never with string concatenation.
+- untrusted XML: disallow DOCTYPE, or XXE reads your files for the sender.
+- JSON means a library today (Jackson). bind to records, never let input pick classes.
+- a small standard JSON API is incubating in jdk 28 (JEP 540): tree only, no binding.
+</Keylines>

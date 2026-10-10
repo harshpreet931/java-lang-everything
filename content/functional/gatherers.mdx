@@ -1,0 +1,166 @@
+import { GathererLab } from "@/components/figures/functional/GathererLab";
+
+<InShort>
+a **gatherer** is a custom intermediate operation: `stream.gather(g)`. it's how you write the stream operations the JDK never shipped, like sliding windows, running totals or "group consecutive repeats".
+
+it's built like a collector (an **initializer**, an **integrator**, a **combiner**, a **finisher**), except it sits in the middle of the pipeline, can push zero, one or many elements per input, and can stop the stream early. final in java 24 (JEP 485).
+</InShort>
+
+## the picture
+
+you know how there's `map`, `filter`, `flatMap`... and then the moment you need "every 3 elements as a list" there's nothing, so you collect to a list and loop over it by hand? for ten years the only extension point in streams was the end (`collect`). gatherers open up the middle.
+
+think of a factory line. collectors are the packing station at the end: everything that arrives goes into one box. a gatherer is a machine you bolt into the middle of the line. it can hold parts for a while (state), let some through, merge a few into one, and even pull the emergency stop.
+
+<Figure wide caption={<>pick a gatherer and step. the <C k="hot">amber window</C> is what the integrator is looking at, the <C k="meta">state</C> is what it remembers between elements, and the <C k="live">green chips</C> are what it has pushed downstream so far. watch which step does the pushing: the integrator, or the finisher at the very end.</>}>
+<GathererLab />
+</Figure>
+
+## the five built-ins
+
+`java.util.stream.Gatherers` ships exactly five: `windowFixed`, `windowSliding`, `fold`, `scan` and `mapConcurrent`.
+
+```java title="Main.java" run output="[[1, 2, 3], [4, 5, 6], [7, 8]]\n[[1, 2, 3], [2, 3, 4], [3, 4, 5], [4, 5, 6], [5, 6, 7], [6, 7, 8]]\n[36]\n[1, 3, 6, 10, 15, 21, 28, 36]\n[-2, 3, -3, 4, 4, -7, 4]"
+import java.util.stream.*;
+
+void main() {
+    IO.println(Stream.of(1, 2, 3, 4, 5, 6, 7, 8)
+            .gather(Gatherers.windowFixed(3)).toList());
+    IO.println(Stream.of(1, 2, 3, 4, 5, 6, 7, 8)
+            .gather(Gatherers.windowSliding(3)).toList());
+    IO.println(Stream.of(1, 2, 3, 4, 5, 6, 7, 8)
+            .gather(Gatherers.fold(() -> 0, Integer::sum)).toList());
+    IO.println(Stream.of(1, 2, 3, 4, 5, 6, 7, 8)
+            .gather(Gatherers.scan(() -> 0, Integer::sum)).toList());
+
+    // differences between neighbours: a sliding window of 2
+    IO.println(Stream.of(3, 1, 4, 1, 5, 9, 2, 6)
+            .gather(Gatherers.windowSliding(2))
+            .map(w -> w.get(1) - w.get(0))
+            .toList());
+}
+```
+
+`fold` is `reduce` that doesn't end the pipeline: it emits one element and you can keep chaining. `scan` is the same fold, but it emits every intermediate result, which is exactly a running total.
+
+<Predict options={["[[1, 2, 3], [4, 5, 6]]", "[[1, 2, 3], [4, 5, 6], [7]]", "[[1, 2, 3], [4, 5, 6], [7, null, null]]"]} answer={1}>
+```java
+Stream.of(1, 2, 3, 4, 5, 6, 7)
+        .gather(Gatherers.windowFixed(3))
+        .toList()
+```
+<Explain>
+the last window is just shorter. the integrator only pushes full windows, and when the input runs out the finisher pushes whatever is left in the buffer, `[7]`. same story for `windowSliding(3)` on a 2-element stream: you get one short window, `[[1, 2]]`.
+</Explain>
+</Predict>
+
+## mapConcurrent: map, but with virtual threads
+
+`mapConcurrent(n, f)` runs `f` on [virtual threads](/learn/concurrency/virtual-threads), at most `n` at a time, and still hands the results downstream **in the original order**. it's made for slow, blocking calls like HTTP requests:
+
+```java title="Main.java" run output="[A on a virtual thread, B on a virtual thread, C on a virtual thread, D on a virtual thread]"
+import java.util.stream.*;
+
+String slowUpper(String s) {
+    try { Thread.sleep(100); } catch (InterruptedException e) { throw new RuntimeException(e); }
+    return s.toUpperCase() + (Thread.currentThread().isVirtual() ? " on a virtual thread" : "");
+}
+
+void main() {
+    IO.println(Stream.of("a", "b", "c", "d")
+            .gather(Gatherers.mapConcurrent(2, this::slowUpper))
+            .toList());
+}
+```
+
+eight of those 100 ms calls with `mapConcurrent(4, ...)` took about 200 ms on my machine instead of 800. it does this without making the stream parallel: the stream itself stays sequential, only the function calls overlap. that's the difference from `.parallel().map(...)`, which uses the [common pool](/learn/functional/parallel-streams) and is the wrong tool for blocking work.
+
+## writing your own
+
+here's a gatherer the JDK doesn't have: group runs of equal consecutive elements. the state is the current run. the integrator pushes a run when a different element shows up. the finisher pushes the last one.
+
+```java title="Main.java" run output="[[a, a], [b], [c, c, c], [a]]\n[2, 1, 2]\n[[5, 5, 5], [1, 1]]"
+import java.util.*;
+import java.util.stream.*;
+
+// a a b c c c → [a, a] [b] [c, c, c]
+static <T> Gatherer<T, ?, List<T>> runs() {
+    return Gatherer.ofSequential(
+            () -> new ArrayList<T>(),                  // initializer: make the state
+            (run, element, downstream) -> {            // integrator: once per element
+                if (!run.isEmpty() && !run.getLast().equals(element)) {
+                    downstream.push(List.copyOf(run)); // a run just ended
+                    run.clear();
+                }
+                run.add(element);
+                return true;                           // true = keep sending me elements
+            },
+            (run, downstream) -> {                     // finisher: the input is over
+                if (!run.isEmpty()) downstream.push(List.copyOf(run));
+            });
+}
+
+void main() {
+    IO.println(Stream.of("a", "a", "b", "c", "c", "c", "a").gather(runs()).toList());
+    IO.println(Stream.of(1, 1, 2, 3, 3).gather(runs()).map(List::size).toList());
+    IO.println(Stream.of(5, 5, 5, 1, 1, 9).gather(runs()).limit(2).toList());
+}
+```
+
+<Figure caption="hover a stage. the same four-part shape as a collector, with two differences: the integrator pushes results downstream instead of building one container, and it returns a boolean.">
+<Flow
+  stages={[
+    { label: "initializer", sub: "() → state", note: "makes the private state: a buffer, a counter, the previous element. optional: stateless gatherers skip it." },
+    { label: "integrator", sub: "(state, element, downstream) → boolean", note: "called once per element. may push 0, 1 or many results with downstream.push(x). returning false means 'stop sending me elements': that's short-circuiting." },
+    { label: "combiner", sub: "(state, state) → state", note: "only for parallel streams. ofSequential gatherers don't have one and run sequentially even in a parallel stream." },
+    { label: "finisher", sub: "(state, downstream)", note: "runs once when the input ends. the place to flush whatever the state is still holding, like the last window." },
+  ]}
+/>
+</Figure>
+
+that boolean is the superpower collectors never had. return `false` and the stream stops pulling from the source. here's `takeWhile`, but keeping the element that failed:
+
+```java title="Main.java" run output="pull 3 · pull 1 · pull 4 · pull 1 · pull 5 · [3, 1, 4, 1, 5]"
+import java.util.function.*;
+import java.util.stream.*;
+
+static <T> Gatherer<T, ?, T> takeUntil(Predicate<T> stop) {
+    return Gatherer.of((Void state, T element, Gatherer.Downstream<? super T> down) -> {
+        down.push(element);
+        return !stop.test(element);   // false: "i'm done", nothing more is pulled
+    });
+}
+
+void main() {
+    IO.println(Stream.of(3, 1, 4, 1, 5, 9, 2, 6)
+            .peek(n -> IO.print("pull " + n + " · "))
+            .gather(takeUntil(n -> n >= 5))
+            .toList());
+}
+```
+
+9, 2 and 6 are never pulled. gatherers also compose: `windowFixed(2).andThen(scan(...))` is one gatherer that does both.
+
+| | collector | gatherer |
+| --- | --- | --- |
+| where | the end (`collect`) | the middle (`gather`) |
+| output | exactly one result | zero or more elements per input |
+| can stop early | no | yes, the integrator returns `false` |
+| state | the container | anything, private to the gatherer |
+| since | java 8 | java 24 |
+
+<Gotcha title="push's return value matters too">
+`downstream.push(x)` returns `false` once downstream doesn't want any more (say, a `limit` further down was satisfied). the `runs()` example ignores it, which is fine for a toy: the stream still ends correctly, it just does a little extra work. a production gatherer should pass it back: `return downstream.push(x);`, so a `limit(1)` after an expensive gatherer really stops it.
+</Gotcha>
+
+<Interview q="what problem do stream gatherers solve?">
+the stream API had a fixed set of intermediate operations, and the only general extension point was the terminal `collect`. anything else (windows, running totals, stateful dedupe) meant collecting to a list and post-processing, or abusing `flatMap` with outside state. gatherers (JEP 485, final in java 24) let you write a custom intermediate operation with private state, one-to-many output and short-circuiting, and the JDK ships five: `windowFixed`, `windowSliding`, `fold`, `scan`, `mapConcurrent`.
+</Interview>
+
+<Keylines>
+- `stream.gather(g)` = a custom intermediate operation. java 24.
+- initializer makes state, integrator handles each element, finisher flushes at the end.
+- the integrator can push many results, or none, and return `false` to stop the stream.
+- built-ins: `windowFixed`, `windowSliding`, `fold`, `scan`, `mapConcurrent`.
+- `mapConcurrent` overlaps blocking calls on virtual threads and keeps the order.
+</Keylines>

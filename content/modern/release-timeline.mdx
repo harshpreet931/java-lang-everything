@@ -1,0 +1,88 @@
+import { ReleaseTimeline, UpgradeDiff } from "@/components/figures/modern/ReleaseTimeline";
+
+<InShort>
+java ships a new release every **six months**, in march and september, whether a given feature is ready or not. every two years one of them is **LTS** (long-term support): 17, 21, 25, and next, 29.
+
+the latest release is **java 27** (september 15, 2026). the latest LTS is **java 25** (september 16, 2025). big features don't appear out of nowhere: they arrive as **previews** or **incubators** first and go final a few releases later.
+</InShort>
+
+## the picture
+
+you know how "java 8" sounds ancient and "java 27" sounds like a typo? they're both real. java 8 came out in 2014, then java 9 took three and a half years, and that delay is why everything changed: since java 10 (march 2018) there's a release every six months, like a train that leaves on schedule. a feature that's ready gets on. a feature that isn't waits for the next train.
+
+<Figure wide caption={<>click a release number for what shipped in it, or a feature name for its whole journey. each row is a feature that went through incubation, preview or an experimental phase before going <C k="live">final</C>, or getting <C k="dead">withdrawn</C>. drag the zoom, or scroll sideways on a phone. every date and JEP number checked on openjdk.org.</>}>
+<ReleaseTimeline />
+</Figure>
+
+## how to read a track
+
+look at pattern matching. it isn't one feature, it's four tracks that land one after another: `instanceof` patterns (previewed in 14 and 15, final in 16), sealed classes (final in 17), patterns in `switch` (four previews, 17 to 20), and record patterns (19 and 20). everything clicked together in **java 21**, and that's when "data-oriented programming" became a thing you could actually do in java ([more on that](/learn/modern/data-oriented-programming)).
+
+the stages, in order:
+
+<Defs>
+<dt>incubator</dt><dd>an API in a `jdk.incubator.*` module that you add with `--add-modules`. early, and allowed to change completely. (the vector API has been incubating since 16.)</dd>
+<dt>experimental</dt><dd>a JVM feature behind `-XX:+UnlockExperimentalVMOptions`. how runtime features like new GC modes start out.</dd>
+<dt>preview</dt><dd>a language feature or API that's fully specified and implemented, but not permanent. you need `--enable-preview`. it can change, and it can be withdrawn.</dd>
+<dt>final</dt><dd>permanent. part of java SE from then on, no flags.</dd>
+</Defs>
+
+the whole process, flags and class file versions included, is in [preview and incubator features](/learn/modern/preview-features). the short version: string templates are the proof that preview means preview. they were previewed in 21 and 22, then withdrawn in 2024 (JEP 465) to rethink the design, and java 23 shipped without them.
+
+## LTS, and why companies care
+
+a regular release gets security updates for six months, until the next one ships. an LTS release gets them for years, from many vendors. so most companies run an LTS, and jump from one to the next.
+
+| LTS | released | what made it the one people moved to |
+| --- | --- | --- |
+| 8 | march 2014 | lambdas and streams. the release a lot of the world stayed on for a decade |
+| 11 | september 2018 | first LTS of the new cadence. `HttpClient`, `java Main.java` |
+| 17 | september 2021 | records, sealed classes, text blocks, switch expressions: modern java, all final |
+| 21 | september 2023 | virtual threads, pattern matching for switch, record patterns |
+| 25 | september 2025 | compact source files, flexible constructors, scoped values, compact object headers |
+
+the gap used to be three years (11 → 17). in 2021 it was shortened to two, which is why 21 came right after 17, then 25, and next is 29, planned for september 2027.
+
+<Figure caption={<>pick the LTS you're on and the one you're moving to. this is the list of headline features you pick up on the way: what the upgrade buys you, and also what you need to learn.</>}>
+<UpgradeDiff />
+</Figure>
+
+<Quiz question="which of these is an LTS release?" options={["java 23", "java 21", "java 24", "java 27"]} answer={1}>
+<Explain>
+21 (september 2023). the LTS releases so far are 8, 11, 17, 21 and 25. 27 is the newest release, but it's a regular one: six months of updates, then you're expected to move to 28.
+</Explain>
+</Quiz>
+
+## which java am I on?
+
+the version string changed with the cadence. java 8 still calls itself `1.8.0_...`, everything from 9 on is just the number.
+
+```java title="Main.java" run output="25"
+void main() {
+    IO.println(Runtime.version().feature());
+}
+```
+
+`Runtime.version()` gives you the full thing (on the JDK this site was checked with: `25.0.4.1+1-LTS`). `feature()` is the number people mean when they say "java 25". and the class files you compile record it too: `javac` 25 writes class file version 69 by default, and an older JVM refuses to load it. see [compile and run](/learn/start/compile-and-run).
+
+<Gotcha title="--release, not just -source and -target">
+compiling on a new JDK for an older runtime? `javac --release 21` checks your code against the java 21 API *and* writes class files a java 21 JVM accepts. `-source 21 -target 21` only does the second half. so code that calls something newer, like `Reader.of("hi")` (added in 24), compiles fine on jdk 25 (with a warning nobody reads) and then dies on a java 21 JVM:
+
+```text
+Exception in thread "main" java.lang.NoSuchMethodError: 'java.io.Reader java.io.Reader.of(java.lang.CharSequence)'
+```
+
+with `--release 21`, the same line is a compile error: `cannot find symbol`. use `--release`.
+</Gotcha>
+
+<Interview q="what's an LTS release, and which one would you pick for a new project?">
+java ships every six months, and every two years one release is designated long-term support: vendors keep patching it for years, while a non-LTS release only gets updates until the next one comes out. for a new service I'd start on the newest LTS, java 25 today, because libraries, frameworks and tooling all support it and it'll get security fixes for a long time. bonus point: the LTS cadence went from three years to two in 2021, so the line is 8, 11, 17, 21, 25, and next 29.
+</Interview>
+
+<Keylines>
+- a release every six months, march and september. 27 is the latest (sep 15, 2026).
+- an LTS every two years: 17, 21, 25, next 29. most production code runs an LTS.
+- big features arrive as incubator, experimental or preview first, then go final.
+- previews can change or be withdrawn. string templates were.
+- compile for an older runtime with `--release N`, not `-source`/`-target`.
+</Keylines>

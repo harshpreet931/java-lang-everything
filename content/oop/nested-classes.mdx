@@ -1,0 +1,162 @@
+import { NestedKinds } from "@/components/figures/oop/NestedKinds";
+
+export const leak = {
+  file: "Main.java",
+  source: `import java.util.*;
+
+public class Main {
+    static final List<Runnable> listeners = new ArrayList<>();
+
+    static class Screen {
+        final byte[] pixels = new byte[10_000_000];
+
+        void open() {
+            listeners.add(new Runnable() {
+                public void run() { redraw(); }
+            });
+        }
+
+        void redraw() { }
+    }
+
+    public static void main(String[] args) {
+        Screen s = new Screen();
+        s.open();
+        s = null;
+        System.out.println(listeners.size());
+    }
+}`,
+  steps: [
+    { line: 19, frames: [{ name: "main", locals: {} }], heap: { cls: { type: "class Main", tag: "static fields", fields: { listeners: { ref: "list" } } }, list: { type: "ArrayList<Runnable>", items: [] } }, note: "a long-lived static list of listeners. it lives as long as the class does, which is basically forever." },
+    { line: 20, frames: [{ name: "main", locals: { s: { ref: "scr" } } }], heap: { cls: { type: "class Main", tag: "static fields", fields: { listeners: { ref: "list" } } }, list: { type: "ArrayList<Runnable>", items: [] }, scr: { type: "Screen", fields: { pixels: { ref: "px" } } }, px: { type: "byte[]", value: "10,000,000 bytes" } }, note: "a Screen with 10 MB of pixels. s is the only thing pointing at it." },
+    { line: 10, frames: [{ name: "main", locals: { s: { ref: "scr" } } }, { name: "open", locals: { this: { ref: "scr" } } }], heap: { cls: { type: "class Main", tag: "static fields", fields: { listeners: { ref: "list" } } }, list: { type: "ArrayList<Runnable>", items: [] }, scr: { type: "Screen", fields: { pixels: { ref: "px" } } }, px: { type: "byte[]", value: "10,000,000 bytes" } }, note: "open() registers a listener: an anonymous Runnable whose run() calls redraw()." },
+    { line: 21, frames: [{ name: "main", locals: { s: { ref: "scr" } } }], heap: { cls: { type: "class Main", tag: "static fields", fields: { listeners: { ref: "list" } } }, list: { type: "ArrayList<Runnable>", items: [{ ref: "anon" }] }, anon: { type: "Screen$1", fields: { this$0: { ref: "scr" } } }, scr: { type: "Screen", fields: { pixels: { ref: "px" } } }, px: { type: "byte[]", value: "10,000,000 bytes" } }, note: "redraw() needs a Screen to run on, so javac gave the anonymous class a hidden this$0 pointing at the Screen that created it." },
+    { line: 22, frames: [{ name: "main", locals: { s: null } }], heap: { cls: { type: "class Main", tag: "static fields", fields: { listeners: { ref: "list" } } }, list: { type: "ArrayList<Runnable>", items: [{ ref: "anon" }] }, anon: { type: "Screen$1", fields: { this$0: { ref: "scr" } } }, scr: { type: "Screen", fields: { pixels: { ref: "px" } } }, px: { type: "byte[]", value: "10,000,000 bytes" } }, note: "s = null. you're done with the screen. but it's not garbage: static list → listener → this$0 → Screen → 10 MB. nothing turns red." },
+    { line: 22, frames: [{ name: "main", locals: { s: null } }], heap: { cls: { type: "class Main", tag: "static fields", fields: { listeners: { ref: "list" } } }, list: { type: "ArrayList<Runnable>", items: [{ ref: "anon" }] }, anon: { type: "Screen$1", fields: { this$0: { ref: "scr" } } }, scr: { type: "Screen", fields: { pixels: { ref: "px" } } }, px: { type: "byte[]", value: "10,000,000 bytes" } }, stdout: "1\n", note: "open a thousand screens and you've leaked 10 GB, one innocent-looking listener at a time." },
+  ],
+};
+
+<InShort>
+a class declared inside another comes in four kinds: **static nested** (just a class with a longer name), **inner** (every instance holds a hidden reference, `this$0`, to the outer object that made it), **local** and **anonymous** (declared inside a method, and they also copy the local variables they use into hidden fields). that hidden outer reference is the classic java memory leak.
+</InShort>
+
+## the picture
+
+think of a backpack (the outer object) and a keychain clipped onto it (an inner object). you can carry the keychain around on its own, but it's still clipped to the backpack, so wherever the keychain goes, the backpack comes too. a static nested class is a keychain sold separately: same brand, no clip.
+
+<Figure caption={<>pick a kind. the right side is what javac actually generates (checked with <code>javap -p</code>). the memory pane shows one instance: watch for the <code>this$0</code> <C k="ref">arrow</C> back to the Outer, and its 10 MB <code>big</code> array riding along.</>}>
+<NestedKinds />
+</Figure>
+
+| kind | declared | needs an outer object? | can see |
+| --- | --- | --- | --- |
+| static nested | `static class X` in a class | no | outer's static members, and its privates |
+| inner | `class X` in a class | yes: `outer.new X()` | everything in the outer object |
+| local | `class X` inside a method | if the method isn't static | the outer object, and effectively final locals |
+| anonymous | `new Iface() {"{ ... }"}` | if the method isn't static | same as local |
+
+## proof: the hidden fields are real
+
+```java title="Main.java" run output="Main$Inner: this$0\nMain$Nested:\nMain$1: val$greeting this$0\ninner of outer / hi, outer"
+import java.lang.reflect.Field;
+import java.util.function.Supplier;
+
+public class Main {
+    private String name = "outer";
+
+    class Inner {
+        String hi() { return "inner of " + name; }
+    }
+
+    static class Nested {
+        String hi() { return "nested"; }
+    }
+
+    Supplier<String> anon(String greeting) {
+        return new Supplier<>() {
+            public String get() { return greeting + ", " + name; }
+        };
+    }
+
+    static void fields(Object o) {
+        StringBuilder sb = new StringBuilder(o.getClass().getName() + ":");
+        for (Field f : o.getClass().getDeclaredFields()) sb.append(" ").append(f.getName());
+        System.out.println(sb);
+    }
+
+    public static void main(String[] args) {
+        Main outer = new Main();
+        Main.Inner inner = outer.new Inner();
+        Main.Nested nested = new Main.Nested();
+        Supplier<String> s = outer.anon("hi");
+        fields(inner);
+        fields(nested);
+        fields(s);
+        System.out.println(inner.hi() + " / " + s.get());
+    }
+}
+```
+
+you never wrote a field called `this$0` or `val$greeting`. javac did. the inner class reads `name`, so it needs the `Main`. the anonymous class reads `greeting`, which lives in a stack frame that will be gone by the time `get()` runs, so javac copies it into the object.
+
+<Deep title="turns out javac skips this$0 when it can (and constants fool you)">
+since jdk 18 ([JDK-8271623](https://bugs.openjdk.org/browse/JDK-8271623)), javac only emits `this$0` if the inner class actually uses the outer instance. an inner class that never touches `Outer` still takes an `Outer` constructor parameter, but throws it away, so it can't leak it. (serializable inner classes without a `serialVersionUID` still get the field, for compatibility.)
+
+and a sneaky one: if `name` above were `private final String name = "outer";`, it'd be a compile-time constant, javac would fold `"inner of " + name` into `"inner of outer"`, and `Inner` would have no `this$0` at all. same source, different class file. fun fact for compact source files: their top-level classes become inner classes of the implicit class, so `class Dog` in a `void main()` file compiles to `Main$Dog`, whose constructor takes a hidden `Main` parameter.
+</Deep>
+
+## the leak
+
+an inner, local or anonymous object that outlives its outer object keeps the outer object alive. register one as a listener in something long-lived, and the whole outer object (and everything it points to) can never be collected.
+
+<Figure wide caption={<>step 5 is the leak: <code>s = null</code>, and the Screen is still reachable through the static list, the listener, and its hidden <code>this$0</code>. no ghost appears because nothing became <C k="dead">unreachable</C>. that's the bug.</>}>
+<MemoryStepper trace={leak} />
+</Figure>
+
+the fixes, in order of preference:
+
+- **make it `static`** (a static nested class, or a top-level one) and pass in only what it needs. no `this$0` possible.
+- **use a lambda that doesn't touch `this`**. a lambda only captures what it uses; if it never mentions an instance member, it doesn't capture the outer object. see [lambdas](/learn/functional/lambdas).
+- **unregister** listeners when the owner is done (`close()`, `dispose()`), or hold them through a `WeakReference`.
+
+more ways to leak, and how to find them in a heap dump: [memory leaks](/learn/gc/memory-leaks).
+
+<Effective item={24} title="favor static member classes over nonstatic">
+if a member class doesn't need access to its enclosing instance, declare it `static`. a nonstatic member class costs a hidden reference per instance, time to set it, and can keep its enclosing instance from being garbage collected. the classic example: `Map.Entry`-style node classes inside a collection should be static.
+</Effective>
+
+## capturing locals: effectively final
+
+local and anonymous classes (and lambdas) copy captured locals into fields when they're created. if java let you change the local afterwards, the copy and the original would silently disagree. so the rule is: you can only capture a local that's **effectively final** (never assigned after initialization).
+
+```java title="Main.java"
+void main() {
+    int count = 0;
+    Runnable r = new Runnable() {
+        public void run() {
+            IO.println(count); // [!code error]
+        }
+    };
+    count++;
+}
+```
+
+`error: local variables referenced from an inner class must be final or effectively final`. the lambda version says the same thing with "a lambda expression" in it. the usual escape hatch is a one-element array or an `AtomicInteger`, which keeps the *reference* final while the contents change. fields are different: an inner class reads them live through `this$0`, so they can change freely.
+
+<Quiz question="which one can be created without an instance of Outer?" options={["Outer.Inner (non-static member class)", "Outer.Nested (static member class)", "an anonymous class created inside an instance method of Outer", "none of them"]} answer={1}>
+<Explain>
+a static nested class has no enclosing instance: `new Outer.Nested()` works anywhere it's accessible. an inner class needs one (`outer.new Inner()`), and an anonymous class created in an instance method gets `this` as its enclosing instance (even if, since jdk 18, it doesn't keep it when unused).
+</Explain>
+</Quiz>
+
+<Interview q="why can an inner class cause a memory leak?">
+a non-static inner class (and an anonymous or local class created in an instance method) gets a hidden final field, `this$0`, referencing the enclosing instance, so it can read the outer object's fields. if the inner object is stored somewhere long-lived (a static collection, a listener registry, a cache, another thread), the outer object stays reachable through that field, along with everything it references. the fix is a static nested class or a lambda that doesn't capture `this`. bonus: since jdk 18 javac omits `this$0` when the inner class never uses the outer instance.
+</Interview>
+
+<Keylines>
+- static nested: a normal class with a longer name. no outer object.
+- inner: every instance holds `this$0`, a hidden reference to its outer object.
+- local and anonymous: `this$0` plus copies of captured locals (`val$x`).
+- captured locals must be effectively final, because the class holds a copy.
+- an inner object that outlives its outer keeps it alive. default to static.
+</Keylines>

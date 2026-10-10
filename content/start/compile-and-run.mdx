@@ -1,0 +1,169 @@
+import { ClassFileExplorer } from "@/components/figures/start/ClassFileExplorer";
+import { LaunchModes } from "@/components/figures/start/LaunchModes";
+
+<InShort>
+`javac Main.java` checks your code and writes **Main.class**: bytecode, not machine code. `java Main` starts a JVM, loads that class and calls `main`. since java 11 you can skip the first step: `java Main.java` compiles **in memory** and runs it straight away.
+</InShort>
+
+## the picture
+
+two programs, two jobs. `javac` is a translator: it reads your source once and writes a file. `java` is a performer: it starts a JVM and plays that file, every time you run it. they don't even have to be on the same machine.
+
+<Figure caption="hover a stage. the left half happens once, when you build. the right half happens every time the program runs.">
+<Flow
+  stages={[
+    { label: "Main.java", sub: "source, text", note: "what you write. the compiler is the only thing that ever reads it." },
+    { label: "javac", sub: "the compiler", note: "parses, checks every type, then writes one .class file per class. errors stop it here, before anything runs." },
+    { label: "Main.class", sub: "bytecode, 414 bytes", note: "instructions for the JVM, plus a table of every name the code mentions. same bytes on every OS." },
+    { label: "java", sub: "the launcher", note: "starts a JVM, tells it which class to load, and hands over the command-line arguments." },
+    { label: "JVM", sub: "load, verify, run", note: "loads Main.class, verifies the bytecode is safe, calls main. the interpreter starts, the JIT kicks in for hot code." },
+  ]}
+/>
+</Figure>
+
+## step 1: javac
+
+```bash
+$ javac Main.java
+$ ls
+Main.class  Main.java
+```
+
+no output means it worked. `javac` is quiet on success and loud on failure. it reads the whole file, checks every type, and refuses to write anything if one thing is wrong:
+
+```bash
+$ javac Bad.java
+Bad.java:3: error: incompatible types: String cannot be converted to int
+        int x = "five";
+                ^
+1 error
+```
+
+file, line, what's wrong, and a caret under the exact spot. read compiler errors top to bottom and fix the **first** one first: later errors are often just the first one echoing.
+
+one source file can hold several classes, and every class gets its own `.class` file, even the ones you didn't name:
+
+```bash
+$ javac Two.java     # Two, plus a record, an inner class, an anonymous class and a helper
+$ ls *.class
+Helper.class  Two$1.class  Two$Inner.class  Two$Point.class  Two.class
+```
+
+the `$` names are nested classes, and `Two$1` is the anonymous one (they get numbers). more in [nested classes](/learn/oop/nested-classes).
+
+## step 2: what's in a .class
+
+a class file is a small binary format: a header, a constant pool (every class name, method name and string literal the code mentions), then the fields and methods, each method with its bytecode. you can open it with `javap`, the disassembler that comes with the JDK:
+
+```bash
+$ javap -c Main
+Compiled from "Main.java"
+public class Main {
+  public Main();
+    Code:
+         0: aload_0
+         1: invokespecial #1                  // Method java/lang/Object."<init>":()V
+         4: return
+
+  public static void main(java.lang.String[]);
+    Code:
+         0: getstatic     #7                  // Field java/lang/System.out:Ljava/io/PrintStream;
+         3: ldc           #13                 // String hello, world
+         5: invokevirtual #15                 // Method java/io/PrintStream.println:(Ljava/lang/String;)V
+         8: return
+}
+```
+
+notice the constructor you never wrote: if a class has none, javac adds one that just calls `Object`'s. and notice `main` is four instructions. the JVM is a **stack machine**: instructions push values onto an operand stack and pop them off, there are no registers.
+
+<Figure wide caption={<>switch between the header and the code. in the bytecode view, step through <code>main</code> and watch the operand stack: two pushes, one call that pops both. the bytes are the real ones from this exact file.</>}>
+<ClassFileExplorer />
+</Figure>
+
+the full format is its own chapter: [the class file](/learn/jvm/class-file-format) and [bytecode](/learn/jvm/bytecode).
+
+## step 3: java
+
+```bash
+$ java Main
+hello, world
+```
+
+`Main` here is a **class name**, not a file name. the launcher starts a JVM, which searches the **classpath** (by default, the current directory) for `Main.class`, loads it, verifies it, and calls `main`. compiled somewhere else? point the classpath there:
+
+```bash
+$ javac -d out Main.java      # write .class files into out/
+$ java -cp out Main
+hello, world
+```
+
+<Gotcha title="java Main.class">
+it looks reasonable and it's wrong. the launcher reads `Main.class` as a class called `class` in a package called `Main`, doesn't find it, and says so:
+
+```bash
+$ java Main.class
+Error: Could not find or load main class Main.class
+Caused by: java.lang.ClassNotFoundException: Main.class
+```
+
+`java Main` (class name) or `java Main.java` (source file). never the `.class`.
+</Gotcha>
+
+<Predict options={["hello, world", "hello, java", "an error: Main.class is out of date"]} answer={0}>
+```bash
+$ javac Main.java
+$ java Main
+hello, world
+# now edit Main.java to print "hello, java", save, and:
+$ java Main
+```
+<Explain>
+`java Main` runs `Main.class`, which still holds the old bytecode. nothing checks whether the source changed. you have to run `javac` again (or use `java Main.java`, which always compiles the current source). stale class files are a classic "but i fixed it!" moment.
+</Explain>
+</Predict>
+
+## skipping javac
+
+for one-file programs, the two-step dance is overkill. since java 11 ([JEP 330](https://openjdk.org/jeps/330)) the launcher can take a source file directly, and since java 22 ([JEP 458](https://openjdk.org/jeps/458)) that program can use other source files sitting next to it.
+
+<Figure caption={<>switch modes and watch the folder. only the classic route writes a <C k="hot">.class</C> to disk. timings are medians of 15 runs on an arm mac: the in-memory compile costs about 175 ms every single run.</>}>
+<LaunchModes />
+</Figure>
+
+every runnable example on this site works with `java Main.java`. for anything bigger than a handful of files, use a build tool ([maven](/learn/tooling/maven) or [gradle](/learn/tooling/gradle)): they run `javac` for you, only on what changed, and put the classes and dependencies on the classpath.
+
+## versions have to line up
+
+the major version in the header (69 for java 25) is a promise: "this file needs at least this JVM". an older JVM won't even try:
+
+```bash
+$ java Main     # compiled with javac 25, run on a java 21 JVM
+Error: LinkageError occurred while loading main class Main
+	java.lang.UnsupportedClassVersionError: Main has been compiled by a more recent version of the Java Runtime (class file version 69.0), this version of the Java Runtime only recognizes class file versions up to 65.0
+```
+
+the fix is either a newer JVM, or telling `javac` which java you're targeting. `--release` checks your code against that version's API too, so you can't accidentally call a method that doesn't exist there yet:
+
+```bash
+$ javac --release 21 Main.java
+$ xxd Main.class | head -1
+00000000: cafe babe 0000 0041 001d 0a00 0200 0307  .......A........
+```
+
+`0x41` is 65: java 21. the rule is java version + 44:
+
+| java | 8 | 11 | 17 | 21 | 25 | 27 |
+| --- | --- | --- | --- | --- | --- | --- |
+| class file major version | 52 | 55 | 61 | 65 | 69 | 71 |
+
+<Interview q="is java compiled or interpreted?">
+both, twice. `javac` compiles source to bytecode ahead of time. at runtime the JVM interprets that bytecode at first, profiles it, and the JIT compiles the hot methods to native machine code. so "java is interpreted" was only ever half true, and hasn't described real performance since the late 90s. bonus: since java 11 the launcher can also compile source in memory (`java Main.java`), so there's even a third compile if you count that one.
+</Interview>
+
+<Keylines>
+- `javac` turns `.java` into `.class` (bytecode). one `.class` per class, nested ones included.
+- `java Main` takes a class name and runs it on a JVM. `java Main.java` compiles in memory first.
+- the JVM is a stack machine. `javap -c` shows you exactly what javac produced.
+- a `.class` needs a JVM at least as new as its major version. `--release` targets older ones.
+- edited the source? recompile. the JVM never looks at your `.java`.
+</Keylines>

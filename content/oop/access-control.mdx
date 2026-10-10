@@ -1,0 +1,154 @@
+import { AccessScopes } from "@/components/figures/oop/AccessScopes";
+import { AccessMatrix } from "@/components/figures/oop/AccessMatrix";
+
+<InShort>
+four levels, from tight to loose: **private** (this class only), **package-private** (no keyword: this package), **protected** (this package plus subclasses anywhere), **public** (everyone). javac checks them at compile time.
+
+default to the tightest one that works. every `public` is a promise you'll have to keep.
+</InShort>
+
+## the picture
+
+think of a house. `private` is your diary (only you). package-private is the fridge (anyone living in the house). `protected` is the family recipe (the house, plus your kids who moved out, but they only get *their own* copy). `public` is the front porch.
+
+the important bit: access is about **which code** is asking, not which object. it's checked by javac, file by file, using two facts: what class the code is in, and what package that class is in.
+
+<Figure caption={<>pick a modifier for <code>Account.balance</code>. <C k="live">green</C> classes can read and write it, the rest get a <C k="dead">compile error</C>. notice that <code>protected</code> lights up everything <code>(nothing)</code> does, plus one more.</>}>
+<AccessScopes />
+</Figure>
+
+## every cell, compiled
+
+a table is a claim. here are the sixteen proofs. each cell is two real files and what `javac` (25) said about them.
+
+<Figure caption={<>click any cell to see the code that tests it. the <C k="hot">amber</C> line in <code>Account.java</code> is the declaration, the <C k="live">green</C> or <C k="dead">red</C> line is the access. then open the <code>protected</code> × subclass cell and switch <code>via</code>.</>}>
+<AccessMatrix />
+</Figure>
+
+## protected's weird rule
+
+you know how everyone says "protected means subclasses can access it"? that's only half true, and the other half is the one you hit in prod.
+
+a subclass in another package can touch a protected member only **through a reference of its own type** (or a subtype). `this.balance` is fine. `otherSavings.balance` is fine. `someAccount.balance` is not, even though `Savings` extends `Account`.
+
+```java title="bank/Savings.java"
+package bank;
+
+import shop.Account;
+
+class Savings extends Account {
+    void poke(Savings mine, Account any) {
+        this.balance = 1;   // ok: it's me
+        mine.balance = 1;   // ok: a Savings, same family line as me
+        any.balance = 1;    // [!code error]
+    }
+}
+```
+
+`error: balance has protected access in Account`
+
+why? because `any` might be a `Checking`, a totally different subclass written by someone else. `protected` means "my subclasses can use what they inherited", not "any subclass can poke into any account". the rule keeps `Savings` out of `Checking`'s business.
+
+<Gotcha title="protected is wider than package-private">
+people read the keywords as a ladder: private, then protected, then public, with package-private somewhere off to the side. wrong. `protected` includes the whole package. if you write `protected` thinking "subclasses only", every class in the package can touch it too.
+</Gotcha>
+
+## private is per class, not per object
+
+<Predict options={["10 50", "60 0", "compile error"]} answer={1}>
+```java
+class Wallet {
+    private int cash;
+
+    Wallet(int cash) { this.cash = cash; }
+
+    void steal(Wallet other) {
+        this.cash += other.cash;
+        other.cash = 0;
+    }
+
+    int cash() { return cash; }
+}
+// in main:
+Wallet mine = new Wallet(10);
+Wallet yours = new Wallet(50);
+mine.steal(yours);
+IO.println(mine.cash() + " " + yours.cash());
+```
+<Explain>
+`private` is checked against the *code*, and `steal` is code inside `Wallet`. so it can read and write the private fields of any `Wallet`, not just `this`. that's exactly how `equals` gets to compare `other.x` with `x`.
+</Explain>
+</Predict>
+
+the same idea covers nesting: a class and the classes nested inside it can all see each other's privates (they're "nestmates" since java 11, so the JVM checks it directly, no synthetic accessor methods).
+
+```java title="Main.java" run output="42 7"
+public class Main {
+    private int secret = 42;
+
+    class Peeker {
+        int peek() {
+            return secret;          // inner reads outer's private
+        }
+    }
+
+    static class Box {
+        private int hidden = 7;
+    }
+
+    public static void main(String[] args) {
+        Main m = new Main();
+        System.out.println(m.new Peeker().peek() + " " + new Box().hidden); // outer reads nested private
+    }
+}
+```
+
+## the smaller rules
+
+- a **top-level** class can only be `public` or package-private. one `public` top-level class per file, and the file must be named after it.
+- **overriding can't shrink access.** a `public` method stays `public` in every subclass, or javac says `attempting to assign weaker access privileges; was public`. (it can widen: `protected` → `public` is fine.)
+- **interface members** are implicitly `public` (methods can be `private` since java 9, for helpers).
+- **local variables** have no modifiers at all. their scope is the block.
+- **modules sit on top.** since java 9, a `public` class in a package your module doesn't export is invisible outside the module. see [modules](/learn/tooling/modules).
+
+<Compare>
+<Bad label="public mutable field">
+```java
+public class Account {
+    public int balance;  // anyone, anywhere, any value
+}
+```
+</Bad>
+<Good label="private field, a method that guards it">
+```java
+public class Account {
+    private int balance;
+
+    public void deposit(int amount) {
+        if (amount <= 0) throw new IllegalArgumentException();
+        balance += amount;
+    }
+
+    public int balance() { return balance; }
+}
+```
+</Good>
+</Compare>
+
+the field is an implementation detail. the method is the API. once a field is `public`, you can never add validation, change its type, or make it computed, because someone out there reads it directly.
+
+<Effective item="15–16" title="minimize accessibility, and use accessors in public classes">
+make every class and member as inaccessible as it can be while the code still works. public classes shouldn't expose mutable fields: hide them behind methods so you can change the representation later. a package-private or private nested class can expose fields if it's convenient, since nobody outside depends on it.
+</Effective>
+
+<Interview q="what's the difference between protected and package-private?">
+package-private (no keyword) is visible to the same package only. `protected` is everything package-private gives you, plus subclasses in other packages, and those subclasses can only access it through references of their own type. so `protected` is strictly wider. the trick question is "can a subclass access a protected field of another instance of the parent?", and the answer is: not from another package, unless the reference's type is the subclass.
+</Interview>
+
+<Keylines>
+- private → class, (nothing) → package, protected → package + subclasses, public → everyone.
+- access is checked on the code doing the access, not the object being accessed.
+- protected from another package only works through your own type's references.
+- protected is wider than package-private. it's not "subclasses only".
+- start private. widen only when something real needs it.
+</Keylines>

@@ -1,0 +1,174 @@
+import { MavenLifecycle } from "@/components/figures/tooling/MavenLifecycle";
+import { NearestWins } from "@/components/figures/tooling/NearestWins";
+
+<InShort>
+maven is **convention plus a list**. you put code where maven expects it, write a `pom.xml` that says who you are and what you depend on, and maven runs a fixed **lifecycle** of phases. **plugins** do the actual work by binding **goals** to those phases.
+
+when two versions of the same library show up in your dependency tree, the **nearest** one wins. not the newest. that one rule causes more weird `NoSuchMethodError`s than anything else in java.
+</InShort>
+
+## the picture
+
+think of an assembly line in a factory. the stations are bolted to the floor in a fixed order: cut, weld, paint, inspect, ship. you don't design the line, you hand over a parts list and say "run it up to paint". every station before paint runs, in order, every time. that's maven: the stations are **phases**, the machines at each station are **plugin goals**, and the parts list is the **pom**.
+
+the floor plan is fixed too. maven doesn't ask where your code is, it assumes:
+
+<Figure caption="the standard directory layout. maven 3.10 found everything here without a single line of configuration. click a folder to fold it.">
+<Tree>{`
+app
+    pom.xml                     #hot // the only file maven needs
+    src
+        main
+            java                // your code → target/classes
+            resources           // config files, copied as-is
+        test
+            java                // tests → target/test-classes
+            resources
+    target                      // everything maven makes. safe to delete
+        classes
+        test-classes
+        surefire-reports        // test results, one file per class
+        app-1.0-SNAPSHOT.jar
+`}</Tree>
+</Figure>
+
+## the pom
+
+here's a complete `pom.xml`: the one for the demo app later in this chapter, minus one dependency (that one is where the trouble starts). everything in this chapter ran on maven 3.10.0 and jdk 25.
+
+```xml title="pom.xml"
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.acme</groupId>           <!-- who: usually a reversed domain -->
+  <artifactId>app</artifactId>          <!-- what -->
+  <version>1.0-SNAPSHOT</version>       <!-- which. SNAPSHOT = still changing -->
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.acme</groupId>
+      <artifactId>json-lib</artifactId>
+      <version>1.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>6.1.3</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+```
+
+`groupId:artifactId:version` is the artifact's address, its **coordinates**. maven turns it into a path (`com/acme/json-lib/1.0/json-lib-1.0.jar`), looks in `~/.m2/repository` first, then downloads from maven central. `maven.compiler.release` becomes `javac --release 25` (the safe way to target a version, see [the jdk toolbox](/learn/tooling/jdk-tools)).
+
+## the lifecycle
+
+this is the part people get wrong. you never run a plugin's "compile step" directly. you ask for a **phase**, and maven runs every phase before it.
+
+<Figure caption={<>click a phase to run <code>mvn</code> with it. the plugin goals and versions are what maven 3.10.0 binds for a jar project, and the log lines are its real output. most of the 23 phases have nothing bound: they're hooks.</>} wide>
+<MavenLifecycle />
+</Figure>
+
+so `mvn package` compiles, compiles tests, runs them, and only then builds the jar. a failing test stops it at `test`, and no jar gets made. `mvn install` does all of that and copies the jar into your local repository so your other projects can depend on it. there are two more, separate lifecycles: `clean` (deletes `target/`) and `site` (generates a report site). that's why the classic incantation is `mvn clean install`: two lifecycles, one command.
+
+<Quiz question="you run mvn test. which of these happens?" options={["only surefire runs, against whatever classes are already in target/", "resources, compile, test-compile, then the tests run", "the jar gets built, then tests run against it"]} answer={1}>
+<Explain>
+`test` is phase 15 of 23. maven runs `process-resources`, `compile`, `process-test-resources`, `test-compile` and then `test`. `package` comes after `test`, so no jar. if you really want just one goal, you can name it directly: `mvn surefire:test`. that runs the goal alone, no phases.
+</Explain>
+</Quiz>
+
+## plugins do the work
+
+maven core knows almost nothing about java. compiling is `maven-compiler-plugin`, testing is `maven-surefire-plugin`, jarring is `maven-jar-plugin`. a **goal** is one task a plugin can do (`compiler:compile`, `compiler:testCompile`). the packaging type (`jar`, `war`, `pom`) decides which goals are bound to which phases by default. you add more by declaring an execution:
+
+```xml title="pom.xml (build section)"
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-enforcer-plugin</artifactId>
+      <version>3.6.2</version>
+      <executions>
+        <execution>
+          <id>enforce</id>
+          <goals><goal>enforce</goal></goals>   <!-- binds to validate by default -->
+          <configuration>
+            <rules><dependencyConvergence/></rules>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+`mvn dependency:tree` works without any of that: naming `plugin:goal` on the command line runs that goal once, outside the lifecycle. you'll use that one a lot. (and pin plugin versions like above. if you don't, they come from maven's own defaults, which change between maven releases.)
+
+## scopes: which classpath gets what
+
+a dependency doesn't just "get added". its **scope** decides which classpaths it lands on.
+
+| scope | compiling `src/main` | compiling + running tests | at runtime (packaged) | typical use |
+| --- | --- | --- | --- | --- |
+| `compile` (default) | yes | yes | yes | almost everything |
+| `provided` | yes | yes | no | the servlet API: the server already has it |
+| `runtime` | no | yes | yes | a JDBC driver: code only talks to `java.sql` |
+| `test` | no | yes | no | junit, assertj, mockito |
+| `import` | only inside `<dependencyManagement>`, type `pom` | | | pulls in a BOM's version list |
+
+scopes also filter what flows in transitively: your dependencies' `test` and `provided` dependencies never reach you.
+
+## when versions collide
+
+every library brings its own dependencies, and sooner or later two of them want different versions of the same thing. maven only puts **one** version on the classpath, and it picks with a rule called **dependency mediation**:
+
+1. the version **nearest** to your project in the tree wins.
+2. if two are equally near, the one **declared first** wins.
+
+that's it. there's no "newest wins". here's a real project where that bites:
+
+<Figure caption={<>try each fix. the trees and results are from real maven runs. with no fix, the <C k="live">nearer</C> text-utils 1.0 wins, http-lib calls a method that only exists in 2.0, and you find out from a <C k="dead">NoSuchMethodError</C> at runtime. it compiled perfectly.</>} wide>
+<NearestWins />
+</Figure>
+
+notice the build *compiled*. `App` never calls `whisper()` itself, `core-lib` does, and `core-lib` was compiled long ago against 2.0. javac had no way to know. this is why dependency conflicts surface as `NoSuchMethodError`, `NoClassDefFoundError` or `AbstractMethodError` in production instead of compile errors.
+
+the **enforcer** plugin from the previous section makes maven refuse to build when versions diverge:
+
+```text title="mvn package, with dependencyConvergence and no fix"
+[ERROR] Dependency convergence error for com.acme:text-utils:jar:1.0. Paths to dependency are:
+[ERROR] +-com.acme:app:jar:1.0-SNAPSHOT
+[ERROR]   +-com.acme:json-lib:jar:1.0:compile
+[ERROR]     +-com.acme:text-utils:jar:1.0:compile
+[ERROR] and
+[ERROR] +-com.acme:app:jar:1.0-SNAPSHOT
+[ERROR]   +-com.acme:http-lib:jar:2.0:compile
+[ERROR]     +-com.acme:core-lib:jar:2.0:compile
+[ERROR]       +-com.acme:text-utils:jar:2.0:compile
+```
+
+<Gotcha title="adding a dependency can downgrade another one">
+add a new library whose tree contains `jackson-databind` one level nearer than the one you were getting before, and you silently switch jackson versions. nothing in your pom mentions jackson. the fix is the same as above: pin the versions you care about in `<dependencyManagement>` (or import the library's BOM), and turn on `dependencyConvergence` so it's a build error instead of a 3am page.
+</Gotcha>
+
+<Deep title="what about maven 4?">
+maven 4 has been in release candidates for a while (4.0.0-rc-7 is the newest on maven central as of october 2026; 3.10.0 is the current stable). the headline change is splitting the **build POM** (what you write, with new conveniences) from the **consumer POM** (a cleaned-up file that gets published for others to read), so the model can evolve without breaking every tool that reads poms. it also renames `<modules>` to `<subprojects>` and needs java 17 to run. your 3.x poms keep working. and whichever version you use, commit the **maven wrapper** (`mvnw`) so every machine builds with the same maven.
+</Deep>
+
+<Interview q="two of your dependencies need different versions of the same library. which one does maven use?">
+the one nearest to your project in the dependency tree (fewest hops), and if there's a tie, the one declared first in the pom. it doesn't pick the newest. you see the decision with `mvn dependency:tree -Dverbose` (look for `omitted for conflict with`), and you control it with `<dependencyManagement>`, a direct dependency, or an exclusion. bonus point: gradle resolves the same conflict differently, it picks the highest version by default.
+</Interview>
+
+<Keylines>
+- the pom says who you are and what you need. the layout is convention.
+- running a phase runs every phase before it. `mvn test` doesn't build a jar.
+- plugins do the work. goals bind to phases.
+- scope decides which classpath a dependency lands on.
+- nearest wins, not newest. pin versions in `<dependencyManagement>` and enforce convergence.
+</Keylines>

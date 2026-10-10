@@ -1,0 +1,142 @@
+import { LinkedThread } from "@/components/figures/collections/LinkedThread";
+import { LruLab } from "@/components/figures/collections/LruLab";
+
+<InShort>
+a `LinkedHashMap` is a `HashMap` whose entries are *also* a **doubly linked list**. the table gives you O(1) lookups, the list gives you a predictable order: **insertion order** by default, or **access order** if you ask.
+
+access order plus one overridden method, `removeEldestEntry`, is a complete **LRU cache** in six lines.
+</InShort>
+
+## the picture
+
+you know how a `HashMap` prints its keys in a seemingly random order? `LinkedHashMap` fixes that by keeping a second structure on the side. same entries, same buckets, plus two extra pointers per entry (`before` and `after`) that string them together in the order you care about.
+
+think of a cloakroom where coats hang on numbered hooks (the buckets), but there's also a string tied from coat to coat in the order people arrived. to find your coat: hook number. to hand coats back in arrival order: follow the string.
+
+<Figure wide caption={<>the grey lines are the <code>HashMap</code> part: entries hanging in their real buckets (an 8-bucket table, positions computed from the real hash codes). the <C k="ref">blue thread</C> is the linked list, <code>head</code> to <code>tail</code>. switch to <strong>access</strong> order and <code>get</code> a key: its entry <C k="hot">moves to the tail</C>, the buckets don't change at all.</>}>
+<LinkedThread />
+</Figure>
+
+each entry also points back at the one before it (`before`), so unlinking from the middle is O(1). those backward pointers aren't drawn, to keep the picture readable.
+
+the cost: two more references per entry. a `HashMap.Node` is 32 bytes (12 header + `hash` + `key`, `value`, `next`, padded), a `LinkedHashMap.Entry` is 40. that's the price of order.
+
+## insertion order
+
+the default. iteration follows the order keys were first inserted. re-putting an existing key doesn't move it.
+
+```java title="Main.java" run output="[banana, apple, pear, kiwi, fig]\n[pear, apple, fig, banana, kiwi]\n{kiwi=9, pear=0, fig=3, banana=6, apple=9}"
+void main() {
+    var hash = new HashMap<String, Integer>();
+    var linked = new LinkedHashMap<String, Integer>();
+    for (String k : List.of("pear", "apple", "fig", "banana", "kiwi")) {
+        hash.put(k, k.length());
+        linked.put(k, k.length());
+    }
+    linked.put("pear", 0);
+    IO.println(hash.keySet());
+    IO.println(linked.keySet());
+    linked.putFirst("kiwi", 9);
+    linked.putLast("apple", 9);
+    IO.println(linked);
+}
+```
+
+notice `pear` stayed first even after `put("pear", 0)`. the last two lines are the java 21 [sequenced](/learn/collections/the-big-picture) methods: `putFirst` and `putLast` *do* move an existing key, to the front or the back.
+
+this makes `LinkedHashMap` the go-to when you want a map that behaves predictably: JSON objects that keep field order, config that prints the way it was written, tests that don't flake on ordering.
+
+## access order
+
+pass `true` as the third constructor argument and the list is reordered on every access: `get`, `getOrDefault`, `compute`, and a `put` on an existing key all move that entry to the tail. so the head is always the **least recently used** entry.
+
+```java
+new LinkedHashMap<>(16, 0.75f, true);   // capacity, load factor, accessOrder
+```
+
+that's half an LRU cache. the other half is a hook: after every insertion, `LinkedHashMap` calls `removeEldestEntry(head)`, and if it returns `true`, the head gets removed. the default returns `false`. override it:
+
+```java title="Main.java" run output="[c, a, d]"
+class Lru<K, V> extends LinkedHashMap<K, V> {
+    private final int capacity;
+
+    Lru(int capacity) {
+        super(16, 0.75f, true);
+        this.capacity = capacity;
+    }
+
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return size() > capacity;
+    }
+}
+
+void main() {
+    var cache = new Lru<String, Integer>(3);
+    cache.put("a", 1);
+    cache.put("b", 2);
+    cache.put("c", 3);
+    cache.get("a");
+    cache.put("d", 4);
+    IO.println(cache.keySet());
+}
+```
+
+`get("a")` saved `a` by making it the most recent, so when `d` pushed the size to 4, `b` was the eldest and got evicted. play with it:
+
+<Figure caption={<>that exact cache, capacity 3. <C k="live">hits</C> move the entry to the newest end. a <code>put</code> that pushes the size past 3 <C k="dead">evicts</C> the eldest. try <code>put(a)</code>, <code>put(b)</code>, <code>put(c)</code>, <code>get(a)</code>, <code>put(d)</code>.</>}>
+<LruLab />
+</Figure>
+
+<Predict options={["[a, b, c]", "[b, c, d]", "[c, a, d]", "[a, c, d]"]} answer={2}>
+```java
+var cache = new Lru<String, Integer>(3);  // the class above
+cache.put("a", 1);
+cache.put("b", 2);
+cache.put("c", 3);
+cache.get("a");
+cache.put("d", 4);
+IO.println(cache.keySet());
+```
+<Explain>
+after the three puts the list is `a, b, c`. `get("a")` moves `a` to the end: `b, c, a`. `put("d")` appends `d` (size 4), `removeEldestEntry` sees size 4 > 3 and the head, `b`, is removed. iteration goes eldest to newest: `[c, a, d]`.
+</Explain>
+</Predict>
+
+## the gotchas
+
+<Gotcha title="in access order, get() is a write">
+because `get` relinks the entry, it's a structural modification. it bumps `modCount`, so this throws on the second iteration, in a single thread:
+
+```java title="Main.java" run output="a=1\nException in thread \"main\" java.util.ConcurrentModificationException"
+void main() {
+    var m = new LinkedHashMap<String, Integer>(16, 0.75f, true);
+    m.put("a", 1);
+    m.put("b", 2);
+    m.put("c", 3);
+    for (String k : m.keySet()) {
+        IO.println(k + "=" + m.get(k));
+    }
+}
+```
+
+iterate `entrySet()` instead and read `e.getValue()`, which doesn't count as an access. (the whole `modCount` story is in [iterators and fail-fast](/learn/collections/iterators-and-fail-fast).)
+</Gotcha>
+
+it also means an access-ordered map needs locking even for reads if more than one thread touches it: two "reads" can both rewire the list at once. wrapping it in `Collections.synchronizedMap` works for a small cache. anything serious, use a real caching library (Caffeine is the usual pick), which handles concurrency, expiry and smarter eviction than plain LRU.
+
+<Deep title="what removeEldestEntry is allowed to do">
+the hook gets the eldest entry and returns a boolean. you can make the decision on anything: size, the entry's age (store a timestamp in the value), total weight of the values. the javadoc permits it to modify the map itself, but then it must return `false` (otherwise the map would try to remove an entry you may already have removed). in practice: just return a boolean and let the map do the removal.
+</Deep>
+
+<Interview q="implement an LRU cache">
+in java, the honest answer starts with "`LinkedHashMap` with `accessOrder = true` and `removeEldestEntry` returning `size() > capacity`", because that's O(1) get and put with no extra code. if they want it from scratch, it's the same structure built by hand: a `HashMap<K, Node>` for lookup plus a doubly linked list of nodes. on `get`, unlink the node and move it to the tail. on `put`, add at the tail and, if over capacity, unlink the head and remove its key from the map. both operations are O(1) because the map hands you the node directly and the list only relinks neighbours.
+</Interview>
+
+<Keylines>
+- `LinkedHashMap` = `HashMap` + a doubly linked list through the same entries.
+- default: insertion order. re-putting a key doesn't move it.
+- `accessOrder = true`: every access moves the entry to the tail. head = least recently used.
+- override `removeEldestEntry` and you have an LRU cache.
+- in access order, `get` is a structural change. iterate entries, and lock if threads share it.
+</Keylines>

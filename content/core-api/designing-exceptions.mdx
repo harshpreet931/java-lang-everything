@@ -1,0 +1,161 @@
+import { CauseChain } from "@/components/figures/core-api/CauseChain";
+
+<InShort>
+a good exception says **what** failed, with the values that matter, and **why**, by carrying the exception that caused it. each layer of a program catches the low-level failures it understands and rethrows them in its own words (**exception translation**), passing the original along as the **cause**.
+
+and exceptions are for exceptional things: free when nothing's thrown, but every `new` walks the whole stack.
+</InShort>
+
+## the picture
+
+a good error report is a chain of "because": *checkout failed for order 42, because finding order 42 failed, because the database refused the connection.* each link is written by someone who knows their level of the story. the web layer knows about checkouts, the repository knows about queries, the driver knows about sockets.
+
+in java each link is an exception object, and "because" is a reference: `getCause()`.
+
+<Figure wide caption={<>one failure at the bottom, four ways to handle it on the way up. with <strong>translate + keep the cause</strong>, every layer stays in its own vocabulary and the chain of <C k="ref">causes</C> still reaches the <C k="hot">root</C>. the other three each <C k="dead">break something</C>: the log, the layering, or the truth.</>}>
+<CauseChain />
+</Figure>
+
+## translate at the boundary
+
+the rule: catch an exception where it stops making sense, and rethrow one that does make sense one level up. the repository is the last place where "SQL" is a meaningful word, so that's where `SQLException` turns into a `DataAccessException`. the service turns that into a `CheckoutException`. nobody above the repository imports `java.sql`.
+
+and always pass the original as the cause. every standard exception has a `(String message, Throwable cause)` constructor for exactly this, and `printStackTrace` prints the chain as `Caused by:` sections (you saw one in [exceptions](/learn/core-api/exceptions)).
+
+<Effective item={73} title="throw exceptions appropriate to the abstraction">
+higher layers should catch lower-level exceptions and throw ones that fit their own API, chaining the original as the cause. but don't overdo it: the best fix is often to make the low-level call fail less (check its arguments first), and translation is for what's left.
+</Effective>
+
+<Quiz question="a service calls a repository that uses JDBC. where should SQLException stop?" options={["in the repository", "in the service", "in the controller", "nowhere, declare it everywhere"]} answer={0}>
+<Explain>
+the repository is the only layer that knows it's talking to a SQL database. it should catch `SQLException` and throw something in its own vocabulary (a `DataAccessException`, an `OrderNotFoundException`), with the `SQLException` as the cause. swap the database for an HTTP service tomorrow and only the repository changes.
+</Explain>
+</Quiz>
+
+## writing your own
+
+most of the time a standard exception is right (`IllegalArgumentException`, `IllegalStateException`, `UnsupportedOperationException`...). write your own when callers need to **catch it specifically**, or when it has to **carry data** a caller will use.
+
+```java title="Main.java" run output="checkout failed for order 42, id field = 42\nroot cause: java.sql.SQLException: Connection refused"
+import java.sql.SQLException;
+
+class CheckoutException extends RuntimeException {
+    private final long orderId;                               // context, as a real field
+
+    CheckoutException(long orderId, Throwable cause) {
+        super("checkout failed for order " + orderId, cause); // message AND cause
+        this.orderId = orderId;
+    }
+
+    long orderId() {
+        return orderId;
+    }
+}
+
+void checkout(long id) {
+    try {
+        throw new SQLException("Connection refused");        // pretend this came from JDBC
+    } catch (SQLException e) {
+        throw new CheckoutException(id, e);                   // translate, keep the cause
+    }
+}
+
+void main() {
+    try {
+        checkout(42);
+    } catch (CheckoutException e) {
+        IO.println(e.getMessage() + ", id field = " + e.orderId());
+        Throwable root = e;
+        while (root.getCause() != null) root = root.getCause();
+        IO.println("root cause: " + root);
+    }
+}
+```
+
+the checklist:
+
+- **pick the parent on purpose.** `RuntimeException` for broken contracts and most application errors, `Exception` only if callers can genuinely recover (the three questions in [exceptions](/learn/core-api/exceptions)).
+- **put the values in the message.** "checkout failed for order 42" beats "checkout failed". include the inputs that caused it (but never passwords or tokens: messages end up in logs).
+- **keep the cause.** offer a `(…, Throwable cause)` constructor and use it.
+- **expose context as fields**, so callers don't have to parse your message.
+- **name it for the problem**, ending in `Exception`: `OrderNotFoundException`, not `OrderException2`.
+- `javac -Xlint` will mention a missing `serialVersionUID` (`Throwable` is `Serializable`). add one if your exceptions ever cross a JVM boundary, ignore it otherwise.
+
+<Effective item={75} title="include failure-capture information in detail messages">
+a stack trace is often all you get from production, so the message should contain the values of every parameter and field that contributed to the failure. item 72's advice still holds: before creating a class, check whether a standard exception already says it.
+</Effective>
+
+## exceptions are for exceptional things
+
+exceptions are cheap when nothing's thrown: a `try` block costs nothing until something goes wrong (it's just a row in the [exception table](/learn/core-api/try-catch-finally)). the expensive part is **creating** one, because the constructor calls `fillInStackTrace()`, which walks every frame on the stack. turning that into `StackTraceElement` objects (when you call `getStackTrace()` or print it) costs even more.
+
+<Figure caption={<>nanoseconds per operation, best of 5 after warm-up, temurin 25 on an M4 Pro. the top three parse a one-digit string; "throw + catch" is the bad-input path. creation cost grows with stack depth. a <C k="live">try that doesn't throw</C> costs the same as no try at all. an exception made with <code>writableStackTrace = false</code> costs about as much as any small object.</>}>
+<Bars
+  unit="ns"
+  log
+  data={[
+    { label: "return -1 (bad input)", value: 1.7, tone: "live" },
+    { label: "try, nothing thrown", value: 1.7, tone: "live" },
+    { label: "throw + catch", value: 235, tone: "dead" },
+    { label: "new, no stack trace", value: 49 },
+    { label: "new, 100 frames deep", value: 1800, tone: "dead" },
+    { label: "new, 1,000 deep", value: 15000, tone: "dead" },
+    { label: "getStackTrace(), 100", value: 10600, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+the honest takeaway: 235 ns is nothing for an error path, and a lot for a *normal* path. a parser that throws on every bad line of a big file, or a loop that ends by catching `ArrayIndexOutOfBoundsException`, is 100× slower than it needs to be, and hides real bugs behind a catch.
+
+<Compare>
+<Bad label="exception as control flow">
+```java
+boolean isNumber(String s) {
+    try {
+        Integer.parseInt(s);
+        return true;
+    } catch (NumberFormatException e) {
+        return false;   // the "normal" answer costs a stack walk
+    }
+}
+```
+</Bad>
+<Good label="check first">
+```java
+boolean isNumber(String s) {
+    return !s.isEmpty() && s.chars().allMatch(Character::isDigit);
+}
+```
+(not identical: this one rejects `"-5"` and accepts digits too big for an `int`. pick the check that matches what you actually mean.)
+</Good>
+</Compare>
+
+<Effective item={69} title="use exceptions only for exceptional conditions">
+don't use exceptions for ordinary control flow, and design APIs so callers don't have to: offer a state-testing method (`hasNext()` before `next()`) or return an empty `Optional` instead of throwing for an expected "not found".
+</Effective>
+
+<Deep title="when the JVM throws away your stack trace">
+HotSpot has an optimization called `OmitStackTraceInFastThrow`, on by default. when compiled code keeps throwing the same *implicit* exception (an NPE from a null dereference, `ArithmeticException`, `ArrayIndexOutOfBoundsException`, `ClassCastException`...) from the same spot, C2 switches to throwing one preallocated exception with **no stack trace and no message**.
+
+measured on jdk 25: a hot method dereferencing `null` in a loop gave full traces for the first ~5,180 NPEs, then bare ones (`getStackTrace().length == 0`, `getMessage() == null`) for most of the remaining 200,000. in production this shows up as a log full of `java.lang.NullPointerException` with nothing after it. the real trace is in the logs, just much earlier, from when the code was still interpreted. or restart with `-XX:-OmitStackTraceInFastThrow`.
+</Deep>
+
+<Gotcha title="InterruptedException: don't just log it">
+when a blocking call throws `InterruptedException`, the JVM has already *cleared* the thread's interrupt flag. if you catch it and carry on, the request to stop is lost, and whoever interrupted the thread (a shutdown hook, an executor being closed) waits forever. either rethrow it, or restore the flag: `Thread.currentThread().interrupt();`. (more in [threads](/learn/concurrency/threads).)
+</Gotcha>
+
+## leave things the way you found them
+
+a method that throws should, ideally, leave its object exactly as it was before the call. that's called **failure atomicity**. the easy ways to get it: validate arguments *before* changing anything, compute the new state in locals and assign it at the end, or work on a copy. `ArrayList.add` checks capacity before it writes; a `withdraw` that subtracts first and checks the balance second leaves a negative balance behind when it throws.
+
+<Interview q="what's exception chaining and why does it matter?">
+wrapping a lower-level exception as the cause of a higher-level one, like `new ServiceException(msg, e)`. it lets each layer throw exceptions in its own vocabulary without losing the original failure: `getCause()` walks the chain, and stack traces print every link as "Caused by:". dropping the cause is one of the most common reasons a production log says what failed but not why.
+</Interview>
+
+<Keylines>
+- message = what failed, with the values. cause = why.
+- translate exceptions at layer boundaries, and always pass the original as the cause.
+- custom exceptions only when callers catch them specifically or need their data.
+- a try costs nothing. creating an exception costs a stack walk. never use them for normal flow.
+- caught `InterruptedException`? rethrow it or restore the flag.
+</Keylines>

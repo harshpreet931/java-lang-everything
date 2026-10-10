@@ -1,0 +1,150 @@
+import { FloatZoom } from "@/components/figures/basics/FloatZoom";
+import { SpecialDoubles } from "@/components/figures/basics/SpecialDoubles";
+import { UlpBars } from "@/components/figures/basics/UlpBars";
+
+<InShort>
+a `double` stores a number as **binary scientific notation**: a sign, an exponent and 52 bits of digits. most decimals, like 0.1, have no exact binary form, so what's stored is the **nearest double**. that's the whole reason `0.1 + 0.2 != 0.3`. compare doubles with a tolerance, and use **BigDecimal** for money.
+</InShort>
+
+## the picture
+
+try writing 1/3 as a decimal. 0.3333... and you run out of paper eventually, so you round. binary has the exact same problem with different numbers: 1/10 in binary is 0.0001100110011... repeating forever. a `double` has room for 52 bits of digits, so it cuts off and rounds to the nearest value it *can* represent.
+
+think of a ruler. a double can only point at tick marks. 0.1 falls between two ticks, so java quietly uses the closest tick. most of the time the error is invisible. add a couple of those slightly-off numbers together and the errors can push the result onto a different tick than the one you'd get by typing the answer directly.
+
+## 0.1 + 0.2
+
+<Figure wide caption={<>pick an expression. the digits are exact (the same ones <code>new BigDecimal(x)</code> prints), and the <C k="hot">amber</C> part is where the stored value stops matching what you typed. on the number line, the <C k="hot">diamond</C> is the true answer, the dot is the double it rounds to.</>}>
+<FloatZoom />
+</Figure>
+
+see? neither `0.1` nor `0.2` nor `0.3` is stored exactly. the exact sum of the stored 0.1 and the stored 0.2 lands between two doubles, gets rounded to the upper one, and that one isn't the double you get when you type `0.3`. one tick apart, about 5.5 × 10⁻¹⁷. enough for `==` to say no.
+
+you can see the stored values yourself. `new BigDecimal(double)` prints the exact value, every digit:
+
+```java title="Main.java" run output="0.30000000000000004\nfalse\n0.1000000000000000055511151231257827021181583404541015625\n0.299999999999999988897769753748434595763683319091796875"
+import java.math.BigDecimal;
+
+void main() {
+    IO.println(0.1 + 0.2);
+    IO.println(0.1 + 0.2 == 0.3);
+    IO.println(new BigDecimal(0.1));
+    IO.println(new BigDecimal(0.3));
+}
+```
+
+and why does `println(0.1)` show `0.1` then? because java prints the **shortest** decimal that still identifies that exact double. `0.1` is enough to pick out the stored value, so that's what you see. it's a polite lie. `0.30000000000000004` is what it takes to identify the sum.
+
+## how the bits are laid out
+
+a `double` is 64 bits: 1 sign bit, 11 exponent bits, 52 mantissa bits. a `float` is the same idea in 32: 1, 8 and 23. the value is roughly <code>±1.mantissa × 2<sup>exponent</sup></code>, in binary. the exponent says where the point goes, the mantissa holds the digits.
+
+<Figure caption={<>a real float, bit by bit: <C k="hot">sign</C>, <C k="meta">exponent</C>, mantissa. type any number (try 0.1, 1, 0.5, 0.75, 16777217) or click bits. "actually stored" is the value those bits really hold.</>}>
+<Bits type="float" value={0.1} editable input />
+</Figure>
+
+numbers that are sums of powers of two (0.5, 0.75, 0.25, 3.0) fit exactly. try `0.75`: the mantissa is just two bits. anything with a factor of 5 or 3 in the denominator (0.1, 0.2, 1/3) repeats forever in binary and gets rounded.
+
+`float` gives you about 7 significant decimal digits, `double` about 15 to 17. use `double`. a `float` isn't more exact, it just prints fewer digits: `0.1f + 0.2f` prints `0.3`, because there are fewer floats near 0.3 to tell apart.
+
+## the gaps grow with the number
+
+the ticks on the ruler aren't evenly spaced. there are as many doubles between 1 and 2 as between 1,000,000 and 2,000,000, so the gap between neighbours (the **ulp**, unit in the last place) grows with the size of the number:
+
+<Figure caption={<>the gap between a double and the next one up, from <code>Math.ulp(x)</code> on jdk 25. log scale: each bar is a different universe. past 2<sup>53</sup> (about 9 × 10<sup>15</sup>) the gap is bigger than 1, and doubles can't even count.</>}>
+<UlpBars />
+</Figure>
+
+```java title="Main.java" run output="2.220446049250313E-16 1.1641532182693481E-10 0.125 2.0\n9.007199254740992E15"
+void main() {
+    IO.println(Math.ulp(1.0) + " " + Math.ulp(1e6) + " " + Math.ulp(1e15) + " " + Math.ulp(1e16));
+    IO.println(9007199254740993.0);
+}
+```
+
+that last line: 9,007,199,254,740,993 typed as a double comes back as ...992. there is no double for it. this is why IDs and timestamps belong in a `long`, never a `double` (and why JSON numbers in javascript, which are all doubles, eat big IDs).
+
+## comparing doubles
+
+never `==` on computed doubles. ask whether they're close enough instead:
+
+```java title="Main.java" run output="0.9999999999999999 false\ntrue"
+void main() {
+    double sum = 0;
+    for (int i = 0; i < 10; i++) sum += 0.1;
+    IO.println(sum + " " + (sum == 1.0));
+    IO.println(Math.abs(sum - 1.0) < 1e-9);
+}
+```
+
+"close enough" depends on your numbers. a fixed tolerance like `1e-9` works around 1, but for values in the millions it's smaller than one ulp, so it never matches. then scale it: `Math.abs(a - b) <= 1e-9 * Math.max(Math.abs(a), Math.abs(b))`.
+
+<Predict options={["1.0", "0.9999999999999999", "1.0000000000000002"]} answer={1}>
+```java
+double total = 0;
+for (int i = 0; i < 10; i++) total += 0.1;
+IO.println(total);
+```
+<Explain>
+each `+= 0.1` adds a value a hair above 0.1 and then rounds the running total to the nearest double. those roundings don't cancel out, and after ten of them the total lands one tick below 1.0.
+</Explain>
+</Predict>
+
+## NaN, infinity and negative zero
+
+doubles have a few values that don't exist in math class, and they behave in ways that break normal intuition.
+
+<Figure caption={<>pick a value to see its bits and how it behaves. the <C k="hot">amber</C> results are the ones that surprise people. every output here was printed by java 25.</>}>
+<SpecialDoubles />
+</Figure>
+
+the big one: `NaN != NaN`. so `x == Double.NaN` is always false, even when `x` is NaN. use `Double.isNaN(x)`.
+
+## money: BigDecimal
+
+you can't get 0.1 dollars exactly in a double, and money has to add up to the cent. the standard fix is `java.math.BigDecimal`: an arbitrary-precision decimal, stored as an integer plus a scale (how many digits after the point), so 0.1 really is 1 × 10⁻¹.
+
+<Compare>
+<Bad label="money in a double">
+```java
+double balance = 0;
+for (int i = 0; i < 10; i++) balance += 0.10;
+IO.println(balance); // 0.9999999999999999
+```
+</Bad>
+<Good label="money in a BigDecimal">
+```java
+var balance = BigDecimal.ZERO;
+var dime = new BigDecimal("0.10");
+for (int i = 0; i < 10; i++) balance = balance.add(dime);
+IO.println(balance); // 1.00
+```
+</Good>
+</Compare>
+
+it's slower and wordier (no `+`, everything is a method call, and every operation returns a new object), but it's exact. the other common choice is to store whole cents in a `long` and only format at the edges.
+
+<Gotcha title="new BigDecimal(0.1) is already wrong">
+`new BigDecimal(0.1)` faithfully copies the double, error and all: `0.1000000000000000055511151231257827021181583404541015625`. by the time it's a double, the damage is done. build BigDecimals from **strings** (`new BigDecimal("0.1")`) or with `BigDecimal.valueOf(0.1)`, which goes through the double's shortest string form and gives you `0.1`. and compare them with `compareTo`, not `equals`: `new BigDecimal("1.0").equals(new BigDecimal("1.00"))` is false, because equals also compares the scale.
+</Gotcha>
+
+<Effective item={60} title="exact answers need exact types">
+when the answer has to be exact (money above all), don't use `float` or `double`. use `BigDecimal` when you need decimal places and don't mind the cost, or `int` / `long` holding the smallest unit (cents) when the numbers fit.
+</Effective>
+
+<Deep title="what happened to strictfp">
+on old x87 CPUs, intermediate results could be kept in 80-bit registers, so the same java code could give slightly different answers on different machines. `strictfp` forced exact IEEE 754 behaviour. modern CPUs (SSE2 and later) don't have the problem, so java 17 ([JEP 306](https://openjdk.org/jeps/306)) made every floating-point operation strict, everywhere. the keyword still compiles, it just does nothing, and javac warns: "as of release 17, all floating-point expressions are evaluated strictly and 'strictfp' is not required". same code, same bits, on every JVM.
+</Deep>
+
+<Interview q="why isn't 0.1 + 0.2 equal to 0.3 in java?">
+because none of the three is exactly representable in binary floating point. each literal is stored as the nearest double, the exact sum of the stored 0.1 and 0.2 falls between two doubles and is rounded to the nearest, which is one ulp above the double for 0.3. it's not a java bug, it's IEEE 754, and every language using doubles does the same. the fixes: compare with a tolerance, or use `BigDecimal` (built from strings) when you need exact decimals.
+</Interview>
+
+<Keylines>
+- a double holds the nearest binary fraction to your number. 0.1 isn't one.
+- `println` shows the shortest digits that identify the double. `new BigDecimal(x)` shows the truth.
+- never `==` on computed doubles. compare with a tolerance that fits your numbers.
+- the gaps between doubles grow with size. above 2⁵³ they can't count integers.
+- NaN isn't equal to itself. -0.0 == 0.0. a double divided by zero is Infinity.
+- money: `BigDecimal` from strings, or a `long` of cents.
+</Keylines>

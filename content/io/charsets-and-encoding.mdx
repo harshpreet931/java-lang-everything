@@ -1,0 +1,194 @@
+import { EncodingLab } from "@/components/figures/io/EncodingLab";
+import { Mojibake } from "@/components/figures/io/Mojibake";
+
+<InShort>
+text is a list of **code points** (numbers from the unicode table). a **charset** is the rule that turns those numbers into bytes and back. java's `char` is not a character, it's one **UTF-16** unit, so an emoji is 2 chars, 1 code point and 4 bytes of UTF-8.
+
+decode with a different charset than you encoded with and you get **mojibake**. since java 18 the default is UTF-8 everywhere, so say it anyway and stop guessing.
+</InShort>
+
+## the picture
+
+you know how a file that looks fine on your mac shows up as `cafÃ©` on someone's windows box? nothing got corrupted. the bytes are identical. the two machines just read them with different codebooks.
+
+think of it like a cipher wheel. the message is the text (code points, abstract numbers like U+00E9 for é). the wheel is the charset (UTF-8, ISO-8859-1...). the scribbles on paper are the bytes. hand the paper to someone with a different wheel and they'll read *something*, confidently, and it'll be wrong.
+
+<Figure wide caption={<>type anything or pick a preset, switch charsets, click a character to put it under the microscope. <C k="dead">red</C> bytes are characters the charset can't represent: java writes a <code>?</code> and moves on. in UTF-16, emoji take <C k="ref">2 chars</C>.</>}>
+<EncodingLab />
+</Figure>
+
+<Defs>
+<dt>code point</dt><dd>a character's number in unicode. `U+0041` is A, `U+00E9` is é, `U+1F600` is 😀. there's room for 1,114,112 of them.</dd>
+<dt>charset</dt><dd>an encoding: the rule from code points to bytes. `UTF-8`, `UTF-16`, `ISO-8859-1`, `windows-1252`. in java, a `Charset` object.</dd>
+<dt>char</dt><dd>java's 16-bit type. one UTF-16 code unit. fine for most text, but anything above `U+FFFF` (emoji, rare CJK) needs two of them.</dd>
+<dt>surrogate pair</dt><dd>those two chars. a "high" one (`d800` to `dbff`) and a "low" one (`dc00` to `dfff`) that only mean something together.</dd>
+</Defs>
+
+## three different lengths
+
+one string, three honest answers to "how long is it?":
+
+```java title="Main.java" run output="2\n1\n4\nd83d de00"
+import java.nio.charset.StandardCharsets;
+
+void main() {
+    String s = "😀";
+    IO.println(s.length());                                // chars
+    IO.println(s.codePointCount(0, s.length()));           // code points
+    IO.println(s.getBytes(StandardCharsets.UTF_8).length); // bytes
+    IO.println(Integer.toHexString(s.charAt(0)) + " " + Integer.toHexString(s.charAt(1)));
+}
+```
+
+`length()` counts chars, and 😀 is a surrogate pair: `d83d` + `de00`. that's a leftover from java 1.0, when unicode was a 16-bit standard and java bet on it. unicode outgrew 16 bits (the first characters past `U+FFFF` arrived in 2001), so java 5 kept `char` at 16 bits and adopted UTF-16's trick of splitting big code points across two of them.
+
+<Predict options={["4", "5", "8"]} answer={0}>
+```java
+String s = "hé😀";
+IO.println(s.length());
+```
+<Explain>
+h is 1 char, é is 1 char (it's `U+00E9`, under `U+FFFF`), 😀 is 2 chars. 4. the UTF-8 byte count would be 7 (1 + 2 + 4), and the code point count is 3. try it in the figure above.
+</Explain>
+</Predict>
+
+## how UTF-8 works
+
+UTF-8 is variable length: small numbers get fewer bytes. it's the reason it won the web.
+
+| code points | bytes | first byte | examples |
+| --- | --- | --- | --- |
+| `U+0000` to `U+007F` | 1 | `0xxxxxxx` | ASCII: `a`, `7`, `{`, newline |
+| `U+0080` to `U+07FF` | 2 | `110xxxxx` | é, ñ, ü, Greek, Cyrillic, Hebrew |
+| `U+0800` to `U+FFFF` | 3 | `1110xxxx` | 日, 本, €, ’ |
+| `U+10000` and up | 4 | `11110xxx` | 😀, 👍, 𝄞 |
+
+every byte after the first starts with `10`. three nice properties fall out of that:
+
+- **ASCII is valid UTF-8**, byte for byte. old english-only files just work.
+- **self-synchronizing.** land in the middle of a stream and you can find the next character start: skip bytes that begin with `10`.
+- **no byte of a multi-byte character is ever a plain ASCII byte**, so searching UTF-8 for `/` or `\n` never matches half a character.
+
+UTF-16 is the opposite deal: 2 bytes for almost everything, 4 for the rest. great for CJK-heavy text, wasteful for english, and it has a byte-order question (big-endian or little?) that UTF-8 doesn't. `getBytes(UTF_16)` answers it by writing a 2-byte mark, `fe ff`, at the front.
+
+## mojibake
+
+decode bytes with the wrong charset and you get mojibake (文字化け, "character transformation"). it has a fingerprint: `Ã` followed by something is almost always UTF-8 read as latin-1 or windows-1252.
+
+<Figure caption={<>pick how the text was written and how it was read. every result here came out of a real jdk 25, not the browser. <C k="hot">amber</C> bytes are the non-ASCII ones, where charsets disagree. <C k="dead">red</C> means the text didn't survive the trip; <C k="live">green</C> means it did.</>}>
+<Mojibake />
+</Figure>
+
+```java title="Main.java" run output="naïve café\nnaÃ¯ve cafÃ©\nnaïve café"
+import static java.nio.charset.StandardCharsets.*;
+
+void main() {
+    byte[] bytes = "naïve café".getBytes(UTF_8);
+    IO.println(new String(bytes, UTF_8));
+    IO.println(new String(bytes, ISO_8859_1));
+
+    // undo it: encode the wrong way, decode the right way
+    byte[] back = new String(bytes, ISO_8859_1).getBytes(ISO_8859_1);
+    IO.println(new String(back, UTF_8));
+}
+```
+
+the last line is the useful trick. ISO-8859-1 maps all 256 byte values to a character, so a UTF-8-read-as-latin-1 string still holds every original byte. turn it back into bytes with the same wrong charset and you can decode it properly. writing the *other* way is not recoverable: if you encode `’` or `日` as ISO-8859-1, java writes `?` and the character is simply gone.
+
+<Gotcha title="the decoder doesn't throw, it guesses">
+`new String(bytes, UTF_8)` never fails. malformed bytes silently become `U+FFFD` (�) and your data is quietly damaged. `Files.readString` and `Files.readAllLines` are strict and throw instead. pick the one that matches how much you trust the input.
+
+```java title="Main.java" run output="caf�\njava.nio.charset.MalformedInputException: Input length = 1"
+import java.nio.charset.MalformedInputException;
+import java.nio.file.*;
+import static java.nio.charset.StandardCharsets.*;
+
+void main() throws Exception {
+    Path p = Files.createTempFile("latin1", ".txt");
+    Files.write(p, "café".getBytes(ISO_8859_1));   // 63 61 66 e9
+
+    IO.println(new String(Files.readAllBytes(p), UTF_8));
+    try {
+        IO.println(Files.readString(p));
+    } catch (MalformedInputException e) {
+        IO.println(e);
+    }
+    Files.delete(p);
+}
+```
+
+for full control (report, replace or ignore, per error type), use a `CharsetDecoder` with `onMalformedInput(CodingErrorAction.REPORT)`.
+</Gotcha>
+
+## the default charset
+
+every API that takes text but doesn't ask for a charset uses the **default charset**: `new String(bytes)`, `getBytes()`, `FileReader`, `FileWriter`, `Scanner(InputStream)`, `InputStreamReader` without a second argument.
+
+before java 18 the default came from the OS: UTF-8 on linux and mac, usually windows-1252 on windows (cp1252), or whatever locale the server was set up with. same jar, same file, different text depending on where it ran. [JEP 400](https://openjdk.org/jeps/400) fixed it: since **java 18** the default is UTF-8 on every platform.
+
+| property | what it is | on jdk 25 |
+| --- | --- | --- |
+| `file.encoding` | the default charset | `UTF-8` (set it to `COMPAT` to get the old OS-based behaviour back) |
+| `native.encoding` | what the OS would have picked | `UTF-8` on mac/linux, often `Cp1252` on windows |
+| `stdout.encoding` | what `System.out` encodes with | the terminal's encoding, which is not always UTF-8 |
+
+<Gotcha title="System.out didn't get the memo">
+JEP 400 changed files, not consoles. `System.out` encodes with `stdout.encoding`, which follows the terminal. on an old windows console that's a code page like `Cp437`, so `IO.println("é")` can still print garbage even on java 25. the fix is on the terminal side (`chcp 65001`, or a modern terminal), or starting java with `-Dstdout.encoding=UTF-8`.
+</Gotcha>
+
+the habit that makes all of this go away: **always pass the charset**. `Files.readString(path, UTF_8)`, `new InputStreamReader(in, UTF_8)`, `new String(bytes, UTF_8)`. the default being UTF-8 is a safety net, not a design.
+
+## chars you shouldn't cut
+
+because a `char` can be half a character, char-based string surgery can split one in two. the half is a lone surrogate: not a valid character, so encoders replace it.
+
+```java title="Main.java" run output="3 true\n68693f\nhi😀 4"
+import java.util.HexFormat;
+import static java.nio.charset.StandardCharsets.*;
+
+void main() {
+    String s = "hi😀";
+    String cut = s.substring(0, 3);           // keeps h, i, and half the emoji
+    IO.println(cut.length() + " " + Character.isHighSurrogate(cut.charAt(2)));
+    IO.println(HexFormat.of().formatHex(cut.getBytes(UTF_8)));   // 3f is '?'
+
+    int end = s.offsetByCodePoints(0, 3);     // 3 code points, however many chars
+    IO.println(s.substring(0, end) + " " + end);
+}
+```
+
+truncating usernames to "20 chars", splitting text for SMS, reversing strings by hand: all places this bites. use the code point APIs (`codePointAt`, `offsetByCodePoints`, `codePoints()`), and know that `StringBuilder.reverse()` already keeps surrogate pairs together.
+
+<Deep title="even code points aren't characters">
+what a human calls one character (a grapheme) can be several code points. 👍🏽 is a thumbs up plus a skin tone modifier: 2 code points, 4 chars. and é can be written two ways: one code point (`U+00E9`), or `e` followed by a combining accent (`U+0301`). they look identical and are not equal:
+
+```java title="Main.java" run output="é é false\n1 2\ntrue"
+import java.text.Normalizer;
+
+void main() {
+    String a = "é";
+    String b = "é";
+    IO.println(a + " " + b + " " + a.equals(b));
+    IO.println(a.length() + " " + b.length());
+    IO.println(Normalizer.normalize(b, Normalizer.Form.NFC).equals(a));
+}
+```
+
+normalize (NFC is the usual choice) before you compare, hash or store text from users. to count what a human sees, use `BreakIterator.getCharacterInstance()` or the regex `\X`, both of which understand grapheme clusters.
+</Deep>
+
+<Deep title="how a String stores its chars">
+the API says a `String` is a sequence of UTF-16 chars, but since java 9 ([JEP 254](https://openjdk.org/jeps/254), compact strings) that's not how it sits in memory. a `String` holds a `byte[]` and a one-byte `coder` flag. if every char fits in latin-1, it stores one byte per char (`coder = LATIN1`). if even one doesn't, the whole string is stored as UTF-16, two bytes per char. most strings in most programs are latin-1, so this roughly halved the memory strings use. more in [the string api](/learn/core-api/string-api).
+</Deep>
+
+<Interview q="what's the difference between a char and a character?">
+a `char` is a 16-bit UTF-16 code unit. a character, in the unicode sense, is a code point, and code points above `U+FFFF` (emoji, some CJK, music symbols) take two chars, a surrogate pair. so `length()` counts code units, not characters, and `charAt` can hand you half of one. use `codePointAt`, `codePoints()` and `codePointCount` when it matters. bonus point: even a code point isn't always what a user sees as one character (combining accents, emoji modifiers), that's a grapheme cluster.
+</Interview>
+
+<Keylines>
+- text is code points. bytes are code points run through a charset. you need the same charset on both ends.
+- a java `char` is a UTF-16 unit. emoji are 2 chars. `length()` counts chars.
+- UTF-8: 1 to 4 bytes, ASCII-compatible, the default since java 18 (JEP 400).
+- `Ã©` means UTF-8 bytes were read as latin-1. `?` means a charset couldn't represent the character at write time. `�` means invalid bytes.
+- always pass the charset explicitly. defaults are a safety net.
+</Keylines>

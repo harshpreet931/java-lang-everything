@@ -1,0 +1,232 @@
+import { JfrTimeline } from "@/components/figures/performance/JfrTimeline";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+**JDK Flight Recorder** (JFR) is an event recorder built into the JVM. it logs what the JVM and your code are doing (GC pauses, lock waits, allocations, method samples, file and socket I/O, your own custom events) into a compact binary `.jfr` file, cheaply enough to leave on in production: the design target was **at most 1% overhead** with the default settings ([JEP 328](https://openjdk.org/jeps/328), java 11).
+
+read the file with the **`jfr`** command line tool or **JDK Mission Control** (JMC), or consume events live with **event streaming**.
+</InShort>
+
+## the picture
+
+a plane's flight recorder doesn't wait for you to suspect a crash. it records everything, all the time, into a fixed amount of memory, and when something goes wrong, you pull the box and replay the last few minutes.
+
+JFR is that for the JVM. events go into thread-local buffers (no locking on the hot path), get flushed to a ring of disk chunks, and old chunks fall off the end. the JVM already knows when a GC starts or a thread blocks; JFR just writes it down, with a timestamp, a thread and usually a stack trace. compare that with a [profiler](/learn/performance/profiling-and-flame-graphs) that attaches from outside, or with adding log lines and redeploying.
+
+<Figure caption="hover a stage. where an event goes between commit() and your screen.">
+<Flow stages={[
+  { label: "event", sub: "JVM or your code", note: "a GC phase ends, a thread blocks on a monitor, a sampler fires, your CheckoutEvent commits. each one gets a timestamp, a thread and usually a stack trace, if its settings say it's enabled and over its threshold." },
+  { label: "thread-local buffer", sub: "no locking", note: "the event is written into the current thread's own small buffer, so recording costs no lock and no contention on the hot path." },
+  { label: "global buffers", sub: "memory", note: "full thread buffers are handed to a set of global buffers, still in memory." },
+  { label: "chunk files", sub: "disk repository", note: "global buffers are flushed to chunk files in a repository directory. with maxage or maxsize, old chunks are deleted: a ring of the last N minutes." },
+  { label: "jfr / JMC / stream", sub: "consumers", note: "jfr summary, jfr view and JMC read the .jfr file; RecordingStream reads the chunks while they're written, about a second behind." },
+]} />
+</Figure>
+
+## record one
+
+two ways in. at startup:
+
+```bash
+$ java -XX:StartFlightRecording=filename=shop.jfr,settings=profile -cp out Shop
+[0.320s][info][jfr,startup] Started recording 1. No limit specified, using maxsize=250MB as default.
+[0.320s][info][jfr,startup]
+[0.320s][info][jfr,startup] Use jcmd 44527 JFR.dump name=1 to copy recording data to file.
+```
+
+or on a JVM that's already running, with no flags set in advance ([the jdk toolbox](/learn/tooling/jdk-tools)):
+
+```bash
+$ jcmd <pid> JFR.start duration=60s filename=app.jfr settings=profile
+$ jcmd <pid> JFR.dump name=1 filename=now.jfr        # snapshot whatever is buffered
+$ jcmd <pid> JFR.stop name=1
+```
+
+`settings=` picks a `.jfc` file of event settings. the JDK ships two: `default` (the low-overhead, leave-it-on one) and `profile` (more events, more samples, for a debugging session). you can override single settings inline: the recording below used `jdk.JavaMonitorEnter#threshold=1ms` to log every lock wait over 1 ms.
+
+the program is a little order-processing app: three worker threads that parse CSV, sort orders and format a report, and then each record a checksum inside one `synchronized` block, plus a reporter thread that sleeps. here's what six seconds looked like:
+
+```bash
+$ jfr summary shop.jfr
+ Version: 2.1
+ Chunks: 1
+ Duration: 6 s
+
+ Event Type                              Count  Size (bytes)
+=============================================================
+ jdk.JavaMonitorEnter                     2501         55754
+ jdk.ObjectAllocationSample               1759         26681
+ jdk.ExecutionSample                      1082         11868
+ jdk.GarbageCollection                      66          1323
+ jdk.ThreadSleep                            12           251
+ ...
+```
+
+196 event types were registered in that recording; 84 of them actually fired.
+
+<Figure caption={<>event counts from that 6-second <code>jfr summary</code>, log scale. thousands of lock waits (this run logged every wait over 1 ms) and samples, a few dozen GCs. a 10-second recording of the same app with the profile settings came to 3 MB.</>}>
+<Bench
+  log
+  unit="events"
+  digits={0}
+  data={[
+    { label: "jdk.JavaMonitorEnter", value: 2501, tone: "meta" },
+    { label: "jdk.ObjectAllocationSample", value: 1759 },
+    { label: "jdk.ExecutionSample", value: 1082 },
+    { label: "jdk.GarbageCollection", value: 66, tone: "hot" },
+    { label: "jdk.ThreadSleep", value: 12 },
+  ]}
+/>
+</Figure>
+
+## read it
+
+<Figure wide caption={<>the real recording, top: all six seconds; bottom: every single event between 2.0 and 2.4 s. pick an event type to highlight it and see one of them exactly as <code>jfr print</code> shows it. the <C k="meta">purple</C> is time spent waiting for the lock; GC pauses are the <C k="hot">amber</C> lines.</>}>
+<JfrTimeline />
+</Figure>
+
+see the pattern? each worker runs (samples), then waits for the lock (purple), then runs again. a third of each worker's time is waiting. you'd never guess that from CPU usage, which looks fine, because a blocked thread uses none.
+
+you don't have to eyeball it. `jfr view` has dozens of canned reports:
+
+```bash
+$ jfr view contention-by-site shop.jfr
+                               Contention by Site
+
+StackTrace                                                Count    Avg.    Max.
+--------------------------------------------------------- ----- ------- -------
+Shop.record(long)                                         2,500 1.73 ms 7.53 ms
+
+$ jfr view hot-methods shop.jfr
+                                           Java Methods that Execute the Most
+
+Method                                                    Samples Percent
+--------------------------------------------------------- ------- -------
+Shop.record(long)                                             493  45.56%
+java.util.Formatter$FormatSpecifier.precision(String,...)      66   6.10%
+java.util.Formatter$FormatSpecifierParser.parseFlag()          51   4.71%
+...
+```
+
+(`hot-methods` blames `Shop.record` for 46% of samples because, inside the lock, the method spins for 2 ms to simulate work.) other good ones: `gc-pauses`, `allocation-by-site`, `exception-by-site`, `pinned-threads` for [virtual threads](/learn/concurrency/virtual-threads), `container-configuration` in a [container](/learn/performance/jvm-in-containers). `jfr print --events <type>` dumps raw events, and `jfr print --json` gives you something to script against.
+
+<Quiz question="you start a JVM with just -XX:StartFlightRecording, no other options, run your program and let it exit. where's the recording?" options={["in the working directory, as recording.jfr", "in /tmp", "nowhere: it was never written", "in the JVM's log"]} answer={2}>
+<Explain>
+nowhere. i ran exactly that: the startup line says `Use jcmd <pid> JFR.dump name=1 filename=FILEPATH to copy recording data to file`, and after the program exited the directory was empty. without `filename=`, the recording lives in memory (and temporary chunk files) and is discarded at exit unless you dump it. give it a `filename=`, and JFR writes the file when the recording stops or the JVM exits.
+</Explain>
+</Quiz>
+
+## your own events
+
+the JVM's events tell you what the *runtime* did. your events can say what the *application* did, on the same timeline: a checkout, a cache miss, a request. an event is a class that extends `jdk.jfr.Event`:
+
+```java title="Main.java" run output="shop.Checkout: items=1 total=10.5 took at least 20 ms: true\nshop.Checkout: items=2 total=21.0 took at least 20 ms: true\nshop.Checkout: items=3 total=31.5 took at least 20 ms: true"
+import java.nio.file.*;
+import jdk.jfr.*;
+import jdk.jfr.consumer.*;
+
+@Name("shop.Checkout")
+@Label("Checkout")
+@Category("Shop")
+class CheckoutEvent extends Event {
+    @Label("Items") int items;
+    @Label("Total") double total;
+}
+
+void main() throws Exception {
+    Path file = Files.createTempFile("shop", ".jfr");
+    try (Recording recording = new Recording()) {
+        recording.enable("shop.Checkout");
+        recording.start();
+        for (int i = 1; i <= 3; i++) {
+            CheckoutEvent e = new CheckoutEvent();
+            e.begin();
+            e.items = i;
+            e.total = i * 10.5;
+            Thread.sleep(20);             // "work"
+            e.commit();
+        }
+        recording.stop();
+        recording.dump(file);
+    }
+    for (RecordedEvent e : RecordingFile.readAllEvents(file)) {
+        IO.println(e.getEventType().getName() + ": items=" + e.getInt("items")
+            + " total=" + e.getDouble("total") + " took at least 20 ms: " + (e.getDuration().toMillis() >= 20));
+    }
+    Files.delete(file);
+}
+```
+
+`begin()` and `commit()` give it a duration; the fields become columns; `@Name`, `@Label` and `@Category` are what JMC shows. when the event type isn't enabled, `commit()` costs next to nothing, so instrumented code can stay instrumented. this program also starts and reads a recording entirely from java, with the `Recording` and `RecordingFile` APIs.
+
+## streaming
+
+since java 14 ([JEP 349](https://openjdk.org/jeps/349)), you don't have to wait for a file: `RecordingStream` delivers events to callbacks while the program runs, a second or so after they happen. that turns JFR into a metrics source:
+
+```java title="Main.java" run
+import java.time.Duration;
+import jdk.jfr.consumer.RecordingStream;
+
+static volatile byte[] keep;   // so the JIT can't optimize the allocations away
+
+void main() throws Exception {
+    try (var rs = new RecordingStream()) {
+        rs.enable("jdk.GarbageCollection");
+        rs.enable("jdk.CPULoad").withPeriod(Duration.ofMillis(500));
+        rs.onEvent("jdk.GarbageCollection", e ->
+            IO.println("GC " + e.getString("name") + " took " + e.getDuration().toNanos() / 1000 + " µs"));
+        rs.onEvent("jdk.CPULoad", e ->
+            IO.println("cpu: jvm " + Math.round(e.getFloat("jvmUser") * 100) + "%"));
+        rs.startAsync();
+
+        long bytes = 0;
+        long end = System.currentTimeMillis() + 1500;
+        while (System.currentTimeMillis() < end) { keep = new byte[64 * 1024]; bytes += keep.length; }  // make garbage
+        IO.println("allocated " + bytes / (1024 * 1024) + " MB");
+    }
+}
+```
+
+no output under it because it changes every run. one run printed about 30 lines like `GC G1New took 546 µs`, a `cpu: jvm 4%` (that's a fraction of the whole 14-core machine), and the total allocated. the `volatile` field matters: the first version of this demo stored nothing, the JIT removed the allocations as dead code, and the loop "allocated" three million megabytes in 1.5 seconds. ([JMH](/learn/performance/jmh) has a whole chapter on that trick.)
+
+## new in jdk 25
+
+three JFR JEPs landed in 25:
+
+- **method timing and tracing** ([JEP 520](https://openjdk.org/jeps/520)): name methods with a filter and JFR instruments them, no agent required. real run on the shop app:
+
+```bash
+$ java '-XX:StartFlightRecording:method-timing=Shop::formatReport;Shop::sortByTotal;Shop::parseCsv,filename=timing.jfr' -cp out Shop 4000
+$ jfr view method-timing timing.jfr
+                                 Method Timing
+
+Timed Method                 Invocations Minimum Time Average Time Maximum Time
+---------------------------- ----------- ------------ ------------ ------------
+Shop.formatReport(List)            3,200  1.020000 ms  2.080000 ms 77.300000 ms
+Shop.parseCsv(List)                3,200  0.323000 ms  0.624000 ms 23.700000 ms
+Shop.sortByTotal(List)             3,200  0.322000 ms  0.574000 ms 17.200000 ms
+```
+
+  `method-trace=` records every single call with a stack trace instead, and the filter can also be an annotation (`@jakarta.ws.rs.GET`) or a whole class.
+- **cooperative sampling** ([JEP 518](https://openjdk.org/jeps/518)): the execution sampler used to walk a suspended thread's stack at any instruction, which was fragile. now it records the program counter, lets the thread reach its next safepoint, and reconstructs the stack there, correcting for the bias that would otherwise introduce. more in [profiling](/learn/performance/profiling-and-flame-graphs).
+- **CPU-time profiling** ([JEP 509](https://openjdk.org/jeps/509), experimental, linux only): `jdk.CPUTimeSample` samples by CPU time used rather than wall-clock time, including time spent in native code. on this mac the event type exists but records nothing.
+
+## mission control
+
+JDK Mission Control is the GUI for `.jfr` files: a separate download, open source in the OpenJDK project. open a recording and you get an automated analysis page ("rules" that flag lock contention, GC pressure, exception storms, heap growth), then timelines per thread, a flame-graph view of the samples, allocation pressure by class, and every event in a table you can filter and group. the `jfr` command line covers most of the same ground for a terminal, and JMC is nicer when you don't know yet what you're looking for.
+
+<Gotcha title="samples don't see waiting threads">
+`jdk.ExecutionSample` only samples threads that are running java code. a thread blocked on a lock, parked, sleeping or waiting on a socket gets no samples at all, so a hot-methods report can be completely quiet about the thing that's actually slow. the time went into *waiting*, and the waiting has its own events: `JavaMonitorEnter`, `ThreadPark`, `ThreadSleep`, `SocketRead`, each with a threshold you may need to lower (the profile settings only log lock waits over 10 ms). in the recording above, the samples alone would have said "Shop.record is hot". the monitor events say "everyone is queueing for Shop.record", which is a different fix.
+</Gotcha>
+
+<Interview q="a service in production is slow sometimes. how would you find out why, without restarting it?">
+attach JFR with `jcmd <pid> JFR.start duration=120s filename=slow.jfr settings=profile`, wait for a slow period, and analyse the file: `jfr view gc-pauses` and `safepoints` for JVM pauses, `contention-by-site` and `ThreadPark` events for lock waits, `hot-methods` for CPU, `allocation-by-site` for GC pressure, socket and file read events for slow I/O, and the thread timelines in JMC to line all of it up. it's built into the JVM, needs no agent or restart, and is designed for low overhead (the target was at most 1% with default settings), which is why many teams just leave a default recording running all the time and dump it when something happens.
+</Interview>
+
+<Keylines>
+- JFR is a flight recorder inside the JVM: events with timestamps, threads and stacks, cheap enough for production.
+- start it with `-XX:StartFlightRecording` or `jcmd <pid> JFR.start`. give it a filename.
+- `jfr summary`, `jfr view <report>` and `jfr print` read recordings; JMC is the GUI.
+- your own events extend `jdk.jfr.Event` and land on the same timeline.
+- samples only show running threads. waiting has its own events: look at both.
+</Keylines>

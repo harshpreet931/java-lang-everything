@@ -1,0 +1,150 @@
+import { LatencyLadder } from "@/components/figures/performance/LatencyLadder";
+import { FalseSharingLine } from "@/components/figures/performance/FalseSharingLine";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+the CPU doesn't read memory one variable at a time. it moves **cache lines** (64 bytes here), keeps recently used ones in small fast **caches**, and **prefetches** the next lines when it sees you walking forward. code that reads memory in order runs at cache speed; code that jumps around runs at DRAM speed, up to **80 times slower** on the machine below.
+
+two more hardware habits leak into java: two threads writing different variables on the same line fight over it (**false sharing**), and an `if` the CPU can't guess costs a pipeline flush (**branch misprediction**).
+</InShort>
+
+## the picture
+
+"mechanical sympathy" is a racing driver's phrase (Jackie Stewart's): you drive better when you understand how the car works. for code, the car is the memory hierarchy.
+
+think of a library. the book on your desk is the L1 cache (grab it instantly). the shelf behind you is L2 (stand up, turn around). the stacks downstairs are main memory (a walk). and the librarian is clever: when you take a book, they bring the whole shelf section it was in (a cache line), and if you keep taking books left to right, they start fetching the next sections before you ask (prefetching). read the library in order and you barely wait. pick books at random and you spend your day on the stairs.
+
+## how far away is memory?
+
+the honest way to measure latency is to make every load depend on the previous one, so the CPU can't overlap them: build a random cycle through an array (`next[i]` holds the index to visit after `i`), and follow it. the time per step is the time for one trip to wherever that data lives.
+
+```java
+int p = 0;
+for (int i = 0; i < steps; i++) p = next[p];   // each load needs the result of the last one
+```
+
+<Figure wide caption={<>measured on an apple M4 Pro with jdk 25, growing the array from 4 KB to 1 GB. click a level, hover the points. cache sizes come from the OS (<code>sysctl</code>): 128 KB of L1 data per performance core, 16 MB of L2 per cluster. the step at 128 KB is that L1 filling up.</>}>
+<LatencyLadder />
+</Figure>
+
+same instruction, same loop: 1.5 ns when the array fits in L1, 124 ns when it doesn't fit anywhere. everything else in this chapter is a consequence of that curve.
+
+## walking memory: in order or not
+
+a 4096 × 4096 `int` grid (64 MB, far bigger than any cache), summed three ways. measured with [JMH](/learn/performance/jmh), reported per element:
+
+<Figure caption={<>same 16.7 million additions. <C k="live">row by row</C> reads each cache line once, front to back, and the prefetcher stays ahead. <C k="dead">column by column</C> touches one int per row array and jumps to the next row: a new line, and often a new page, for every single element.</>}>
+<Bench
+  unit="ns per element"
+  data={[
+    { label: "row by row: grid[i][j], j inner", value: 0.25, err: 0.004, tone: "live" },
+    { label: "random order: a[idx[i]]", value: 2.234, err: 0.154 },
+    { label: "column by column: grid[i][j], i inner", value: 3.785, err: 0.097, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+15 times slower for swapping two loop variables. the random order is the interesting middle: every access misses, but the addresses come from an index array, so the CPU can have many misses in flight at once. the pointer chase above couldn't, because each address depended on the last load. "how many misses can overlap" is a big part of why some cache-unfriendly code is only slow and some is catastrophic.
+
+## why arrays beat linked lists
+
+the same million numbers, summed from different containers:
+
+<Figure caption={<>JMH, ns per element. an <code>int[]</code> is the numbers themselves, packed. an <code>ArrayList&lt;Integer&gt;</code> is an array of <C k="ref">references</C> to boxed objects; a <code>LinkedList</code> adds a node object per element. shuffling the list makes every reference point somewhere else in the heap.</>}>
+<Bench
+  unit="ns per element"
+  data={[
+    { label: "int[]", value: 0.263, err: 0.022, tone: "live" },
+    { label: "ArrayList<Integer>, built in order", value: 0.632, err: 0.087 },
+    { label: "LinkedList<Integer>, built in order", value: 1.882, err: 0.163 },
+    { label: "ArrayList<Integer>, shuffled", value: 3.925, err: 0.638 },
+    { label: "LinkedList<Integer>, shuffled", value: 4.542, err: 0.112, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+two lessons in one chart. first, the textbook one: following pointers is slower than walking an array, and a `LinkedList` is pointers all the way down (node → next node, node → value). second, the one people miss: freshly built collections are often *laid out in order* in memory, because the allocator hands out addresses one after another ([TLABs](/learn/gc/allocation-and-tlabs)), so even a `LinkedList` gets some prefetching help. shuffle the elements so the references point all over the heap, and both lists fall off a cliff. a long-lived, much-modified collection in a real app looks like the shuffled rows. ([ArrayList vs LinkedList](/learn/deep-dives/arraylist-vs-linkedlist) has the rest.)
+
+this is also what [valhalla](/learn/future/valhalla) is about: letting `List<Point>` store the points' fields inline, like an `int[]`, instead of an array of references to objects scattered around the heap.
+
+## false sharing
+
+caches work in lines, and so does keeping caches coherent between cores. when one core writes to a line, every other core's copy of that line is invalidated. normally that's how threads see each other's writes. but it happens per *line*, not per variable:
+
+<Figure caption={<>a model of two cache lines, with timings measured on the same M4 Pro. move thread 2's counter around. the counters never share a single byte, and yet <C k="dead">same line</C> costs three times as much.</>}>
+<FalseSharingLine />
+</Figure>
+
+here's the experiment, small enough to run:
+
+```java title="Main.java" run
+import java.util.concurrent.atomic.AtomicLongArray;
+
+// two threads, two counters. only the distance between the counters changes.
+static long run(int slotA, int slotB) throws InterruptedException {
+    AtomicLongArray a = new AtomicLongArray(64);
+    Runnable inc1 = () -> { for (int k = 0; k < 50_000_000; k++) a.set(slotA, a.get(slotA) + 1); };
+    Runnable inc2 = () -> { for (int k = 0; k < 50_000_000; k++) a.set(slotB, a.get(slotB) + 1); };
+    Thread t1 = new Thread(inc1), t2 = new Thread(inc2);
+    long start = System.nanoTime();
+    t1.start(); t2.start(); t1.join(); t2.join();
+    return (System.nanoTime() - start) / 1_000_000;
+}
+
+void main() throws InterruptedException {
+    run(16, 17); run(16, 48);                       // warm up the JIT
+    for (int i = 0; i < 3; i++) {
+        IO.println("8 bytes apart: " + run(16, 17) + " ms    256 bytes apart: " + run(16, 48) + " ms");
+    }
+}
+```
+
+one run printed:
+
+```text
+8 bytes apart: 409 ms    256 bytes apart: 162 ms
+8 bytes apart: 178 ms    256 bytes apart: 138 ms
+8 bytes apart: 423 ms    256 bytes apart: 126 ms
+```
+
+see the middle line? each run allocates a new array, and that time it happened to land so that slots 16 and 17 sat on *different* lines. to pin it down i swept a pair of adjacent counters across 16 positions inside one array: exactly 2 positions out of 16 were fast (89 to 125 ms), 8 slots apart, the rest took 289 to 346 ms. that's a 64-byte line. (macOS reports `hw.cachelinesize` as 128 on this chip, and the JVM's own padding default, `ContendedPaddingWidth`, is 128 too, which is the safe choice across CPUs.)
+
+the fixes, roughly in order of preference:
+
+- **don't share hot counters at all.** give each thread its own and combine at the end, or use a `LongAdder`, which spreads a counter over padded cells for exactly this reason ([atomics and CAS](/learn/concurrency/atomics-and-cas)).
+- **put the hot fields in separate objects**, allocated at different times, or **pad** them: 128 bytes between two values that different threads write.
+- **`@Contended`** does the padding for you in the JDK's own classes (`Thread`, `ConcurrentHashMap`'s counter cells, `LongAdder`'s `Cell`). it's internal (`jdk.internal.vm.annotation`): user code needs `--add-exports` and `-XX:-RestrictContended`, so it's rarely worth it outside a library.
+
+## branch prediction
+
+a modern core is a pipeline dozens of instructions deep. at an `if`, it can't wait to find out which way to go, so it guesses and keeps going; a wrong guess throws that work away. guesses are excellent when the branch follows a pattern, and a coin flip when it doesn't.
+
+the classic test: sum the values ≥ 128 in an array of random bytes, once unsorted and once sorted (where the branch goes "no" for the first half and "yes" for the second):
+
+<Figure caption={<>JMH on the M4 Pro, 32,768 random values in 0 to 255, ns per element. sorting doesn't change the work, only how predictable the <code>if</code> is.</>}>
+<Bench
+  unit="ns per element"
+  data={[
+    { label: "sorted: if (v >= 128) sum += v", value: 0.241, err: 0.005, tone: "live" },
+    { label: "unsorted: the same loop", value: 0.465, err: 0.011, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+almost 2× here, honestly measured. that's far less dramatic than the famous stack overflow question about exactly this loop, and it can be zero: C2 can replace a simple `if` like this with a branch-free conditional select, and when it does, sorted and unsorted run at the same speed. whether it does depends on the JVM version, the CPU and how the loop is shaped. which is the real lesson: measure your case, don't assume the textbook's.
+
+<Gotcha title="optimizing for a cache you don't control">
+every number in this chapter is from one machine. cache sizes, line sizes, how many misses can overlap, how good the branch predictor and prefetcher are: all of it differs between an M4, a Graviton and an Intel server, and between a laptop with nothing running and a busy production box where twenty other threads share the L2. the *directions* hold everywhere (sequential beats random, packed beats pointers, don't share written lines). the multipliers don't. benchmark on the hardware you deploy to.
+</Gotcha>
+
+<Interview q="why is iterating an ArrayList faster than a LinkedList, if both are O(n)?">
+big-O counts operations, not memory traffic. an `ArrayList` keeps its references in one contiguous array, so iterating reads memory in order: each 64-byte cache line brings in 16 references, and the hardware prefetcher fetches the next lines ahead of time. a `LinkedList` is a chain of separate node objects, so every step is a dependent load to wherever the next node was allocated; if the nodes are scattered, each step can be a cache miss, around 100 ns to DRAM instead of a couple of ns. on my machine summing a million elements took 0.6 ns per element from a fresh `ArrayList` and 4.5 ns from a shuffled `LinkedList`. both lists also box their values, which is why a plain `int[]` beat both at 0.26 ns.
+</Interview>
+
+<Keylines>
+- memory moves in cache lines. here a dependent load costs 1.5 ns from L1 and 124 ns from DRAM.
+- read memory in order and the prefetcher hides the latency. jump around and it can't.
+- arrays of primitives beat arrays of references, which beat linked nodes.
+- two threads writing different variables on one 64-byte line slow each other down 3×.
+- unpredictable branches cost something, and sometimes the JIT removes the branch. measure.
+</Keylines>

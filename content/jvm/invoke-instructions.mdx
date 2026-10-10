@@ -1,0 +1,152 @@
+import { InvokeSorter } from "@/components/figures/jvm/InvokeSorter";
+import { VirtualDispatch } from "@/components/figures/jvm/VirtualDispatch";
+
+<InShort>
+every method call in java compiles to one of five instructions. **invokestatic** (no receiver), **invokespecial** (constructors and `super.` calls, exact target), **invokevirtual** (pick the method by the object's class, through a vtable), **invokeinterface** (same, through an interface type) and **invokedynamic** (ask a bootstrap method, once, what this call should even do).
+
+the difference is when the target gets decided: at link time, or every time from the object, or by code you wrote.
+</InShort>
+
+## the picture
+
+you know how `dog.sound()` and `list.size()` look like the same kind of thing in source? to the JVM they're different instructions, and so are `new Dog()`, `super.sound()`, `Math.max(1, 2)` and `() -> {}`.
+
+think of making a phone call. invokestatic is dialing a fixed number: always the same person. invokespecial is calling a specific person's direct line, skipping the switchboard. invokevirtual is calling "the manager on duty": the switchboard looks up who that is today (the object's class) and connects you. invokeinterface is calling "whoever handles billing" in a building where every office organizes departments differently. invokedynamic is calling a number that, the first time, asks you to describe what you want, then wires up a permanent line for next time.
+
+## guess the instruction
+
+every call below was compiled with jdk 25 and read back with `javap`. pick what you think javac emitted.
+
+<Figure caption={<>a <C k="live">green</C> outline is the right answer, <C k="dead">red</C> is a wrong pick. the ones people miss: <code>arrayList.size()</code> vs <code>list.size()</code>, and private methods.</>}>
+<InvokeSorter />
+</Figure>
+
+the rule javac follows, in order:
+
+| the call | instruction | target decided |
+| --- | --- | --- |
+| a static method (in a class or interface) | `invokestatic` | at link time |
+| a constructor, or `super.m()` | `invokespecial` | at link time, exact method |
+| an instance method, through a class type | `invokevirtual` | per call, from the receiver's class |
+| an instance method, through an interface type | `invokeinterface` | per call, from the receiver's class |
+| a lambda, a method ref, string `+`, record methods | `invokedynamic` | once, by a bootstrap method |
+
+notice the type that matters is the *declared* type of the expression, not the object. `list.size()` and `arrayList.size()` can call the very same method on the very same object and still compile to different instructions.
+
+## how invokevirtual finds the method
+
+every class has a vtable: an array of pointers to its overridable methods, built when the class is linked. a subclass copies its parent's vtable and replaces the slots it overrides. so `sound()` sits at the same index in `Animal`'s table and in `Dog`'s, and a call only needs that index plus the receiver's class.
+
+<Figure wide caption={<>switch the receiver between <code>new Animal()</code> and <code>new Dog()</code>, then step. the call site and slot 5 never change; only the class pointer in the object does. <C k="ref">blue</C> dots are pointers. vtable sizes from <code>jcmd &lt;pid&gt; VM.classes -verbose</code>: Object has 5 entries, Animal and Dog have 6.</>}>
+<VirtualDispatch />
+</Figure>
+
+a new `final` or `private` method doesn't add a vtable slot (nothing can override it), and `Animal`'s vtable really is 6 long because it adds exactly one overridable method.
+
+`invokeinterface` can't use a fixed index: `Dog` might implement ten interfaces, and `Comparable.compareTo` can't be slot 5 in every class that implements it. so each class also has an itable (one block of method pointers per interface it implements), and the call first finds the right block, then indexes into it. a bit more work, which is why interface calls used to have a reputation for being slow.
+
+in practice, neither table lookup happens much in hot code. the JIT records which classes actually show up at each call site. if it's always `Dog`, C2 compiles the call as "is it a `Dog`? then run `Dog.sound()` inlined right here", no table at all. that's covered in [JIT optimizations](/learn/jvm/jit-optimizations).
+
+## the private method surprise
+
+before java 11, javac compiled a call to a private method with `invokespecial` (exact target, no dispatch). and when an inner class called its outer class's private method, javac had to generate a hidden static bridge, `access$000`, because to the JVM they were two unrelated classes.
+
+java 11 added **nestmates** ([JEP 181](https://openjdk.org/jeps/181)): classes compiled from the same source file record each other in `NestHost` / `NestMembers` attributes, and the JVM lets them touch each other's private members directly. along with it, javac switched private calls to `invokevirtual`. same source, two compilers:
+
+<Tabs>
+<Tab label="javac --release 10">
+```text title="javap -c -p Outer Outer$Inner"
+int self();
+   1: invokespecial #1      // Method secret:()I
+static int access$000(Outer);
+   1: invokespecial #1      // Method secret:()I
+int peek();     // in Outer$Inner
+   4: invokestatic  #13     // Method Outer.access$000:(LOuter;)I
+```
+</Tab>
+<Tab label="javac (jdk 25)">
+```text title="javap -c -p Outer Outer$Inner"
+int self();
+   1: invokevirtual #7      // Method secret:()I
+int peek();     // in Outer$Inner
+   4: invokevirtual #19     // Method Outer.secret:()I
+
+NestMembers:
+  Outer$Inner
+```
+</Tab>
+</Tabs>
+
+the bridge method is gone. but does `invokevirtual` on a private method mean it's virtual now?
+
+<Predict options={["parent", "child", "compile error"]} answer={0}>
+```java
+class Parent {
+    private String who() { return "parent"; }
+    String call() { return who(); }
+}
+
+class Child extends Parent {
+    String who() { return "child"; }
+}
+
+void main() {
+    IO.println(new Child().call());
+}
+```
+<Explain>
+`parent`. `call()` compiles to `invokevirtual Parent.who`, but when the JVM resolves that reference it finds a *private* method, and private methods are never overridden: it calls `Parent.who` directly. `Child.who` is an unrelated method that happens to share the name. the instruction changed, the language rule didn't.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="parent"
+class Parent {
+    private String who() { return "parent"; }
+    String call() { return who(); }
+}
+
+class Child extends Parent {
+    String who() { return "child"; }
+}
+
+void main() {
+    IO.println(new Child().call());
+}
+```
+
+## invokedynamic: a call site you program
+
+the first four instructions name their target in the constant pool. `invokedynamic` names a **bootstrap method** instead. the first time the instruction runs, the JVM calls the bootstrap, which returns a `CallSite` holding the real target. the instruction is then permanently linked to it.
+
+<Figure caption="hover a stage. this happens once per call site, the first time it runs. after that the instruction calls the target directly.">
+<Flow stages={[
+  { label: "invokedynamic #51", sub: "unlinked call site", note: "the constant pool entry says: bootstrap method #0, name run, type ()Runnable." },
+  { label: "bootstrap method", sub: "LambdaMetafactory", note: "javac recorded which static method to call in the BootstrapMethods attribute. for lambdas it's LambdaMetafactory.metafactory." },
+  { label: "CallSite", sub: "target = a MethodHandle", note: "the bootstrap spins a hidden class implementing Runnable and returns a call site that produces instances of it." },
+  { label: "linked", sub: "every later call", note: "the call site is bound for good. the JIT can inline straight through it like any other call." },
+]} />
+</Figure>
+
+that's how lambdas exist without one anonymous class file per lambda, how string concatenation picks its strategy at runtime, how records get `toString`/`equals`/`hashCode` (`ObjectMethods.bootstrap`), and how pattern `switch` dispatches. the instruction was added in java 7 for dynamic languages on the JVM (JRuby, Groovy) and java itself started using it in 8. the full story is in [invokedynamic](/learn/meta/invokedynamic).
+
+<Gotcha title="the megamorphic cliff">
+the JIT's fast path for virtual and interface calls depends on how many receiver classes a call site sees. one class (monomorphic) or two (bimorphic): C2 inlines them behind a quick class check. three or more (megamorphic): it gives up on inlining and does the real vtable or itable call. that's not slow by itself, but it blocks every optimization that inlining would have unlocked. measured on this machine, a loop calling `shape.area()` went from 0.69 ns per call with one `Shape` class to 1.57 ns with three. the numbers, and the `PrintInlining` output that shows the moment C2 gives up, are in [JIT optimizations](/learn/jvm/jit-optimizations).
+</Gotcha>
+
+<Deep title="invokevirtual on a final method, and signature polymorphism">
+calling a `final` method still compiles to `invokevirtual` (javac doesn't treat `final` specially, so recompiling a library that removes `final` doesn't break callers). HotSpot notices at link time that the method can't be overridden and binds the call directly, no vtable involved.
+
+`MethodHandle.invokeExact` is stranger. its declared signature is `(Object...)Object`, but javac compiles each call with the descriptor of the actual arguments at that call site, like `(Ljava/lang/String;I)V`. these are "signature polymorphic" methods, and they're the reason method handles can be as fast as direct calls.
+</Deep>
+
+<Interview q="what's the difference between invokevirtual and invokeinterface?">
+both pick the method from the receiver's runtime class. invokevirtual is used when the declared type is a class: the method has the same vtable index in every subclass, so dispatch is "load the class, load slot n, jump". invokeinterface is used when the declared type is an interface: a class can implement many interfaces, so there's no fixed slot. the JVM has to find the interface's block in the class's itable first. in hot code the JIT usually replaces both with an inline cache (check the class, call the method directly, often inlined), so the difference rarely shows up in a profile.
+</Interview>
+
+<Keylines>
+- five instructions: static, special, virtual, interface, dynamic.
+- the declared type picks the instruction. the object's class picks the method.
+- virtual calls are an index into the receiver's vtable. no searching.
+- private calls are invokevirtual since java 11, and still never overridden.
+- invokedynamic asks a bootstrap method once, then calls the answer forever.
+</Keylines>

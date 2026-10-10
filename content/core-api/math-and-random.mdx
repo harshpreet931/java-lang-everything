@@ -1,0 +1,181 @@
+import { FloorModDial } from "@/components/figures/core-api/FloorModDial";
+import { CrackRandom } from "@/components/figures/core-api/CrackRandom";
+
+<InShort>
+`Math` is a box of static functions. the ones that save you from real bugs: the **\*Exact** methods (overflow throws instead of wrapping) and **floorMod** (a remainder that's never negative). when 64 bits or binary fractions aren't enough, `BigInteger` and `BigDecimal`.
+
+for randomness: `RandomGenerator` or `ThreadLocalRandom` for speed, **SecureRandom** for anything someone would like to guess. plain `java.util.Random` is predictable after two outputs.
+</InShort>
+
+## the picture
+
+`Math` is a calculator taped to the side of the JVM: `Math.max`, `Math.sqrt`, `Math.pow`, `Math.sin`, all static, all on primitives. there's nothing to construct.
+
+its twin `StrictMath` has the same methods with one difference: `StrictMath` must give bit-for-bit the same answer on every machine (it's a port of a C library called fdlibm). `Math` is allowed to use whatever the CPU is good at, as long as it's within 1 ulp (one step between neighbouring doubles). that's not theoretical. on an arm mac with jdk 25, about 7% of random inputs give a different `sin`:
+
+```java
+double x = 6.6543411191902235;
+Math.sin(x)        // 0.3626927853276773
+StrictMath.sin(x)  // 0.36269278532767724
+```
+
+use `Math`. reach for `StrictMath` only when two machines have to agree on the last bit (replays, lockstep simulations, test fixtures). (since java 17, plain `+ - * /` on doubles are strict everywhere, [JEP 306](https://openjdk.org/jeps/306), so `strictfp` does nothing anymore.)
+
+## overflow: wrap or throw
+
+`int` arithmetic wraps around silently. `Integer.MAX_VALUE + 1` is `Integer.MIN_VALUE`, because the bits just roll over like an odometer:
+
+<Figure caption={<>the top bit is the sign. add 1 to the biggest <code>int</code> and the carry runs all the way up into it. java doesn't check, it just hands you a very negative number. the whole story is in <a href="/learn/basics/casting-and-overflow">casting and overflow</a>.</>}>
+<div className="grid gap-5">
+<Bits type="int" value={2147483647} label="Integer.MAX_VALUE" />
+<Bits type="int" value={-2147483648} label="Integer.MAX_VALUE + 1" />
+</div>
+</Figure>
+
+when a wrong number is worse than a crash (money, sizes, indexes, ids), use the `Exact` methods. they do the same math and throw `ArithmeticException` the moment the result doesn't fit:
+
+```java title="Exact.java" run output="-2147483648\ninteger overflow\ninteger overflow\n100"
+void main() {
+    IO.println(Integer.MAX_VALUE + 1);                       // wraps, silently
+    try {
+        Math.addExact(Integer.MAX_VALUE, 1);                 // throws
+    } catch (ArithmeticException e) {
+        IO.println(e.getMessage());
+    }
+    try {
+        int n = Math.toIntExact(3_000_000_000L);             // long → int, checked
+    } catch (ArithmeticException e) {
+        IO.println(e.getMessage());
+    }
+    IO.println(Math.clamp(150, 0, 100));                     // java 21+
+}
+```
+
+the family: `addExact`, `subtractExact`, `multiplyExact`, `incrementExact`, `negateExact`, `toIntExact`, and `absExact` <Since v={15} />. the JIT turns them into a normal add plus one overflow-flag check, so they're close to free.
+
+## remainder vs floorMod
+
+`%` in java is a *remainder*, not a modulo: it truncates toward zero, so the result has the sign of the left side. `-7 % 3` is `-1`. that's fine for math, and terrible for anything you use as an index.
+
+<Figure caption={<>drag <code>a</code> below zero. <code>%</code> goes <C k="dead">negative</C> and falls off the array. <code>floorMod</code> wraps around the dial like a clock and always lands on a <C k="hot">real slot</C>, 0 to b−1.</>}>
+<FloorModDial />
+</Figure>
+
+so for "which bucket", "which day of the week", "which slot in the ring buffer", use `Math.floorMod(a, n)`. there's a matching `floorDiv` (rounds down, so `floorDiv(-7, 3)` is `-3` where `/` gives `-2`), and since java 18, `ceilDiv` and `ceilMod`.
+
+<Gotcha title="Math.abs can return a negative number">
+the classic hand-rolled bucket index is `Math.abs(key.hashCode()) % n`. but `int` has one more negative value than positive ones, so `Math.abs(Integer.MIN_VALUE)` has nowhere to go and returns `Integer.MIN_VALUE`, still negative. and yes, real strings hash to it: `"polygenelubricants".hashCode()` is exactly `-2147483648`. `Math.floorMod(key.hashCode(), n)` has no such hole. (`Math.absExact` would throw instead.)
+</Gotcha>
+
+<Predict options={["-3 3", "-2 3", "-3 2"]} answer={1}>
+```java
+IO.println(Math.round(-2.5) + " " + Math.round(2.5));
+```
+<Explain>
+`Math.round` is "add 0.5, then floor". `-2.5 + 0.5` is `-2.0`, floor is `-2`. `2.5 + 0.5` is `3.0`. so halves always round toward positive infinity, not away from zero. if you want banker's rounding (halves to the even neighbour), `Math.rint(2.5)` gives `2.0`, or use `BigDecimal` with `RoundingMode.HALF_EVEN`.
+</Explain>
+</Predict>
+
+## BigInteger and BigDecimal
+
+`BigInteger` is an integer with as many digits as you need. it's immutable, so every operation returns a new one:
+
+```java title="Big.java" run output="265252859812191058636308480000000\n1267650600228229401496703205376"
+import java.math.BigInteger;
+
+void main() {
+    BigInteger f = BigInteger.ONE;
+    for (int i = 2; i <= 30; i++) f = f.multiply(BigInteger.valueOf(i));
+    IO.println(f);                         // 30!, way past long's 19 digits
+    IO.println(BigInteger.TWO.pow(100));
+}
+```
+
+`BigDecimal` is the one you need for money. a `double` stores binary fractions, and 0.1 has no exact binary form (that's why `0.1 + 0.2` prints `0.30000000000000004`, see [floating point](/learn/basics/floating-point)). a `BigDecimal` is an unscaled `BigInteger` plus a scale (how many digits after the point), so `0.1` is stored as `1` with scale `1`. exact.
+
+```java title="Money.java" run output="0.1000000000000000055511151231257827021181583404541015625\n0.1 0.3\nfalse 0\nNon-terminating decimal expansion; no exact representable decimal result.\n0.33333\n2.34 2.36"
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+
+void main() {
+    IO.println(new BigDecimal(0.1));                    // the double's real value. oops
+    var tenth = new BigDecimal("0.1");                  // from a string: exact
+    IO.println(tenth + " " + tenth.add(new BigDecimal("0.2")));
+    var a = new BigDecimal("2.0");
+    var b = new BigDecimal("2.00");
+    IO.println(a.equals(b) + " " + a.compareTo(b));     // equals also compares scale
+    try {
+        BigDecimal.ONE.divide(BigDecimal.valueOf(3));   // 0.333... forever
+    } catch (ArithmeticException e) {
+        IO.println(e.getMessage());
+    }
+    IO.println(BigDecimal.ONE.divide(BigDecimal.valueOf(3), 5, RoundingMode.HALF_EVEN));
+    IO.println(new BigDecimal("2.345").setScale(2, RoundingMode.HALF_EVEN)
+            + " " + new BigDecimal("2.355").setScale(2, RoundingMode.HALF_EVEN));
+}
+```
+
+three rules and you're fine: build them from strings (or `BigDecimal.valueOf(double)`, which goes through the double's shortest string), compare with `compareTo` (not `equals`, which thinks `2.0` and `2.00` differ, which also makes them two different keys in a `HashMap`), and always say how to round when you divide.
+
+## random numbers
+
+since java 17 ([JEP 356](https://openjdk.org/jeps/356)) there's one interface for all of them, `java.util.random.RandomGenerator`, and a menu of algorithms behind it:
+
+| algorithm | state | period | notes |
+| --- | --- | --- | --- |
+| `Random` | 48 bits | 2<sup>48</sup> | the java 1.0 one. thread-safe through a CAS, which makes it slow when shared |
+| `SplittableRandom` | 64 bits | 2<sup>64</sup> | `split()` gives an independent child, made for fork/join |
+| `L32X64MixRandom` | 96 bits | ≈ 2<sup>96</sup> | what `RandomGenerator.getDefault()` returns in jdk 25 |
+| `L64X128MixRandom` | 192 bits | ≈ 2<sup>192</sup> | a good pick for simulations, splittable |
+| `Xoshiro256PlusPlus` | 256 bits | 2<sup>256</sup> − 1 | jumpable: skip ahead 2<sup>128</sup> steps to hand out non-overlapping streams |
+| `SecureRandom` | OS entropy | n/a | unpredictable. for keys, tokens, passwords, session ids |
+
+(from `RandomGeneratorFactory.all()` on jdk 25.) in practice:
+
+```java
+var rnd = RandomGenerator.getDefault();               // fast, good quality, not thread-safe
+int die = rnd.nextInt(1, 7);                          // 1..6, origin inclusive, bound exclusive
+int roll = ThreadLocalRandom.current().nextInt(1, 7); // from any thread, no sharing
+var seeded = RandomGenerator.of("L64X128MixRandom");  // pick an algorithm by name
+```
+
+and never `Math.abs(rnd.nextInt()) % 6`: that's biased toward small numbers, and it's the `Math.abs` bug from above. `nextInt(bound)` does it right.
+
+### `Random` is not a secret
+
+`java.util.Random` is a linear congruential generator: the next state is `state * 0x5DEECE66D + 0xB`, keep the low 48 bits. `nextInt()` returns the top 32 bits of the state. so every number you print leaks two thirds of the state, and the other 16 bits are 65,536 guesses away.
+
+<Figure wide caption={<>press <strong>new Random()</strong>, then <strong>predict</strong>. this is <code>java.util.Random</code>, ported bit for bit (it matches jdk 25 for every seed we tried). two outputs are enough to know <C k="hot">every number it will ever produce</C>, and the real calls come out <C k="live">identical</C>.</>}>
+<CrackRandom />
+</Figure>
+
+that's fine for a dice game and a disaster for a password reset token. for anything security-shaped, use `SecureRandom`, which pulls from the OS's entropy source and can't be rewound like this. more in [security and crypto](/learn/io/security-and-crypto).
+
+### don't share it, don't recreate it
+
+<Figure caption={<>8 threads × 5 million <code>nextInt()</code> each, temurin 25 on a 14-core M4 Pro. a <C k="dead">shared Random</C> serializes every thread on one atomic seed. <C k="dead">new Random() per call</C> is worse: the constructor updates a global atomic too, so you get the contention <em>and</em> the allocation.</>}>
+<Bars
+  unit="ms"
+  log
+  data={[
+    { label: "ThreadLocalRandom", value: 15, tone: "live" },
+    { label: "one shared Random", value: 6800, tone: "dead" },
+    { label: "new Random() per call", value: 11000, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+even on one thread, `new Random()` per call took 600 ms for 40 million numbers vs 25 ms for `ThreadLocalRandom`. and seeding with the clock yourself is its own bug: two `Random`s seeded with the same `currentTimeMillis()` produce identical sequences. make one generator and keep it (one per thread, or `ThreadLocalRandom`).
+
+<Interview q="what's wrong with new Random().nextInt() inside a hot method?">
+three things. it allocates a generator per call. every `Random` constructor does a compare-and-set on one global "seed uniquifier", so under load threads fight over it. and `Random` itself is a 48-bit LCG: fine for games, predictable from two outputs, useless for tokens. use `ThreadLocalRandom.current()` (or one `RandomGenerator` per thread) for speed, and `SecureRandom` for anything secret.
+</Interview>
+
+<Keylines>
+- `Math` may differ from `StrictMath` in the last bit. that's allowed, and it happens.
+- overflow wraps silently. `addExact` and friends throw instead.
+- `%` keeps the sign of the left side. for indexes, `floorMod`.
+- `Math.abs(Integer.MIN_VALUE)` is negative.
+- `BigDecimal`: build from strings, compare with `compareTo`, always pass a rounding mode to `divide`.
+- `java.util.Random` is predictable and slow when shared. `ThreadLocalRandom` for speed, `SecureRandom` for secrets.
+</Keylines>

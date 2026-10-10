@@ -1,0 +1,121 @@
+import { OomZoo } from "@/components/figures/deep-dives/OomZoo";
+
+<InShort>
+there isn't one `OutOfMemoryError`, there's a family, and **the message after the colon tells you which pool ran dry**: the heap (`Java heap space`), class metadata (`Metaspace`), OS threads (`unable to create native thread`), direct buffers (`... direct buffer memory`), or no memory at all, just a length limit (`Requested array size exceeds VM limit`).
+
+read the message first. the fix for each one is different, and "add more `-Xmx`" only fixes one of them.
+</InShort>
+
+## the picture
+
+you know how an `OutOfMemoryError` in a log makes everyone reach for `-Xmx`? that's like hearing "we ran out" in a kitchen and ordering more flour, when it was the gas that ran out. a JVM has several separate pools, each with its own limit, and each one throws its own flavour of the same error.
+
+<Figure caption={<>which pool each message comes from. only the first branch is about <code>-Xmx</code>. the last one isn't an <code>OutOfMemoryError</code> at all, which is what makes it the worst.</>}>
+<Tree>{`
+JVM process
+    java heap                   // Java heap space · GC overhead limit exceeded
+    max array length            // Requested array size exceeds VM limit
+    metaspace #meta             // Metaspace
+        compressed class space #meta // Compressed class space
+    OS threads                  // unable to create native thread
+    direct buffers              // Cannot reserve ... direct buffer memory
+    the container limit #dead   // no error: SIGKILL, exit code 137
+`}</Tree>
+</Figure>
+
+## the zoo
+
+every one of these was reproduced on jdk 25 with a tiny program and a tiny limit (`-Xmx16m`, `-XX:MaxMetaspaceSize=16m` and so on), so they die in milliseconds instead of hours. the messages are copied from the real output.
+
+<Figure wide caption={<>pick an animal. the <C k="dead">red</C> line is the real message. the chips at the bottom say who threw it, and whether the two "on OOM" flags react to it: they only fire for errors the <C k="meta">JVM itself</C> throws, which is not all of them.</>}>
+<OomZoo />
+</Figure>
+
+a few patterns in there are worth saying out loud:
+
+- **two of them aren't about memory.** `Requested array size exceeds VM limit` and `Required array length ... is too large` are about a length past `Integer.MAX_VALUE - 2`. you'd get them with a terabyte of free heap.
+- **`unable to create native thread` is about threads.** this one says "possibly out of memory" in its own message, and it's usually a thread limit: 6,124 threads in on macOS (which caps a process at 6,144), a `ulimit -u` or a container's pid limit on linux.
+- **the collector changes the message.** the exact same program said `GC overhead limit exceeded` under Parallel and `Java heap space` under G1. only Parallel implements the overhead limit.
+
+## what the JVM tries first
+
+a heap `OutOfMemoryError` is never the first thing that happens. by the time you see one, the collector has already tried everything it's allowed to:
+
+<Figure caption={<>the path from a failed allocation to the error, for the heap (G1, jdk 25). the soft-reference step is a promise in the spec: every <code>SoftReference</code> is cleared before a heap OOM is thrown.</>}>
+<Flow
+  stages={[
+    { label: "allocation fails", sub: "no room in the TLAB or eden", note: "the thread asks the GC for memory" },
+    { label: "collect", sub: "young GC, then a full GC", note: "retrying the allocation after each" },
+    { label: "last resort", sub: "full GC, soft refs cleared", note: "caches built on SoftReference empty out here" },
+    { label: "report", sub: "dump · hook · exit", note: "the -XX OnOutOfMemoryError family runs" },
+    { label: "throw", sub: "OutOfMemoryError", note: "unwinds the thread that asked, and only that one" },
+  ]}
+/>
+</Figure>
+
+that's also why a JVM near the edge feels so slow before it dies: it's running full GCs back to back, each one freeing a little less (what that looks like in a log is in [reading GC logs](/learn/gc/reading-gc-logs)). the error is the end of a long, expensive goodbye.
+
+## a thread dies, not the JVM
+
+<Predict options={["main is still alive, worker is TERMINATED", "nothing: the JVM exits", "main is still alive, worker is RUNNABLE"]} answer={0} question="run with -Xmx16m. what does main print?">
+```java
+import java.util.*;
+
+public class Worker {
+    public static void main(String[] args) throws Exception {
+        Thread worker = new Thread(() -> {
+            List<byte[]> keep = new ArrayList<>();
+            while (true) keep.add(new byte[1024 * 1024]);
+        }, "worker");
+        worker.start();
+        worker.join();
+        System.out.println("main is still alive, worker is " + worker.getState());
+    }
+}
+```
+<Explain>
+`main is still alive, worker is TERMINATED`, after the worker's stack trace (`Exception in thread "worker" java.lang.OutOfMemoryError: Java heap space`) goes to stderr. an `OutOfMemoryError` is an exception like any other: it unwinds the thread that hit it, and only that thread. once the worker's frames are gone, so is its list, and main has plenty of room again. that's the dangerous part in a server: one request thread dies, the process keeps running in an unknown state, and the health check says everything's fine.
+</Explain>
+</Predict>
+
+which is why production services usually want the JVM to give up on the first one:
+
+```bash
+$ java -Xmx16m -XX:+ExitOnOutOfMemoryError Heap.java
+Terminating due to java.lang.OutOfMemoryError: Java heap space
+$ echo $?
+3
+```
+
+| flag | what it does on an OOM the JVM throws |
+| --- | --- |
+| `-XX:+HeapDumpOnOutOfMemoryError` | writes an `.hprof` first (`-XX:HeapDumpPath=` picks where). the evidence |
+| `-XX:+ExitOnOutOfMemoryError` | exits immediately with code 3, so your orchestrator restarts a clean process |
+| `-XX:+CrashOnOutOfMemoryError` | crashes on purpose, writing an `hs_err` file and a core dump if they're enabled |
+| `-XX:OnOutOfMemoryError="cmd %p"` | runs a command, `%p` is the pid. older scripts use it for `kill -9 %p` |
+
+`HeapDumpOnOutOfMemoryError` plus `ExitOnOutOfMemoryError` is a sane default: you get the dump for later and a fresh process now. but as the zoo shows, neither fires for direct buffer memory, for thread creation, or for the length limits thrown by library code. those still need to be caught by your logs.
+
+<Gotcha title="catching OutOfMemoryError">
+`catch (OutOfMemoryError e)` compiles and sometimes even works. but the error can be thrown from any allocation, including in the middle of some library code that was half way through updating its own data structures, which are now inconsistent. and the handler itself needs memory to log anything. the one place it's legitimately useful is right around one deliberately huge allocation you can live without ("try to load the whole file into memory; if that fails, stream it"). anywhere else, let it go and let the process restart.
+</Gotcha>
+
+## the one that doesn't throw
+
+the scariest out-of-memory has no message at all. a container has a memory limit for the whole process: heap, metaspace, thread stacks, direct buffers, everything in [native memory](/learn/gc/native-memory). go over it and the kernel's OOM killer sends `SIGKILL`. the JVM gets no chance to throw, log, dump or run a hook. all you see is the process gone and an exit code of 137 (128 + signal 9). if your service restarts with 137 and your logs are clean, look at the process's total memory, not at the heap.
+
+<Deep title="StackOverflowError and the JVM's own allocation failures">
+`StackOverflowError` is the heap error's cousin: a thread's stack (one per thread, sized by `-Xss`) ran out of room, almost always from runaway recursion. it's covered in [stack and heap](/learn/basics/stack-and-heap). and when the JVM itself can't get native memory for its own internals (`malloc` or `mmap` fails), there's no exception to throw: it crashes with an `hs_err_pid<pid>.log` file that starts with "There is insufficient memory for the Java Runtime Environment to continue", which usually means the machine or container is out of memory, not the heap.
+</Deep>
+
+<Interview q="you see java.lang.OutOfMemoryError in production. what do you do?">
+read the message after the colon, because it names the pool. `Java heap space` or `GC overhead limit exceeded`: the heap is full of live data, so take the heap dump (you are running with `-XX:+HeapDumpOnOutOfMemoryError`, right?) and look at the dominator tree for a leak, or confirm the live set is legitimately bigger than the heap. `Metaspace`: something keeps loading classes, often a class loader leak. `unable to create native thread`: too many threads or an OS/container limit, not heap. `direct buffer memory`: native buffers, check `MaxDirectMemorySize` and buffer lifetimes. `Requested array size exceeds VM limit`: a bug computing a size. and if the process just vanished with exit code 137, the container killed it for total memory, which no `-Xmx` change alone will explain.
+</Interview>
+
+<Keylines>
+- `OutOfMemoryError` is a family. the message after the colon names the pool that ran out.
+- heap: leak or undersized. metaspace: classes that never unload. threads: OS limits. direct: native buffers.
+- two of them are length limits, not memory: past `Integer.MAX_VALUE - 2` elements.
+- an OOM kills the thread that hit it, not the JVM. use `-XX:+ExitOnOutOfMemoryError` plus a heap dump.
+- exit code 137 with clean logs: the container killed the process. no error is ever thrown.
+</Keylines>

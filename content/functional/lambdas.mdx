@@ -1,0 +1,198 @@
+import { LambdaShrink } from "@/components/figures/functional/LambdaShrink";
+import { TargetTyping } from "@/components/figures/functional/TargetTyping";
+
+<InShort>
+a **lambda** is a piece of behaviour you can pass around like a value: `(a, b) -> a + b`. it has no type of its own. the **target type** (an interface with one abstract method) decides what it becomes.
+
+it can read local variables from around it, but only **effectively final** ones, because it gets a copy, not the variable.
+</InShort>
+
+## the picture
+
+you know how sorting a list by length used to take an anonymous class, six lines and an `@Override`, to say one thing? that's the problem lambdas fix. most of those six lines were the compiler asking questions it could already answer.
+
+think of a plug and a socket. the lambda is the plug (just the pins: some parameters and a body). the functional interface is the socket on the wall (`Comparator`, `Runnable`, `Predicate`). the same plug fits any socket with the same pin layout, and it means whatever that socket is wired to.
+
+<Figure caption={<>step through it. each frame deletes what the compiler can already work out (<C k="dead">red</C>), and sometimes adds an arrow (<C k="hot">amber</C>). the part you can't see: the anonymous class also compiles to its own <code>Main$1.class</code>. the lambda doesn't.</>}>
+<LambdaShrink />
+</Figure>
+
+## the syntax
+
+parameters, an arrow, a body. everything else is optional when the compiler can infer it.
+
+```java title="Main.java" run output="42\n42\n42\nababab\nduke\n#7\nmeasuring lambda\n6"
+import java.util.function.*;
+
+void main() {
+    Supplier<Integer> answer = () -> 42;            // no parameters
+    IntUnaryOperator twice = x -> x * 2;            // one: parens optional
+    BinaryOperator<Integer> add = (a, b) -> a + b;  // two: parens required
+    // explicit types, or var (all of them or none of them)
+    BiFunction<String, Integer, String> rep = (String s, Integer n) -> s.repeat(n);
+    BinaryOperator<String> pick = (var a, var b) -> a.length() >= b.length() ? a : b;
+    // _ means "don't care" (java 22)
+    BiFunction<String, Integer, String> second = (_, n) -> "#" + n;
+    // a block body needs a return
+    Function<String, Integer> loud = s -> {
+        IO.println("measuring " + s);
+        return s.length();
+    };
+
+    IO.println(answer.get());
+    IO.println(twice.applyAsInt(21));
+    IO.println(add.apply(40, 2));
+    IO.println(rep.apply("ab", 3));
+    IO.println(pick.apply("duke", "jdk"));
+    IO.println(second.apply("ignored", 7));
+    IO.println(loud.apply("lambda"));
+}
+```
+
+two rules people trip on: you can't mix styles inside one parameter list (`(String a, b)` is an error), and a block body `{ ... }` needs an explicit `return` if the interface's method returns something.
+
+## target typing
+
+`s -> s.isEmpty()` on its own means nothing. java needs to know which interface it's implementing, and it finds out from context: the variable it's assigned to, the parameter it's passed to, the cast in front of it. that's the **target type**.
+
+<Figure caption={<>pick a target. the same lambda text turns into a different object, or into a compile error. the errors are the real ones from <code>javac</code> 25.</>}>
+<TargetTyping />
+</Figure>
+
+see? a lambda is not a function type, java doesn't have those. it's a short way to write "an object implementing this one-method interface". that's why `var f = s -> s.isEmpty()` can't work: `var` asks the right side for a type, and the right side is waiting for the left side to tell it.
+
+<Quiz question="which of these compiles?" options={["Object o = () -> 42;", "Runnable r = () -> 42;", "IntSupplier s = () -> 42;", "var v = () -> 42;"]} answer={2}>
+<Explain>
+`IntSupplier` has one method, `getAsInt()`, that takes nothing and returns an `int`. `42` fits. `Object` isn't a functional interface, `var` gives no target at all, and `Runnable.run()` returns `void`: javac says `lambda body is not compatible with a void functional interface`. a statement like `() -> IO.println(42)` would fit.
+</Explain>
+</Quiz>
+
+## capturing variables
+
+a lambda can use locals from the method around it. it doesn't get the variable, it gets a **copy of its value**, stored inside the lambda object when the lambda is created.
+
+```java title="Main.java" run output="15"
+import java.util.function.*;
+
+void main() {
+    int base = 10;
+    IntUnaryOperator addBase = x -> x + base;
+    IO.println(addBase.applyAsInt(5));
+}
+```
+
+<Figure caption={<>what that looks like in memory. the lambda is an object on the heap, and <code>base</code> was copied into a field of it (the JVM really names it <code>arg$1</code>, checked with reflection on jdk 25). two copies of 10 now exist.</>}>
+<Memory
+  frames={[{ name: "main", locals: { base: 10, addBase: { ref: "l1" } } }]}
+  heap={{ l1: { type: "Main$$Lambda", fields: { arg$1: 10 }, tag: "hidden class, made at runtime" } }}
+/>
+</Figure>
+
+two copies is fine as long as they can never disagree. so java makes sure they can't: a local used inside a lambda must be **effectively final**, meaning you never assign it again after it's initialized (you don't have to write `final`, you just have to act like it).
+
+<Predict options={["3", "0", "compile error"]} answer={2}>
+```java
+int count = 0;
+List.of("a", "b", "c").forEach(s -> count++);
+IO.println(count);
+```
+<Explain>
+`error: local variables referenced from a lambda expression must be final or effectively final`. the lambda would be bumping its own copy, and `count` in `main` would stay 0 forever. java refuses to compile code that silently does nothing.
+</Explain>
+</Predict>
+
+why not just share the variable, like javascript or C# do? because a local lives in a stack frame, and the frame dies when the method returns. the lambda can outlive it (you can return it, store it, run it on another thread). sharing would mean secretly moving the local to the heap, and then two threads could race on what looks like a plain local variable. java picked the boring, safe option: copy it, and don't let it change.
+
+<Gotcha title="the one-element array hack">
+`int[] count = {0}; list.forEach(s -> count[0]++);` compiles, because the *array reference* never changes. it works on one thread and breaks the moment the stream goes parallel. if you need to count, ask the stream:
+
+<Compare>
+<Bad label="mutate from inside">
+```java
+int[] count = {0};
+words.forEach(w -> { if (w.length() > 3) count[0]++; });
+```
+</Bad>
+<Good label="let the pipeline compute it">
+```java
+long count = words.stream()
+        .filter(w -> w.length() > 3)
+        .count();
+```
+</Good>
+</Compare>
+</Gotcha>
+
+fields are a different story. `this.count++` inside a lambda is allowed, because the lambda captures `this` (a reference that never changes) and the field lives on the heap with its object. that's legal, and it's exactly as thread-unsafe as any other shared field.
+
+## this, inside a lambda
+
+an anonymous class is a new class, so inside it `this` is the anonymous object. a lambda is not a class. it doesn't introduce a new scope at all, so `this` means whatever it meant in the method around it.
+
+```java title="Main.java" run output="anon / Main$1\nouter / Main"
+public class Main {
+    String name = "outer";
+
+    void run() {
+        Runnable anon = new Runnable() {
+            String name = "anon";
+            public void run() {
+                System.out.println(this.name + " / " + this.getClass().getName());
+            }
+        };
+        Runnable lambda = () ->
+                System.out.println(this.name + " / " + this.getClass().getName());
+        anon.run();
+        lambda.run();
+    }
+
+    public static void main(String[] args) {
+        new Main().run();
+    }
+}
+```
+
+<Figure caption={<>inside <code>run()</code>. the anonymous class is its own object with its own <code>name</code>. the lambda object holds a <C k="ref">reference</C> to the <code>Main</code> it was created in, so <code>this</code> inside it is that <code>Main</code>.</>}>
+<Memory
+  frames={[{ name: "run", locals: { this: { ref: "m" }, anon: { ref: "a" }, lambda: { ref: "l" } } }]}
+  heap={{
+    m: { type: "Main", fields: { name: { ref: "s1" } } },
+    s1: { type: "String", value: '"outer"' },
+    a: { type: "Main$1", fields: { name: { ref: "s2" } } },
+    s2: { type: "String", value: '"anon"' },
+    l: { type: "Main$$Lambda", fields: { arg$1: { ref: "m" } } },
+  }}
+/>
+</Figure>
+
+"no new scope" has a second effect: a lambda parameter can't reuse a local's name. `int x = 1; IntUnaryOperator f = x -> x * 2;` fails with `variable x is already defined in method main()`. an anonymous class would have happily shadowed it.
+
+<Gotcha title="checked exceptions don't fit through">
+`Function<Path, String> read = p -> Files.readString(p);` doesn't compile: `unreported exception IOException; must be caught or declared to be thrown`. the lambda is the body of `Function.apply`, and `apply` doesn't declare `throws IOException`. you catch it inside the lambda (often rethrowing as `UncheckedIOException`), or use an interface whose method does declare it, like `Callable`.
+</Gotcha>
+
+<Deep title="what javac actually emits">
+no `Main$1.class`. javac turns the lambda's body into a private method on your own class (`lambda$main$0`, with the captured values as extra leading parameters), and puts an `invokedynamic` instruction where the lambda was:
+
+```text
+0: bipush        10
+2: istore_1
+3: iload_1
+4: invokedynamic #7,  0
+   // InvokeDynamic #0:applyAsInt:(I)Ljava/util/function/IntUnaryOperator;
+```
+
+the first time that instruction runs, its bootstrap method (`LambdaMetafactory.metafactory`) spins up a hidden class implementing `IntUnaryOperator` whose `applyAsInt` calls `lambda$main$0`. after that, the call site is linked and costs about as much as a `new`. a lambda that captures nothing is even cheaper: the JVM hands back one shared instance every time (on jdk 25, two evaluations of `() -> {}` from the same spot are `==`; two capturing ones aren't). don't rely on either, the spec leaves identity unspecified. full story in [lambda internals](/learn/deep-dives/lambda-internals) and [invokedynamic](/learn/meta/invokedynamic).
+</Deep>
+
+<Interview q="what's the difference between a lambda and an anonymous class?">
+an anonymous class is a real class: it gets its own `.class` file, can extend an abstract class, can have fields and several methods, and `this` refers to itself. a lambda can only implement a functional interface, has no state of its own, doesn't create a scope (so `this` is the enclosing instance and parameters can't shadow locals), and is linked at runtime through `invokedynamic` instead of being a class file. bonus point: non-capturing lambdas get reused as a single instance, while every `new` of an anonymous class allocates.
+</Interview>
+
+<Keylines>
+- a lambda is an object implementing a one-method interface. that interface is its target type, and it comes from context.
+- same lambda text, different targets, different objects. no target, no lambda.
+- captured locals are copied in, so they must be effectively final.
+- `this` in a lambda is the enclosing object. lambdas don't open a new scope.
+- no class file per lambda: `invokedynamic` builds it at runtime.
+</Keylines>

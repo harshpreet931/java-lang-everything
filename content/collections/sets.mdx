@@ -1,0 +1,138 @@
+import { PresentMap } from "@/components/figures/collections/PresentMap";
+import { SetOrders } from "@/components/figures/collections/SetOrders";
+import { EnumSetBits } from "@/components/figures/collections/EnumSetBits";
+
+<InShort>
+a set is a map that only cares about keys. so java builds them out of maps: a `HashSet` **is a `HashMap`** whose values are all one dummy object, `LinkedHashSet` is a `LinkedHashMap`, `TreeSet` is a `TreeMap`.
+
+the odd one out is `EnumSet`: a **bit vector**. one `long`, one bit per enum constant.
+</InShort>
+
+## the picture
+
+you know how a set's whole job is "no duplicates"? a map already does that for its keys. so instead of writing a second hash table, the JDK authors wrapped the first one.
+
+<Figure caption={<>a <code>HashSet</code> opened up. one field, a <code>HashMap</code>. your elements are its keys, and every value <C k="ref">points at</C> the same <C k="hot">PRESENT</C> object. there's exactly one of those in the whole JVM.</>}>
+<PresentMap />
+</Figure>
+
+that's not a simplification, it's the source. `HashSet.java` in jdk 25 has `static final Object PRESENT = new Object()`, and `add(e)` is literally `map.put(e, PRESENT) == null`. `contains` is `containsKey`, `remove` is the map's `remove`, and iterating the set iterates the map's key set.
+
+which means everything from the [HashMap chapter](/learn/collections/hashmap) applies, word for word: hashing, buckets, the 0.75 resize, treeified buckets, the `equals`/`hashCode` contract, and the not-quite-random iteration order. the price of the shortcut is memory: each element costs a full map entry (32 bytes on a typical 64-bit JVM) even though the value is always the same.
+
+## three sets, three orders
+
+<Figure caption={<>add words and watch where they land in each set. the <code>HashSet</code> order here is computed with the same model as the HashMap lab, so it matches what java prints. add <code>Apple</code> to see <code>compareTo</code> put capitals first. add a word twice and <code>add</code> returns <C k="dead">false</C>.</>}>
+<SetOrders />
+</Figure>
+
+```java title="Main.java" run output="[banana, apple, pear, kiwi, fig]\n[pear, apple, fig, banana, kiwi]\n[apple, banana, fig, kiwi, pear]\nfalse 5"
+void main() {
+    List<String> words = List.of("pear", "apple", "fig", "banana", "kiwi", "apple");
+    Set<String> hash = new HashSet<>(words);
+    Set<String> linked = new LinkedHashSet<>(words);
+    Set<String> tree = new TreeSet<>(words);
+    IO.println(hash);
+    IO.println(linked);
+    IO.println(tree);
+    IO.println(hash.add("fig") + " " + hash.size());
+}
+```
+
+| | `HashSet` | `LinkedHashSet` | `TreeSet` |
+| --- | --- | --- | --- |
+| built on | `HashMap` | `LinkedHashMap` | `TreeMap` |
+| order | none to rely on | insertion | sorted |
+| `add` / `contains` / `remove` | O(1) average | O(1) average | O(log n) |
+| extras | | `getFirst`, `getLast`, `reversed` (sequenced) | `first`, `floor`, `ceiling`, `headSet`, `tailSet`... |
+| decides "duplicate" with | `hashCode` + `equals` | `hashCode` + `equals` | `compareTo` / `Comparator` |
+
+that last row matters more than it looks.
+
+<Predict options={["2 2", "1 1", "2 1", "1 2"]} answer={2}>
+```java
+class P {
+    final int x;
+    P(int x) { this.x = x; }
+}
+record Q(int x) {}
+
+void main() {
+    Set<P> ps = new HashSet<>(List.of(new P(1), new P(1)));
+    Set<Q> qs = new HashSet<>(List.of(new Q(1), new Q(1)));
+    IO.println(ps.size() + " " + qs.size());
+}
+```
+<Explain>
+`P` doesn't override `equals` or `hashCode`, so it inherits identity from `Object`: two `new P(1)`s are two different objects, two elements. a record generates `equals` and `hashCode` from its components, so the two `Q(1)`s are equal and the set keeps one. if you want value semantics in a set, you need both methods (or a record).
+</Explain>
+</Predict>
+
+<Gotcha title="HashSet and TreeSet can disagree about duplicates">
+```java title="Main.java" run output="false 0\n2 1"
+import java.math.BigDecimal;
+
+void main() {
+    var a = new BigDecimal("1.0");
+    var b = new BigDecimal("1.00");
+    IO.println(a.equals(b) + " " + a.compareTo(b));
+    IO.println(new HashSet<>(List.of(a, b)).size() + " " + new TreeSet<>(List.of(a, b)).size());
+}
+```
+`BigDecimal.equals` counts the scale (`1.0` and `1.00` are different), `compareTo` only looks at the value (they're equal). the hash set uses `equals` and keeps both, the tree set uses `compareTo` and keeps one. same elements, different sets. this is what "compareTo should be consistent with equals" is warning about, and `BigDecimal` is the famous class that isn't.
+</Gotcha>
+
+## set algebra
+
+the bulk methods from `Collection` are the classic set operations. they modify the set you call them on, so copy first if you need the original:
+
+```java title="Main.java" run output="[w, x, y, z] [y, z] [x]"
+void main() {
+    Set<String> a = new TreeSet<>(List.of("x", "y", "z"));
+    Set<String> b = Set.of("y", "z", "w");
+    Set<String> union = new TreeSet<>(a); union.addAll(b);
+    Set<String> inter = new TreeSet<>(a); inter.retainAll(b);
+    Set<String> diff = new TreeSet<>(a); diff.removeAll(b);
+    IO.println(union + " " + inter + " " + diff);
+}
+```
+
+`addAll` is union, `retainAll` is intersection, `removeAll` is difference, and `containsAll` is "is a subset of". (`Set.of` gives you an immutable set: no `null`s, no duplicates allowed even at creation. more in [immutable collections](/learn/collections/immutable-collections).)
+
+## `EnumSet`: a set that's a number
+
+when the elements are constants of one enum, java can do something much better than hashing. every enum constant has an `ordinal()`, its position (0, 1, 2...). so a set of them is just "which positions are in", which is a row of bits.
+
+<Figure caption={<>a <code>Day</code> enum with seven constants. toggle days and watch the <C k="hot">bits</C> in <code>elements</code> flip. the factory methods are single bit-twiddling expressions, copied from <code>RegularEnumSet.java</code>.</>}>
+<EnumSetBits />
+</Figure>
+
+for an enum with up to 64 constants, `EnumSet` is a `RegularEnumSet` with one `long` field. `add` is an OR, `remove` is an AND-NOT, `contains` is an AND, `size()` is `Long.bitCount`, and `addAll` between two enum sets is a single `|`. no hashing, no boxing, no per-element objects, and iteration is in ordinal order (declaration order). enums with more than 64 constants get a `JumboEnumSet`, an array of longs, same idea.
+
+```java title="Main.java" run output="[SATURDAY, SUNDAY] 5 true\n[TUESDAY, WEDNESDAY, THURSDAY]"
+import static java.time.DayOfWeek.*;
+
+void main() {
+    Set<DayOfWeek> weekend = EnumSet.of(SATURDAY, SUNDAY);
+    Set<DayOfWeek> workdays = EnumSet.complementOf(EnumSet.copyOf(weekend));
+    IO.println(weekend + " " + workdays.size() + " " + workdays.contains(FRIDAY));
+    IO.println(EnumSet.range(TUESDAY, THURSDAY));
+}
+```
+
+its sibling `EnumMap` is the same trick for maps: an array indexed by ordinal, so `get` is an array read.
+
+<Effective item={36} title="use EnumSet instead of bit fields">
+the old C-style way to store a set of flags is `int` constants (`STYLE_BOLD = 1 << 0`, `STYLE_ITALIC = 1 << 1`) OR-ed together. it's fast but untyped, unprintable and easy to mix up. an `EnumSet` gives you the same bit-level performance with a real type and a readable `toString`. item 37 says the same about `EnumMap` versus indexing arrays by `ordinal()` yourself.
+</Effective>
+
+<Interview q="how is HashSet implemented?">
+as a `HashMap`. the set's elements are the map's keys, and every value is one shared dummy object (`PRESENT`). `add(e)` is `map.put(e, PRESENT) == null`, so it returns `true` only when the key wasn't there. that's why `HashSet` has exactly `HashMap`'s performance and pitfalls: O(1) average, needs good `hashCode`/`equals`, no ordering. `LinkedHashSet` and `TreeSet` are built the same way on `LinkedHashMap` and `TreeMap`.
+</Interview>
+
+<Keylines>
+- `HashSet` = `HashMap` with dummy values. `TreeSet` = `TreeMap`. `LinkedHashSet` = `LinkedHashMap`.
+- hash sets decide duplicates with `equals` + `hashCode`, tree sets with `compareTo`.
+- `addAll` / `retainAll` / `removeAll` are union / intersection / difference.
+- for enum elements, `EnumSet`: one `long`, one bit per constant.
+</Keylines>

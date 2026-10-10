@@ -1,0 +1,161 @@
+import { Deconstruct } from "@/components/figures/modern/Deconstruct";
+import { PairCoverage } from "@/components/figures/modern/PairCoverage";
+
+<InShort>
+a **record pattern** takes a record apart right in the pattern: `o instanceof Point(int x, int y)` checks that `o` is a `Point` *and* pulls out its components. patterns **nest**, so one pattern can pull all four numbers out of a `Line` made of two `Point`s. final in java 21.
+
+the **unnamed pattern** `_` <Since v={22} /> says "something goes here, i don't care what". it also works for variables you have to declare but never use.
+</InShort>
+
+## the picture
+
+you know how, after `if (o instanceof Line l)`, the very next lines are always `l.start().x()`, `l.start().y()`, `l.end().x()`... digging back into the thing you just tested? a record pattern does the digging in the test itself.
+
+think of a set of nesting dolls with labels painted inside each lid. a type pattern opens the outer doll and hands you the doll. a record pattern opens it, opens the dolls inside, and hands you the labels, already read. and it only does that if every doll is the shape you said it would be.
+
+<Figure wide caption={<>pick a pattern and a value, then step through. each step is one accessor call or test, in the order javac 25 really makes them (checked by logging from every accessor). <C k="hot">amber</C> is what&apos;s being looked at, <C k="live">green</C> passed, <C k="dead">red</C> failed. variables in <C k="ref">blue</C> are references, plain values are <C k="live">green</C>. try <code>Line(Point(1, 2), null)</code> with the deep pattern and then the shallow one.</>}>
+<Deconstruct />
+</Figure>
+
+three things the stepper shows that aren't obvious from the syntax:
+
+1. **it's just accessor calls.** a record pattern calls `start()`, `end()`, `x()`, `y()` for you. records have accessors for every component, which is exactly why patterns work on records (and only on records, for now).
+2. **a record pattern never matches `null`**, at any depth. but a plain type pattern for the component's own type (`Point s` on a `Point` component) is unconditional, so it does match a `null` component.
+3. **variables are bound all at once**, only after everything matched. a failed match leaves nothing behind.
+
+## using them
+
+the same work, with and without:
+
+```java title="Main.java" run output="5.0\n-1.0\n-1.0"
+record Point(int x, int y) {}
+record Line(Point start, Point end) {}
+
+static double length(Object o) {
+    if (o instanceof Line(Point(var x1, var y1), Point(var x2, var y2))) {
+        return Math.hypot(x2 - x1, y2 - y1);
+    }
+    return -1;
+}
+
+void main() {
+    IO.println(length(new Line(new Point(1, 2), new Point(4, 6))));
+    IO.println(length(new Line(new Point(1, 2), null)));
+    IO.println(length("not a line"));
+}
+```
+
+the second call returns `-1.0`, not a `NullPointerException`: `end` is `null`, the nested `Point(...)` pattern doesn't match it, so the `if` is simply false. the null check came free with the pattern.
+
+`var` inside a record pattern means "whatever the component's type is" (here `int`). you can also write a type, `Point(int x, int y)`, which reads well when it matters. for a reference component it can be narrower than the declared type (`Wrap(String s)` on an `Object` component only matches strings). for a primitive component it has to be the exact type in java 25: `Point(double x, double y)` on `int` components is a different feature, [primitive patterns](/learn/modern/in-preview), still in preview.
+
+in a `switch`, record patterns combine with sealed types into the shape java code increasingly takes:
+
+```java title="Main.java" run output="circle r=2 at 0,0\nrect 3x4"
+record Point(int x, int y) {}
+sealed interface Shape permits Circle, Rect {}
+record Circle(Point center, int r) implements Shape {}
+record Rect(Point topLeft, Point bottomRight) implements Shape {}
+
+static String describe(Shape s) {
+    return switch (s) {
+        case Circle(Point(var x, var y), var r) -> "circle r=" + r + " at " + x + "," + y;
+        case Rect(Point(var x1, var y1), Point(var x2, var y2)) -> "rect " + (x2 - x1) + "x" + (y2 - y1);
+    };
+}
+
+void main() {
+    IO.println(describe(new Circle(new Point(0, 0), 2)));
+    IO.println(describe(new Rect(new Point(1, 1), new Point(4, 5))));
+}
+```
+
+no `default`: `Shape` is sealed, and every subtype has a case. that's the whole pattern for modelling data in java now, with a chapter of its own: [data-oriented programming](/learn/modern/data-oriented-programming).
+
+record patterns infer type arguments, too. on a `Box<String>`, `case Box(var s)` makes `s` a `String`, no cast, no `<String>` in the pattern.
+
+## exhaustiveness goes all the way down
+
+when the components of a record are themselves sealed, javac checks every *combination*. a `Pair(Shape a, Shape b)` has four (circle-circle, circle-square, square-circle, square-square), and a switch over `Pair` has to cover all of them:
+
+<Figure wide caption={<>turn case labels on and off. the grid shows which case catches each combination of components, and any combination nothing catches turns <C k="dead">red</C>. i compiled all 63 combinations of these six labels with javac 25: it accepts a switch exactly when the grid is all green.</>}>
+<PairCoverage />
+</Figure>
+
+a nested `_` or `var` covers every possibility for its component, which is why `Pair(Square _, Shape _)` fills a whole row. and like any pattern switch, an exhaustive one has no `default`, so adding a third `Shape` tomorrow breaks every switch that doesn't handle it, at compile time.
+
+## `_`: the unnamed pattern and variable
+
+since java 22 (JEP 456), `_` means "i have to put something here, and i'm not going to use it". in a pattern, it matches anything (`null` included) and binds nothing. outside patterns, it's a variable you can declare and never read:
+
+```java title="Main.java" run output="age 36\n2 5 -1 3"
+record Point(int x, int y) {}
+sealed interface Shape permits Circle, Rect {}
+record Circle(Point center, int r) implements Shape {}
+record Rect(Point topLeft, Point bottomRight) implements Shape {}
+
+void main() {
+    List<Shape> shapes = List.of(new Circle(new Point(0, 0), 2), new Rect(new Point(0, 0), new Point(3, 4)), new Circle(new Point(5, 5), 1));
+
+    int circles = 0;
+    for (var s : shapes) if (s instanceof Circle _) circles++;          // a pattern you don't name
+
+    int xs = 0;
+    for (var s : shapes) if (s instanceof Circle(Point(var x, _), _)) xs += x;   // only x matters
+
+    Map<String, Integer> ages = Map.of("ada", 36);
+    ages.forEach((_, age) -> IO.println("age " + age));             // an unused lambda parameter
+
+    int parsed;
+    try { parsed = Integer.parseInt("x"); } catch (NumberFormatException _) { parsed = -1; }   // an unused exception
+
+    int count = 0;
+    for (var _ : shapes) count++;                                     // an unused loop variable
+
+    IO.println(circles + " " + xs + " " + parsed + " " + count);
+}
+```
+
+it also unlocks one `switch` trick: a case can list several patterns, as long as none of them binds a variable. `case Circle _, Square _ ->` is legal; `case String s, Integer i` isn't, because which variable would exist on the right of the arrow? and `_` is only ever a declaration. reading it (`IO.println(_)`) is `error: underscore not allowed here`.
+
+<Predict options={["false", "true", "NullPointerException"]} answer={1}>
+```java
+record Wrap(Object value) {}
+
+Object w = new Wrap(null);
+IO.println(w instanceof Wrap(Object v));
+```
+<Explain>
+`true`. the outer `Wrap(...)` matches a non-null `Wrap`. the nested `Object v` is a type pattern for the component's own declared type, so it's unconditional and matches `null` too, with `v` bound to `null`. change it to `Wrap(String v)` and it prints `false`: a `String` type pattern isn't unconditional for an `Object` component, so it needs a real `String`. (both checked on jdk 25.)
+</Explain>
+</Predict>
+
+<Gotcha title="an accessor that throws becomes a MatchException">
+record patterns call accessors, and you're allowed to override accessors. if one throws, the pattern doesn't "fail to match", it blows up, wrapped in a `MatchException`:
+
+```java title="Main.java" run output="Exception in thread \"main\" java.lang.MatchException: java.lang.IllegalStateException: sensor offline"
+record Temp(double celsius) {
+    public double celsius() { throw new IllegalStateException("sensor offline"); }
+}
+
+void main() {
+    Object o = new Temp(21.5);
+    if (o instanceof Temp(var c)) IO.println(c);
+}
+```
+
+keep accessors boring. (and don't rely on the order they're called in: the spec doesn't promise one. javac 25 goes level by level, left to right, and stops at the first failure, as the stepper above shows.)
+</Gotcha>
+
+<Interview q="what's a record pattern, and how does it handle null?">
+a pattern that matches a record type and destructures it into its components, like `Point(int x, int y)`, by calling the record's accessors. component patterns can be nested record patterns, type patterns, `var`, or `_`. a record pattern never matches `null`, so nested record patterns double as null checks. a nested type pattern of the component's own type is unconditional, so it does match a `null` component. in a switch over a sealed hierarchy, javac checks exhaustiveness through every level of nesting. record patterns were final in java 21 (JEP 440); `_` arrived in java 22 (JEP 456).
+</Interview>
+
+<Keylines>
+- `Point(int x, int y)`: test the type and pull out the components in one pattern.
+- patterns nest. `var` takes the component's type, `_` ignores it.
+- it's accessor calls underneath. an accessor that throws becomes a `MatchException`.
+- a record pattern never matches `null`. a type pattern of the component's own type does.
+- over sealed components, a switch must cover every combination, no default needed.
+- `_` <Since v={22} /> for unused patterns, lambda parameters, catch variables and loop variables.
+</Keylines>

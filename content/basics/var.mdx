@@ -1,0 +1,123 @@
+import { VarInspector } from "@/components/figures/basics/VarInspector";
+import { VarWhere } from "@/components/figures/basics/VarWhere";
+
+<InShort>
+`var` lets the compiler **infer** a local variable's type from its initializer, so you don't write it twice. the type is still decided at compile time and never changes: java stays **statically typed**. it only works for **local variables** that have an initializer, never for fields, parameters or return types.
+</InShort>
+
+## the picture
+
+```java
+Map<String, List<Integer>> scores = new HashMap<String, List<Integer>>();
+```
+
+that line says the same thing twice. you know how filling in a form asks for your date of birth and then your age? kinda redundant. `var` is java noticing the right-hand side already says what the type is ([JEP 286](https://openjdk.org/jeps/286), java 10):
+
+```java
+var scores = new HashMap<String, List<Integer>>();
+```
+
+the compiler reads the initializer, works out its type, and writes that type into the variable exactly as if you had typed it. it happens entirely at compile time.
+
+<Figure caption="hover a stage. var lives and dies inside javac. checked on jdk 25: the .class file compiled from the var version and from the explicit version are byte-for-byte identical (cmp finds no difference).">
+<Flow
+  stages={[
+    { label: "var scores = ...", sub: "your source", note: "a local variable with an initializer. that's the only place var is allowed." },
+    { label: "javac infers", sub: "type of the right side", note: "the static type of the expression: HashMap<String, List<Integer>>. same rules it uses to check any assignment." },
+    { label: "type is fixed", sub: "checked as usual", note: "from here on the variable is that type, as if you'd typed it. wrong assignments are compile errors." },
+    { label: "Main.class", sub: "no trace of var", note: "the bytecode is identical to the explicit version. the JVM never knows var existed." },
+  ]}
+/>
+</Figure>
+
+## what it infers
+
+the inferred type is the **exact static type of the expression on the right**. usually that's what you'd have written. sometimes it isn't.
+
+<Figure wide caption={<>hover or tap a line to see the type javac infers. every type here is what jshell 25's <code>/vars</code> printed for that exact declaration. the <C k="hot">amber</C> ones surprise people; the <C k="dead">red</C> ones are traps.</>}>
+<VarInspector />
+</Figure>
+
+two to remember. `var list = new ArrayList<String>()` gives you an `ArrayList`, not a `List`: fine for a local, but it's a different type than you'd usually declare. and `var empty = new ArrayList<>()` gives you `ArrayList<Object>`, because the diamond had nothing to infer from. pair `var` with an explicit type argument, never with an empty diamond.
+
+```java title="Main.java" run output="ADA 3"
+void main() {
+    var names = new ArrayList<String>();
+    names.add("ada");
+    var anon = new Object() { int hits = 3; };
+    IO.println(names.get(0).toUpperCase() + " " + anon.hits);
+}
+```
+
+`names.get(0)` is a `String` (so `toUpperCase` compiles), and `anon.hits` works because `var` kept the anonymous class's own type, one you couldn't have written by hand.
+
+## it's not dynamic typing
+
+`var` is not `any`, and it's not javascript's `let`. once inferred, the type is locked:
+
+<Predict options={["it prints five", "it compiles, then throws at runtime", "compile error"]} answer={2}>
+```java
+var x = 5;
+x = "five";
+IO.println(x);
+```
+<Explain>
+compile error: `incompatible types: String cannot be converted to int`. `x` was inferred as `int` on the first line, and it's an `int` forever, exactly as if you'd written `int x = 5;`. `var` changes what you type, not what the compiler checks.
+</Explain>
+</Predict>
+
+## where it's allowed
+
+only where there's a local variable *and* an initializer to infer from. everywhere else, the type is part of a contract (fields, parameters, return types) or there's nothing to look at.
+
+<Figure wide caption={<>pick a spot. the <C k="live">✓</C> ones compile; the <C k="dead">✗</C> ones show javac 25's actual error. most of the "cannot infer" errors come down to the same thing: the right side doesn't have a type of its own yet.</>}>
+<VarWhere />
+</Figure>
+
+lambda parameters joined in java 11 ([JEP 323](https://openjdk.org/jeps/323)). `(var x, var y) -> x + y` means exactly the same as `(x, y) -> x + y`. the reason it exists: you can put an annotation on a `var` parameter, like `(@NonNull var x, var y) -> ...`, which you can't do with a bare name.
+
+## when to use it
+
+`var` is about readability. the rule of thumb from the OpenJDK style notes boils down to: use it when the reader loses nothing.
+
+<Compare>
+<Bad label="the right side doesn't say what it is">
+```java
+var result = service.process(order);
+var x = compute();
+for (var e : lookup()) { ... }
+```
+now the reader has to go find `process` to know what `result` even is.
+</Bad>
+<Good label="the type is right there anyway">
+```java
+var orders = new ArrayList<Order>();
+var path = Path.of("data", "orders.csv");
+var count = 0;
+try (var in = Files.newBufferedReader(path)) { ... }
+```
+the constructor, factory method or literal already names the type.
+</Good>
+</Compare>
+
+good variable names matter more with `var`, not less. `var orders` tells you more than `List<Order> list` ever did.
+
+<Gotcha title="var with numbers and diamonds">
+`var total = 0;` is an `int`, so `total += price` with a `double` price compiles (compound assignment casts) and silently truncates. `var ids = new ArrayList<>();` is a list of `Object`. in both cases the explicit type would have caught the mistake. when the literal or the diamond doesn't pin down the type you actually want, write the type.
+</Gotcha>
+
+<Deep title="why you can still name a variable var">
+`var` isn't a keyword. it's a **reserved type name**: it means something special only where a type is expected. so `var var = "var";` compiles and prints `var`, and old code with variables called `var` kept working in java 10. what you can't do anymore is name a *class* `var` (`error: 'var' not allowed here`), since that would make `var x = ...` ambiguous. `yield`, `record`, `sealed` and `permits` were added later in the same careful way (special only where they mean something), for the same reason: never break existing code.
+</Deep>
+
+<Interview q="does var make java dynamically typed?">
+no. `var` is local variable type inference: the compiler works out the static type from the initializer at compile time, and from then on the variable behaves exactly as if the type were written out (the bytecode is identical). assigning a value of another type is a compile error. it's limited to local variables with initializers, plus lambda parameters since java 11. fields, method parameters and return types always need explicit types.
+</Interview>
+
+<Keylines>
+- `var` infers a local variable's type from its initializer, at compile time.
+- the type is fixed. `var x = 5; x = "five";` doesn't compile.
+- it infers the exact type on the right: `ArrayList<String>`, not `List<String>`. an empty diamond gives `Object`.
+- locals only, with an initializer. no fields, parameters, return types, `null`, lambdas or bare `{1, 2}`.
+- use it when the right side already says the type. otherwise, write it out.
+</Keylines>

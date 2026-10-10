@@ -1,0 +1,226 @@
+import { PoolQuiz } from "@/components/figures/deep-dives/PoolQuiz";
+import { LazyLdc } from "@/components/figures/deep-dives/LazyLdc";
+
+export const pool = {
+  file: "Main.java",
+  source: `void main() {
+    String a = "jle";
+    String b = "jle";
+    String c = new String("jle");
+    String d = c.intern();
+    IO.println(a == b);
+    IO.println(a == c);
+    IO.println(a == d);
+}`,
+  steps: [
+    { line: 2, frames: [{ name: "main", locals: {} }], heap: {}, note: "main starts. the literal \"jle\" is still just bytes in the class file." },
+    {
+      line: 3,
+      frames: [{ name: "main", locals: { a: { ref: "o2" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" } },
+      note: "the first time this literal runs, the JVM resolves it: one String, registered in the pool. a points at it.",
+    },
+    {
+      line: 4,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" } },
+      note: "same literal, same pool entry, same object. two arrows, and nobody wrote b = a.",
+    },
+    {
+      line: 5,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" }, o3: { type: "String", value: '"jle"', state: "new" } },
+      note: "new always allocates. c is a second String with the same text (internally it even shares o2's byte[]), but it is not in the pool.",
+    },
+    {
+      line: 6,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o2" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" }, o3: { type: "String", value: '"jle"' } },
+      note: "c.intern() looks \"jle\" up by content and hands back the pooled object. d and a are now the same arrow.",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o2" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" }, o3: { type: "String", value: '"jle"' } },
+      stdout: "true\n",
+      note: "a == b compares arrows. same object, true.",
+    },
+    {
+      line: 8,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o2" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" }, o3: { type: "String", value: '"jle"' } },
+      stdout: "true\nfalse\n",
+      note: "a == c: same text, different objects. false. this is the whole == bug in one line.",
+    },
+    {
+      line: 9,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o2" } } }],
+      heap: { o2: { type: "String", value: '"jle"', tag: "string pool" }, o3: { type: "String", value: '"jle"' } },
+      stdout: "true\nfalse\ntrue\n",
+      note: "a == d: intern() brought us back to the pooled object. true.",
+    },
+  ],
+};
+
+<InShort>
+the **string pool** is a table inside the JVM (the `StringTable`) that maps text to one canonical `String` object. every string **literal** goes through it the first time it runs, and so does every call to **`intern()`**. so two equal literals are the same object, while a string built at run time is a new one, unless javac could **fold** it into a constant first. that one rule explains every `==` puzzle.
+</InShort>
+
+## the picture
+
+you know how `==` on two strings sometimes works and sometimes doesn't? kinda cursed. it's not random though: `==` compares references (see [stack and heap](/learn/basics/stack-and-heap)), and whether two strings share a reference depends entirely on whether both came out of the pool.
+
+think of a library's catalogue. a literal is a book request by title: the librarian checks the catalogue and hands you the copy on the shelf, and everyone asking for that title gets the same copy. `new String(...)` is photocopying the book: same words, your own copy. `intern()` is walking your photocopy to the desk and asking "do you have this one?". if they do, you get theirs. if they don't, yours becomes the library's copy.
+
+<Figure wide caption={<>a real run, traced on jdk 25. <code>a</code>, <code>b</code> and <code>d</code> end up as one arrow to the <C k="meta">pooled</C> object; <code>c</code> is the odd one out. step 5 is the one people get wrong.</>}>
+<MemoryStepper trace={pool} />
+</Figure>
+
+## when literals enter the pool
+
+not at class loading, and not at compile time. a literal sits in the class file as a `CONSTANT_String` entry, and the JVM resolves it the first time an `ldc` instruction that uses it actually runs. resolving it means "look this text up in the pool, and add a new String if it isn't there". after that the result is cached in the class's constant pool, so the lookup happens once per literal, not once per execution.
+
+you can catch that laziness in the act. build a string at run time, intern it *before* the matching literal has run, and the pool adopts your object:
+
+<Figure wide caption={<>step through it. the literal on line 4 is in the class file the whole time, but it isn&apos;t <em>resolved</em> until line 4 runs. by then <code>x</code> is already the pooled copy, so both lines print true.</>}>
+<LazyLdc />
+</Figure>
+
+```java run output="true\ntrue"
+void main() {
+    String x = new String("jle-") + new String("pool");
+    IO.println(x.intern() == x);
+    IO.println(x == "jle-pool");
+}
+```
+
+try the same trick with `"java"` and the first line prints `false`: the JDK's own startup code already used the literal `"java"`, so it's in the pool before your `main` runs. which strings are pre-pooled depends on the JDK build, which is the first hint that you should never write code whose correctness depends on any of this.
+
+## compile-time constants: the folding rule
+
+the other half of the story happens before the JVM sees anything. the JLS defines **constant expressions**: literals, plus operators applied to them, plus *constant variables* (a `final` variable of a primitive type or `String`, initialized with a constant expression). javac evaluates every constant expression at compile time. so `"a" + "b"` never runs a concatenation, it becomes the single constant `"ab"`:
+
+```bash
+$ javap -c Fold.class      # String a = "a"; final String fa = "a";
+   0: ldc     #7       // String a                 String a = "a"
+   3: ldc     #9       // String ab                "a" + "b"
+   6: ldc     #9       // String ab                fa + "b"  (fa is a constant)
+   9: aload_0
+  10: invokedynamic #11, 0  // makeConcatWithConstants   a + "b"  (runtime)
+```
+
+(notice `fa` doesn't even get a local slot. a constant variable is inlined everywhere it's used.) the runtime one goes through `invokedynamic`, which is a story of its own: [string concatenation internals](/learn/deep-dives/string-concatenation). whatever it does, it produces a new String, never a pooled one.
+
+now you can do all of these in your head:
+
+<Figure caption={<>twelve cases, every one run on jdk 25. answer them in order; each answer comes with the reason. the trick is always the same question: <em>could javac compute this?</em></>}>
+<PoolQuiz />
+</Figure>
+
+<Deep title="all twelve cases as one program">
+same order as the quiz, four per line:
+
+```java run output="true false true false\ntrue true true false\ntrue true true true"
+static final String A = "a";
+static String getA() { return "a"; }
+
+void main() {
+    String ab = "ab";
+    String a = "a";
+    final String fa = "a";
+    final String fm = getA();
+    final var va = "a";
+    IO.println(("a" + "b" == ab) + " " + (a + "b" == ab) + " " + (fa + "b" == ab) + " " + (fm + "b" == ab));
+    IO.println((A + "b" == ab) + " " + (va + "b" == ab) + " " + ("a" + 'b' == ab) + " " + (new String("ab") == ab));
+    IO.println((new String("ab").intern() == ab) + " " + ((a + "b").intern() == ab) + " " + (ab.concat("") == ab) + " " + ("a" + 1 == "a1"));
+}
+```
+</Deep>
+
+<Predict options={["true", "false", "it depends on the JVM"]} answer={1}>
+```java
+String s = "hel";
+String t = s + "lo";
+IO.println(t == "hello");
+```
+<Explain>
+`s` isn't final, so `s + "lo"` is concatenated at run time and creates a new `String`. `"hello"` is a pooled literal. different objects, `false`, on every JVM. `t.equals("hello")` is `true`, and that's the comparison you meant.
+</Explain>
+</Predict>
+
+## where the pool lives
+
+two parts, and people mix them up:
+
+<Defs>
+<dt>the strings</dt><dd>ordinary `String` objects on the ordinary heap. before java 7 interned strings lived in permgen, a small fixed-size area that loved to throw `OutOfMemoryError: PermGen space`. java 7 moved them into the main heap.</dd>
+<dt>the StringTable</dt><dd>a hash table in the JVM's native memory, mapping content to those objects. its references are weak: an interned string that nothing else points at can be garbage collected, and its entry disappears.</dd>
+</Defs>
+
+you can watch the table with `jcmd <pid> VM.stringtable`. here's a program that interns a million distinct strings, then drops them and calls `System.gc()`, sampled three times on jdk 25:
+
+```bash
+$ jcmd 56497 VM.stringtable      # at startup
+Number of buckets       :     65536 =    524288 bytes, each 8
+Number of entries       :        23 =       368 bytes, each 16
+Shared String Table statistics:
+Number of entries       :      8186
+
+$ jcmd 56497 VM.stringtable      # after interning 1,000,000 strings
+Number of buckets       :    131072 =   1048576 bytes, each 8
+Number of entries       :   1000024 =  16000384 bytes, each 16
+Average bucket size     :     7.630
+
+$ jcmd 56497 VM.stringtable      # after dropping them and a GC
+Number of buckets       :    262144 =   2097152 bytes, each 8
+Number of entries       :        24 =       384 bytes, each 16
+```
+
+three things to read off that:
+
+- the table starts at `-XX:StringTableSize` buckets (65,536 by default on jdk 25) and **grows by itself** when chains get long. the old advice to bump `StringTableSize` for intern-heavy apps mostly predates that.
+- interned strings **are collected**: a million entries went back to 24. interning is not a leak by itself. holding the strings is.
+- the 8,186 "shared" entries are strings baked into the JDK's [CDS archive](/learn/jvm/aot-and-leyden), mapped in at startup before any of your code runs.
+
+<Gotcha title="intern() is not a free memory diet">
+`intern()` is a native call plus a hash lookup, every single time. people used to intern every parsed field to save memory; most of the time a plain `HashMap<String, String>` you control (or not deduplicating at all) is faster. measure before you intern, and never intern unbounded user input.
+</Gotcha>
+
+## string deduplication is a different thing
+
+`-XX:+UseStringDeduplication` is often confused with the pool. it doesn't touch `==` at all. during GC it finds long-lived `String` objects with equal content and makes them **share one `byte[]`**. long-lived means they survived a few collections: three by default, set with `StringDeduplicationAgeThreshold`. it started as a G1-only feature in java 8u20; on jdk 25 it worked with every collector we tried (serial, parallel, G1, ZGC, Shenandoah).
+
+<Figure caption={<>after dedup: still two <code>String</code> objects (so <code>a == b</code> is still false), but one shared <C k="ref">byte[]</C>. measured with reflection on jdk 25: with the flag off the arrays stay separate; with it on they were the same array after five GCs.</>}>
+<Memory
+  frames={[{ name: "main", locals: { a: { ref: "s1" }, b: { ref: "s2" } } }]}
+  heap={{
+    s1: { type: "String", fields: { value: { ref: "v" }, coder: 0, hash: 0 } },
+    s2: { type: "String", fields: { value: { ref: "v" }, coder: 0, hash: 0 } },
+    v: { type: "byte[]", items: [100, 101, 100, 117, 112, 45, 109, 101], tag: "\"dedup-me\", shared after dedup" },
+  }}
+/>
+</Figure>
+
+```bash
+$ java -XX:+UseStringDeduplication --add-opens java.base/java.lang=ALL-UNNAMED Dedup.java
+same String?   false
+same byte[]?   false
+after 5 GCs:
+same String?   false
+same byte[]?   true
+```
+
+so: interning gives you one `String` and changes `==`. dedup gives you one `byte[]`, happens in the background, and changes nothing you can observe without reflection. it's the one to turn on if a heap dump shows thousands of copies of the same strings.
+
+<Interview q={'how many objects does String s = new String("hello") create?'}>
+"one or two, depending on whether `"hello"` was already pooled." the literal `"hello"` resolves to a pooled `String` the first time that `ldc` runs (that's one object, created only if no equal string was pooled before). `new String(...)` always creates a second `String` object on the heap. bonus point: the copy shares the pooled string's internal array (the jdk 25 constructor is literally `this.value = original.value`), so it's two `String` objects but only one `byte[]`.
+</Interview>
+
+<Keylines>
+- `==` on strings compares objects. equal text only means the same object when both came from the pool.
+- literals are pooled lazily, the first time their `ldc` runs. `intern()` adds to the same pool.
+- javac folds constant expressions (literals, `final` constant variables) at compile time. anything else concatenates at run time into a new String.
+- the String objects live on the heap (since java 7). the StringTable holds them weakly, grows on its own, and lets unused ones be collected.
+- string dedup shares `byte[]`s between equal strings during GC. different feature, invisible to `==`.
+- use `equals`. always.
+</Keylines>

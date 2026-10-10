@@ -1,0 +1,81 @@
+import { EcosystemMap } from "@/components/figures/tooling/EcosystemMap";
+
+<InShort>
+the JDK gives you the language, the runtime and a big standard library. almost everything else in a real java service comes from a small set of well-known projects: a **framework** that wires the app together (Spring Boot, Quarkus, Micronaut, Helidon, Jakarta EE), a **data access** layer on top of JDBC, a **build tool**, a **testing** stack, a few everyday **libraries**, and possibly another **JVM language**.
+
+knowing which box a name goes in is most of the battle.
+</InShort>
+
+## the picture
+
+a city map, not a ranking. the JDK is the ground everything stands on. frameworks are the neighbourhoods, each with its own layout but the same roads (HTTP, JDBC, JSON). you can live in any of them, and moving between them is less dramatic than the forum threads suggest, because the java underneath is the same.
+
+<Figure wide caption={<>click a name. the one-liners are deliberately neutral. "latest" is the newest stable release on maven central (or the project's download site) on 8 october 2026, so it will be out of date by the time you read this.</>}>
+<EcosystemMap />
+</Figure>
+
+## one request, many layers
+
+most server-side java follows the same path. the names change per stack, the layers don't:
+
+<Figure caption="hover a layer. the right-hand words are examples, not the only options. everything above JDBC is a library; JDBC itself is part of the JDK.">
+<Flow
+  vertical
+  stages={[
+    { label: "HTTP server", sub: "tomcat, jetty, netty, undertow, helidon webserver", note: "accepts the connection, parses HTTP. usually embedded in your app now, not a separate server you deploy into." },
+    { label: "framework", sub: "spring boot, quarkus, micronaut, helidon, jakarta EE", note: "routes the request to your handler, builds your objects (dependency injection), manages config and transactions." },
+    { label: "your code", sub: "controllers, services", note: "the part that's actually yours." },
+    { label: "data access", sub: "hibernate (JPA), jOOQ, MyBatis, spring data", note: "turns objects or type-safe queries into SQL." },
+    { label: "JDBC driver", sub: "postgresql, mysql, oracle", note: "speaks the database's wire protocol behind the standard java.sql interfaces." },
+  ]}
+/>
+</Figure>
+
+## how the frameworks differ
+
+the big four application frameworks do roughly the same job. the real difference is *when* they do the wiring:
+
+| | when wiring happens | HTTP server by default | native image |
+| --- | --- | --- | --- |
+| Spring Boot | at startup, with reflection and proxies (optional AOT step for native) | tomcat | yes, with GraalVM |
+| Quarkus | mostly at build time ("build-time augmentation") | vert.x based | a first-class target |
+| Micronaut | at compile time, with annotation processors | netty | yes |
+| Helidon | SE: no injection, plain code. MP: CDI at startup | helidon webserver (virtual threads) | yes |
+
+wiring at startup is flexible but costs startup time and memory. wiring at build or compile time starts faster and makes [native images](/learn/jvm/aot-and-leyden) easier, with less runtime magic. spring boot has the biggest ecosystem and the most answers on the internet. none of them is "the fast one" for every workload: measure your own, see [measuring performance](/learn/performance/measuring-performance).
+
+and **Jakarta EE** is a different kind of thing: it's a set of *specifications* (servlets, persistence, CDI, REST) that several servers implement. spring, quarkus and helidon all implement or use parts of it, which is why `jakarta.persistence.Entity` shows up everywhere.
+
+<Quiz question="which one of these is a specification, not a library you can run?" options={["Hibernate", "Jakarta Persistence (JPA)", "jOOQ", "MyBatis"]} answer={1}>
+<Explain>
+Jakarta Persistence (the old JPA) is a spec: interfaces like `EntityManager` and annotations like `@Entity`, plus a document describing how they behave. hibernate is the most used *implementation* of it (EclipseLink is another). jOOQ and MyBatis don't implement JPA at all, they take a SQL-first approach.
+</Explain>
+</Quiz>
+
+## the javax → jakarta rename
+
+the one ecosystem event worth knowing about, because it still bites upgrades. in 2017 oracle handed java EE to the eclipse foundation, but kept the `javax` name. so jakarta EE 9 (2020) renamed every package: `javax.persistence.Entity` became `jakarta.persistence.Entity`, `javax.servlet` became `jakarta.servlet`. spring boot 3 (2022) moved to jakarta, so did everything else. code and libraries are on one side of that line or the other.
+
+<Gotcha title="javax vs jakarta in the same app">
+a library compiled against `javax.servlet` simply doesn't work in a jakarta-based server: different package, different class, `ClassNotFoundException` or a filter that silently never runs. when an upgrade explodes with `javax.*` in the stack trace, look for an old dependency. (note: `javax.sql`, `javax.crypto` and friends are part of the JDK and were never renamed. only the enterprise ones moved.)
+</Gotcha>
+
+## languages on the JVM
+
+kotlin, scala, clojure and groovy all compile to the same bytecode as java, which is why they can use every library above, and why java can call them. kotlin is the one you're most likely to meet: it's the preferred language for android and it's common in spring and gradle projects (`build.gradle.kts` is kotlin). the [what java is](/learn/start/what-is-java) chapter shows why the JVM doesn't care which compiler made a class file.
+
+<Deep title="how to pick, honestly">
+for a typical team building HTTP services, the boring answer is usually right: the framework your team already knows, maven or gradle (whichever your org standardised on), JUnit + AssertJ + Mockito + Testcontainers, jackson for JSON, SLF4J + logback for logging. reach for quarkus, micronaut or helidon when startup time, memory or native images matter enough to justify the switch, and benchmark *your* app before believing anyone's chart. jOOQ vs hibernate is less about speed and more about whether your team thinks in SQL or in objects.
+</Deep>
+
+<Interview q="what's the difference between spring and spring boot?">
+spring (the framework, since 2003) is the dependency injection container plus modules for web, data, transactions and security. you used to configure all of it yourself. spring boot (2014) sits on top: auto-configuration based on what's on the classpath, an embedded server so the app is a runnable jar, starter dependencies that pin compatible versions, and production features like health checks. boot doesn't replace spring, it configures it.
+</Interview>
+
+<Keylines>
+- the JDK is the ground. frameworks, data access, build, testing and libraries sit on top.
+- frameworks differ mostly in *when* they wire your app: startup, build time, or compile time.
+- Jakarta EE is specs. hibernate implements JPA. jOOQ and MyBatis are SQL-first.
+- `javax.*` enterprise packages became `jakarta.*`. mixing them breaks things.
+- kotlin, scala, clojure and groovy share the same bytecode, so they share the ecosystem.
+</Keylines>

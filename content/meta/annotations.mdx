@@ -1,0 +1,191 @@
+import { RetentionTrail } from "@/components/figures/meta/RetentionTrail";
+
+<InShort>
+an **annotation** is metadata stuck onto a declaration. it does nothing on its own: something has to read it. that's javac, an annotation processor, or a framework using reflection while your program runs. **`@Retention`** decides which of those three gets to see it, and **`@Target`** decides where you're allowed to put it.
+
+and at runtime, the annotation object you get back is a **dynamic proxy**. no, really.
+</InShort>
+
+## the picture
+
+you know how `@Test` makes JUnit run a method, but deleting the import makes it not compile and deleting the annotation makes the test silently vanish? the annotation didn't run anything. JUnit went looking for it.
+
+think of sticky notes on a printed document. a note doesn't change a word of the text; it's for whoever reads the document next. and notes come in three kinds of glue: some fall off when the editor's done with the draft (`SOURCE`), some survive into the printed copy but nobody reading the book notices them (`CLASS`), and some stay on forever where anyone can read them (`RUNTIME`).
+
+declaring one looks like an interface with an `@` on it, because that's exactly what it is:
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Route {
+    String path();                // a required element
+    String method() default "GET"; // optional, has a default
+}
+```
+
+`javap` agrees: `Route` compiles to `interface Route extends java.lang.annotation.Annotation` with an `ACC_ANNOTATION` flag. element values have to be things the compiler can write into a class file: primitives, `String`, `Class` literals, enum constants, other annotations, and arrays of those. no `null`, no `new`, no method calls.
+
+## how long it survives
+
+<Figure caption={<>switch the retention. <C k="live">green</C> stages can see the annotation. the bytecode under it is real <code>javap</code> output for the same method with all three annotations on it.</>}>
+<RetentionTrail />
+</Figure>
+
+the trap is the middle one. **`CLASS` is the default.** write an annotation without `@Retention`, and it makes it into the class file and then reflection pretends it doesn't exist.
+
+## reading them at runtime
+
+here's the core of every annotation-driven framework, in about fifteen lines: a test runner that finds `@Test` methods, calls them, and checks the result.
+
+```java title="Main.java" run output="pass addition → 4\nFAIL floats → 0.30000000000000004"
+import java.lang.annotation.*;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Comparator;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.METHOD)
+@interface Test {
+    String expect();
+}
+
+class MathTests {
+    @Test(expect = "4") String addition() { return String.valueOf(2 + 2); }
+    @Test(expect = "0.3") String floats() { return String.valueOf(0.1 + 0.2); }
+    String helper() { return "not a test"; }
+}
+
+void main() throws Exception {
+    Method[] methods = MathTests.class.getDeclaredMethods();
+    Arrays.sort(methods, Comparator.comparing(Method::getName)); // the order is unspecified
+    var tests = new MathTests();
+    for (Method m : methods) {
+        Test t = m.getAnnotation(Test.class);
+        if (t == null) continue;
+        String got = (String) m.invoke(tests);
+        IO.println((got.equals(t.expect()) ? "pass " : "FAIL ") + m.getName() + " → " + got);
+    }
+}
+```
+
+([0.1 + 0.2](/learn/basics/floating-point) failing is the second-best joke on this page.) JUnit is this plus a thousand features: [reflection](/learn/meta/reflection) to find the methods, `getAnnotation` to read the metadata, `invoke` to run them.
+
+notice the sort. `getDeclaredMethods()` promises no order at all, which is why JUnit doesn't promise one either, and why tests that depend on running in file order eventually break.
+
+<Quiz question="delete the @Retention(RetentionPolicy.RUNTIME) line from Test and run it again. what happens?" options={["same output", "it prints nothing", "compile error", "an exception at getAnnotation"]} answer={1}>
+<Explain>
+it prints nothing (i ran it). without `@Retention` the policy is `CLASS`: javac writes the annotation into the class file as `RuntimeInvisibleAnnotations`, and the JVM never exposes it to reflection. `getAnnotation` returns `null` for every method, so every method gets skipped. no error, no warning. a very quiet bug.
+</Explain>
+</Quiz>
+
+## what an annotation object actually is
+
+`m.getAnnotation(Test.class)` returned something you could call `t.expect()` on. but `Test` is an interface, and you never wrote a class that implements it. so what is `t`?
+
+```java title="Main.java" run output="@Main.Route(method=\"GET\", path=\"/users\")\nGET /users\n$Proxy1\ntrue\nsun.reflect.annotation.AnnotationInvocationHandler"
+import java.lang.annotation.*;
+import java.lang.reflect.Proxy;
+
+@Retention(RetentionPolicy.RUNTIME)
+@interface Route {
+    String path();
+    String method() default "GET";
+}
+
+class Api {
+    @Route(path = "/users") void list() {}
+}
+
+void main() throws Exception {
+    Route r = Api.class.getDeclaredMethod("list").getAnnotation(Route.class);
+    IO.println(r);
+    IO.println(r.method() + " " + r.path());
+    IO.println(r.getClass().getSimpleName());
+    IO.println(Proxy.isProxyClass(r.getClass()));
+    IO.println(Proxy.getInvocationHandler(r).getClass().getName());
+}
+```
+
+a [dynamic proxy](/learn/meta/dynamic-proxies). the first time you ask, the JVM parses the bytes of the `RuntimeVisibleAnnotations` attribute into a map of element names to values, and wraps it in a generated class that implements `Route`. calling `r.path()` goes through the proxy's handler, which looks `"path"` up in the map.
+
+<Figure caption={<>what <code>r</code> points at. the <C k="ref">arrows</C> are references. the map is filled with the defaults first, then the values you wrote, which is why <code>toString</code> printed <code>method</code> before <code>path</code>.</>}>
+<Memory
+  frames={[{ name: "main", locals: { r: { ref: "proxy" } } }]}
+  heap={{
+    proxy: { type: "$Proxy1 implements Route", fields: { h: { ref: "handler" } } },
+    handler: { type: "AnnotationInvocationHandler", fields: { type: "Route.class", memberValues: { ref: "map" } } },
+    map: { type: "LinkedHashMap", summary: true, entries: [['"method"', '"GET"'], ['"path"', '"/users"']] },
+  }}
+/>
+</Figure>
+
+that also explains a few things people find odd. annotations are immutable (there's nothing to set). `equals` compares element values, not identity (the handler implements it that way). and every element read is a map lookup through a proxy, so frameworks read annotations once at startup and cache what they found.
+
+## where they can go, and the meta-annotations
+
+`@Target` takes a list of `ElementType`s. jdk 25 has twelve:
+
+<Figure caption={<>the twelve <code>ElementType</code> values in jdk 25, and the java version that added the later ones. the <C k="hot">amber</C> one is different in kind: it annotates a use of a type, not a declaration.</>}>
+<Tree>{`
+ElementType
+    declarations
+        TYPE                 // classes, interfaces, enums, records, annotations
+        FIELD
+        METHOD
+        PARAMETER
+        CONSTRUCTOR
+        LOCAL_VARIABLE
+        ANNOTATION_TYPE      // meta-annotations
+        PACKAGE              // in package-info.java
+        TYPE_PARAMETER       // <@Foo T>, java 8
+        MODULE               // in module-info.java, java 9
+        RECORD_COMPONENT     // java 16
+    uses of a type #hot
+        TYPE_USE             // List<@NonNull String>, java 8
+`}</Tree>
+</Figure>
+
+`TYPE_USE` is the odd one out: it annotates a *type* wherever a type appears, not a declaration. that's what nullness checkers hang off ([code quality tools](/learn/tooling/code-quality)): `List<@Nullable String>` says something different from `@Nullable List<String>`.
+
+annotations on annotations are called meta-annotations, and there are five that matter:
+
+| meta-annotation | what it does |
+| --- | --- |
+| `@Retention` | how long it survives: `SOURCE`, `CLASS` (default), `RUNTIME` |
+| `@Target` | where it may appear. leave it off and it fits almost any declaration |
+| `@Documented` | show it in the javadoc of whatever it annotates |
+| `@Inherited` | a class annotation that subclasses also report. classes only |
+| `@Repeatable` | allowed more than once in the same place. needs a container annotation |
+
+the last two both have a trap, and i checked both on jdk 25:
+
+<Gotcha title="@Inherited and @Repeatable lie a little">
+`@Inherited` only works for **class** annotations, from a superclass. an `@Audited` on an interface is not seen by `Impl.class.isAnnotationPresent(Audited.class)` (false), and one on an overridden method isn't seen on the override (false). Spring's own annotation utilities walk interfaces and overridden methods themselves for exactly this reason.
+
+`@Repeatable` is compiler sugar. write `@Role("admin") @Role("auditor")` and javac actually stores one `@Roles({@Role("admin"), @Role("auditor")})`. so:
+
+```text
+Alice.class.getAnnotation(Role.class)        → null
+Alice.class.getAnnotation(Roles.class)       → @Main.Roles({@Main.Role("admin"), @Main.Role("auditor")})
+Alice.class.getAnnotationsByType(Role.class) → [@Main.Role("admin"), @Main.Role("auditor")]
+Bob.class.getAnnotation(Role.class)          → @Main.Role("guest")   // only one, so no container
+```
+
+one role works with `getAnnotation`, two roles return `null`. always use `getAnnotationsByType` for repeatable annotations.
+</Gotcha>
+
+<Deep title="one annotation on a record component lands in four places">
+`record User(@Json String name)` has one place to write the annotation and four declarations javac generates from it: the private field, the accessor method, the canonical constructor's parameter, and the record component itself. javac copies the annotation to every one of those that its `@Target` allows. with no `@Target`, `@Json` showed up on all four. an annotation with `@Target(ElementType.FIELD)` showed up only on the field. so if your JSON library reads accessors and your annotation is field-only, it'll never see it. pick the target deliberately.
+</Deep>
+
+<Interview q="how does @Override work at runtime?">
+it doesn't exist at runtime. `@Override` has `SOURCE` retention: javac checks that the method really overrides something (and refuses to compile if not), then throws the annotation away. there's no trace of it in the class file. the general point: an annotation is only metadata, and what it "does" depends entirely on who reads it. javac reads `SOURCE` ones, bytecode tools can read `CLASS` ones, and reflection can only see `RUNTIME` ones, which it hands back as a dynamic proxy over a map of element values.
+</Interview>
+
+<Keylines>
+- an annotation does nothing. javac, a processor or a framework has to go and read it.
+- `SOURCE` is for the compiler, `CLASS` (the default) for bytecode tools, `RUNTIME` for reflection.
+- forget `@Retention(RUNTIME)` and reflection quietly finds nothing.
+- at runtime an annotation is a proxy over a map of its element values.
+- `@Inherited` is classes only. repeated annotations hide inside a container: use `getAnnotationsByType`.
+</Keylines>

@@ -1,0 +1,223 @@
+import { ClassLifecycle } from "@/components/figures/jvm/ClassLifecycle";
+import { InitQuiz } from "@/components/figures/jvm/InitQuiz";
+
+<InShort>
+every class goes through three phases. **loading**: find the bytes and turn them into a class. **linking**: verify the bytecode, give static fields their zero values, and resolve names into real pointers (lazily). **initialization**: run `<clinit>` (your static fields and static blocks), exactly once, at the first active use.
+
+loading can happen whenever the JVM likes. initialization happens at a moment the spec pins down precisely, and that's the part that bites.
+</InShort>
+
+## the picture
+
+you know how a static block sometimes runs way later than you'd expect, and sometimes not at all? that's because "the class is loaded" and "the class is initialized" are two different events, and only the second one runs your code.
+
+think of a new hire. their paperwork arriving is loading. the background check is verification. getting a desk with empty drawers is preparation. learning where the printer is, the first time they need it, is resolution. and orientation (where they actually do something) only happens on the first day they're asked to work: that's initialization.
+
+<Figure caption="hover a stage. the middle three together are linking. resolution can happen much later than the rest, one reference at a time.">
+<Flow stages={[
+  { label: "loading", sub: "bytes → class", note: "a class loader finds the bytes (a .class file, a jar entry, the jdk image) and the JVM parses them into a class in metaspace, plus a java.lang.Class object on the heap." },
+  { label: "verification", sub: "is this safe?", note: "type-check every method: no stack underflow, no int used as a reference, no jumping into the middle of an instruction. one linear pass, thanks to the StackMapTable attribute." },
+  { label: "preparation", sub: "statics = 0", note: "allocate static fields and set them to default values: 0, false, null. your initial values are not assigned yet." },
+  { label: "resolution", sub: "names → pointers", note: "turn symbolic references like Point.x:I into real offsets and method pointers. HotSpot does it lazily, the first time each instruction runs." },
+  { label: "initialization", sub: "<clinit>", note: "run the static initializers and static field assignments, top to bottom, under a lock. exactly once per class (per class loader)." },
+]} />
+</Figure>
+
+## watch a real run
+
+here's a small program, run with `-Xlog:class+load=info,class+init=info`, which makes the JVM narrate exactly this. the log lines in the figure are copied from that run.
+
+<Figure wide caption={<>step through it. watch <code>new Price[2]</code> on line 13: both classes get <em>loaded</em>, and nothing else happens. the <C k="live">green</C> phase only lights up when <code>Price.tax</code> is actually read.</>}>
+<ClassLifecycle />
+</Figure>
+
+two things that log proves. first, an array of `Price` loads `Price` without initializing it. second, the JVM verified `Base` and `Price` right before initializing them, not when they were loaded: HotSpot links lazily too.
+
+## the exact moments
+
+the JVM spec (§5.5) lists what counts as a first *active* use. a class or interface is initialized just before the first:
+
+<Defs>
+<dt>new</dt><dd>creating an instance (`new`).</dd>
+<dt>static fields</dt><dd>reading or writing a static field <em>declared in that class</em> (`getstatic`, `putstatic`). constants don't count, see below.</dd>
+<dt>static calls</dt><dd>calling a static method (`invokestatic`).</dd>
+<dt>handles</dt><dd>the first <em>invocation</em> of a method handle to one of the above. looking it up isn't enough.</dd>
+<dt>reflection</dt><dd>`Class.forName(name)` (the 1-arg form), `Method.invoke` on a static method, `Field.get` on a static field.</dd>
+<dt>subclasses</dt><dd>initializing a class initializes its superclass first (and superinterfaces that declare default methods).</dd>
+<dt>main</dt><dd>the class whose `main` the launcher runs.</dd>
+</Defs>
+
+everything else (class literals, arrays of the type, casts, `instanceof`, reflection over the shape) may load the class, but won't initialize it. try your instincts:
+
+<Figure caption={<>15 rounds. every output shown is what the real program printed on jdk 25. the tricky ones: <code>A.CONST</code>, <code>B.counter</code>, and the interfaces at the end.</>}>
+<InitQuiz />
+</Figure>
+
+## preparation, then initialization
+
+preparation and initialization are separate steps, and you can catch a class in between them. `<clinit>` runs the static initializers in source order, and anything that reads a static before its line has run sees the zero that preparation put there.
+
+<Predict options={["10", "11", "1", "0"]} answer={0}>
+```java
+class Counter {
+    static Counter INSTANCE = new Counter();
+    static int count = 10;
+
+    Counter() { count++; }
+}
+```
+what does `Counter.count` print?
+<Explain>
+10. preparation set `count` to 0. then `<clinit>` runs top to bottom: first `INSTANCE = new Counter()`, whose constructor does `count++` (0 → 1). then `count = 10` overwrites it. the 1 is lost. move the `count` line above `INSTANCE` and you get 11.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="10"
+class Counter {
+    static Counter INSTANCE = new Counter();
+    static int count = 10;
+
+    Counter() { count++; }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(Counter.count);
+    }
+}
+```
+
+## verification is a real gate
+
+javac never produces code that fails verification, so you rarely meet the verifier. but anything that writes bytecode can get it wrong: a bytecode library with a bug, an agent, a hand-built class. here's a method that promises to return a `String` and returns an `int` instead, built with the Class-File API:
+
+```java title="Main.java" run output="built Bad, defining it...\njava.lang.VerifyError: Bad type on operand stack"
+void main() throws Throwable {
+    // a method that promises to return a String, then returns the int 1
+    byte[] bytes = ClassFile.of().build(ClassDesc.of("Bad"), cls -> cls
+        .withMethodBody("name", MethodTypeDesc.of(ConstantDescs.CD_String),
+            ClassFile.ACC_PUBLIC | ClassFile.ACC_STATIC,
+            code -> code.iconst_1().areturn()));
+
+    IO.println("built Bad, defining it...");
+    try {
+        MethodHandles.lookup().defineClass(bytes);
+        IO.println("never printed");
+    } catch (VerifyError e) {
+        IO.println(e.getClass().getName() + ": " + e.getMessage().lines().findFirst().orElseThrow());
+    }
+}
+```
+
+the full message is worth reading once, because it's the verifier showing its work:
+
+```text title="stderr"
+java.lang.VerifyError: Bad type on operand stack
+Exception Details:
+  Location:
+    Bad.name()Ljava/lang/String; @1: areturn
+  Reason:
+    Type integer (current frame, stack[0]) is not assignable to reference type
+  Current Frame:
+    bci: @1
+    flags: { }
+    locals: { }
+    stack: { integer }
+  Bytecode:
+    0000000: 04b0
+```
+
+`04 b0` is the whole method: `iconst_1`, `areturn`. without the verifier, the JVM would hand the integer 1 to the caller as if it were a pointer to a `String`, and the first method call on it would crash the process, or worse, not crash.
+
+<Gotcha title="constants are copied, not referenced">
+a `static final` primitive or `String` initialized with a constant expression is a *constant variable*. javac doesn't emit a `getstatic` for it: it copies the value into every class that uses it. here's what happens when a library bumps a constant and you only recompile the library:
+
+```bash
+$ cat Lib.java
+public class Lib {
+    public static final int VERSION = 1;
+}
+$ javac Lib.java App.java && java App
+Lib.VERSION = 1
+$ # edit Lib.java: VERSION = 2, and recompile only Lib
+$ javac Lib.java && java App
+Lib.VERSION = 1
+```
+
+`javap -c App` shows why. javac didn't even keep the 1 separately, it folded the whole string at compile time:
+
+```text
+3: ldc  #15   // String Lib.VERSION = 1
+```
+
+so: never put a value you might change in a public constant, or make it not a constant (`static final int VERSION = Integer.parseInt("1")` or a static method). and it's why `A.CONST` didn't initialize `A` in the quiz above: the program never touched `A` at all.
+</Gotcha>
+
+## the initialization lock
+
+the JVM guarantees `<clinit>` runs once, even if ten threads hit the class at the same moment. it does that with a per-class initialization lock: the first thread runs `<clinit>`, everyone else waits. which means two classes whose static initializers need each other can deadlock:
+
+```java title="Deadlock.java" {6,13}
+public class Deadlock {
+    static class Left {
+        static final int VALUE;
+        static {
+            pause();
+            VALUE = Right.VALUE + 1;
+        }
+    }
+    static class Right {
+        static final int VALUE;
+        static {
+            pause();
+            VALUE = Left.VALUE + 1;
+        }
+    }
+    static void pause() {
+        try { Thread.sleep(100); } catch (InterruptedException e) {}
+    }
+    public static void main(String[] args) {
+        System.out.println("pid " + ProcessHandle.current().pid());
+        new Thread(() -> System.out.println(Left.VALUE), "t1").start();
+        new Thread(() -> System.out.println(Right.VALUE), "t2").start();
+    }
+}
+```
+
+it prints its pid and then nothing, ever. here's `jcmd <pid> Thread.print` from the real run:
+
+```text title="jcmd <pid> Thread.print" {3,4,9,10}
+"t1" #25 [43011] prio=5 os_prio=31 cpu=0.34ms elapsed=2.23s ... in Object.wait()
+   java.lang.Thread.State: RUNNABLE
+	at Deadlock$Left.<clinit>(Deadlock.java:6)
+	- waiting on the Class initialization monitor for Deadlock$Right
+	at Deadlock.lambda$main$0(Deadlock.java:21)
+
+"t2" #26 [42755] prio=5 os_prio=31 cpu=0.23ms elapsed=2.23s ... in Object.wait()
+   java.lang.Thread.State: RUNNABLE
+	at Deadlock$Right.<clinit>(Deadlock.java:13)
+	- waiting on the Class initialization monitor for Deadlock$Left
+	at Deadlock.lambda$main$1(Deadlock.java:22)
+```
+
+<Gotcha title="the deadlock nobody detects">
+look at the thread state: `RUNNABLE`. and the dump has no "Found one Java-level deadlock" section, because the class initialization lock isn't a java monitor. monitoring tools that look for `BLOCKED` threads see two busy threads. if a service hangs at startup with threads sitting in `<clinit>`, this is the first thing to check. the fix is to break the cycle: static initializers shouldn't reach into other classes' static state that reaches back.
+</Gotcha>
+
+<Interview q="why is the lazy holder idiom thread-safe without synchronized?">
+```java
+class Config {
+    private static class Holder { static final Config INSTANCE = new Config(); }
+    static Config get() { return Holder.INSTANCE; }
+}
+```
+because it leans on two JVM guarantees. `Holder` isn't initialized until `get()` first reads `Holder.INSTANCE` (a `getstatic`), so creation is lazy. and class initialization runs exactly once under the JVM's initialization lock, with a happens-before edge to every thread that later uses the class, so every caller sees a fully constructed `Config`. after the first call there's no lock at all: the JIT sees an initialized class and the read is a plain field load. (an `enum` singleton gets the same guarantees.)
+</Interview>
+
+<Keylines>
+- load, link (verify, prepare, resolve), initialize. only the last one runs your code.
+- initialization happens at the first new, static field use, static call, or subclass init. not earlier.
+- compile-time constants are copied into callers. changing one means recompiling everyone.
+- statics start at zero and get assigned in source order. read one too early and you see the zero.
+- `<clinit>` runs once, under a lock. two classes that need each other at init time can deadlock, silently.
+</Keylines>

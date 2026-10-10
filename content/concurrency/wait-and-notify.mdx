@@ -1,0 +1,171 @@
+import { MonitorRoom } from "@/components/figures/concurrency/MonitorRoom";
+import { BoundedBuffer } from "@/components/figures/concurrency/BoundedBuffer";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const stolen = [
+  { mem: { items: "[]" }, note: "an empty buffer, and take() written with if instead of while." },
+  { ops: [{ t: "take(): empty → wait()", k: "mute" }, null, null], note: "C1 finds it empty, calls wait(), and parks in the wait set. the monitor is free again." },
+  { ops: [{ t: "WAITING", wait: true }, null, "put(7) · notifyAll()"], mem: { items: "[7]" }, note: "P adds an item and notifies. C1 is woken up, but it doesn't run yet: it has to win the monitor back first." },
+  { ops: [{ t: "woken, needs the lock", wait: true, k: "hot" }, "take() → 7", null], mem: { items: "[]" }, note: "C2 shows up right now and gets the monitor before C1 does. nothing in java says the woken thread goes first. it takes the 7." },
+  { ops: [{ t: "gets lock, wait() returns", k: "hot" }, null, null], note: "C1 finally gets back in, and wait() returns. with if, the check is behind it. it won't look again." },
+  { ops: [{ t: "removeFirst() → throws", k: "dead" }, null, null], mem: { items: { v: "[]", k: "dead" } }, note: "NoSuchElementException. the condition C1 was woken for was true for a moment, and false again by the time it ran. with while, C1 would have checked again and gone back to sleep." },
+];
+
+<InShort>
+`wait()` lets a thread inside a `synchronized` block give up the monitor and sleep until some condition might be true. `notify()` / `notifyAll()` wake sleepers up. the rules: only call them while holding the monitor, **always wait in a while loop** that re-checks the condition, and prefer `notifyAll()`. then, honestly, use `java.util.concurrent` instead.
+</InShort>
+
+## the picture
+
+back to the one-chair room. sometimes the thread inside can't make progress: it wants to take from a buffer that's empty. it can't just sit in the chair waiting (nobody else could get in to fill the buffer), and it can't keep walking in and out checking (busy-waiting burns a CPU core). so it steps into a side room (the **wait set**), gives up the chair, and asks to be poked when something changes.
+
+poking is `notify()`. the poked thread doesn't jump back into the chair, though. it rejoins the queue at the door (the entry set) and has to win the monitor back like everyone else. by the time it does, the world may have changed again. that's the entire chapter, really.
+
+<Figure wide caption={<>enter with T1 and call <strong>wait()</strong>: T1 lands in the wait set and the monitor is free. enter with T2 and call <strong>notify()</strong>: T1 moves to the <em>entry set</em>, not straight back inside. it only returns from wait() when T2 exits and T1 wins the <C k="meta">monitor</C> back, with its old hold count restored.</>}>
+<MonitorRoom />
+</Figure>
+
+three things to notice in there:
+
+- `wait()` releases the monitor *completely*, even if the thread had entered it three times. that's the only way anyone else can get in to change the condition.
+- `notify()` doesn't release anything. the notifier keeps the monitor until it exits its block.
+- notify with nobody in the wait set does nothing at all. notifications aren't stored. a thread that starts waiting *after* the notify sleeps until the next one.
+
+## the guarded block
+
+the pattern is always the same: lock, check the condition in a loop, wait while it's false, act, notify. here's a bounded buffer (a fixed-size queue where producers block when it's full and consumers block when it's empty) done the old way:
+
+```java title="Main.java" run output="sum = 5050"
+import java.util.ArrayDeque;
+import java.util.Deque;
+
+class BoundedBuffer<T> {
+    private final Deque<T> items = new ArrayDeque<>();
+    private final int capacity;
+
+    BoundedBuffer(int capacity) { this.capacity = capacity; }
+
+    synchronized void put(T item) throws InterruptedException {
+        while (items.size() == capacity) {
+            wait();                     // full: park in the wait set, release the lock
+        }
+        items.addLast(item);
+        notifyAll();                    // wake everyone, they'll re-check
+    }
+
+    synchronized T take() throws InterruptedException {
+        while (items.isEmpty()) {
+            wait();                     // empty: park, release the lock
+        }
+        T item = items.removeFirst();
+        notifyAll();
+        return item;
+    }
+}
+
+void main() throws InterruptedException {
+    var buffer = new BoundedBuffer<Integer>(2);
+    Thread producer = Thread.ofPlatform().start(() -> {
+        try {
+            for (int i = 1; i <= 100; i++) buffer.put(i);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    });
+    long sum = 0;
+    for (int i = 0; i < 100; i++) sum += buffer.take();
+    producer.join();
+    IO.println("sum = " + sum);
+}
+```
+
+a buffer of two slots, 100 items through it, every one accounted for. now break it. two producers, two consumers, and you decide who runs:
+
+<Figure wide caption={<>with <code>while</code> + <code>notifyAll</code> you can't break it. now switch to <C k="dead">if</C>, then: C1 take, C2 take, P1 put, then wake both consumers. or keep <code>while</code>, switch to <C k="dead">notify</C>, set capacity 1, and try: C1 take, C2 take, P1 put, P2 put, P1 put, C1 re-check, C2 re-check, C1 take. everyone ends up waiting.</>}>
+<BoundedBuffer />
+</Figure>
+
+## why while, not if
+
+`if` checks the condition once, on the way in. after `wait()` returns, it just carries on, assuming the thing it waited for is still true. three reasons it might not be:
+
+1. **someone else got there first.** a woken thread competes for the monitor with every other thread, including brand new arrivals that never waited at all.
+2. **notifyAll wakes everyone.** five consumers woken for one item means four of them must go back to sleep.
+3. **spurious wakeups.** the spec explicitly allows `wait()` to return with no notify at all (some OS-level wait primitives behave that way). rare, real, and allowed.
+
+<Figure wide caption={<>the first reason, step by step. the <C k="hot">woken</C> thread isn't first in line for anything, and the item it was woken for is gone by the time it runs.</>}>
+<Lanes threads={["C1", "C2", "P"]} cells={["items"]} steps={stolen} />
+</Figure>
+
+with a `while`, every one of those is harmless: the thread re-checks, sees the condition is false, and waits again. with an `if`, every one of those is a bug that shows up once a month in prod.
+
+<Predict options={["it prints nothing and hangs", "IllegalMonitorStateException", "InterruptedException"]} answer={1}>
+```java
+void main() throws InterruptedException {
+    Object lock = new Object();
+    lock.wait();
+}
+```
+<Explain>
+you can only call `wait()`, `notify()` and `notifyAll()` on an object whose monitor you own. here main never entered `synchronized (lock)`, so it throws `java.lang.IllegalMonitorStateException: current thread is not owner`. the rule exists because the check-then-wait has to be atomic: if you could check the condition, get preempted, and *then* wait, a notify could slip into the gap and be lost forever.
+</Explain>
+</Predict>
+
+## notify vs notifyAll
+
+`notify()` wakes one waiter, chosen arbitrarily. that's only safe when every waiter is waiting for the same thing and any one of them can handle it. in the buffer, producers and consumers share one wait set but wait for opposite conditions. so `notify()` can wake the wrong kind of thread: a consumer's notify wakes another consumer, which finds the buffer empty and goes back to sleep, and the producer that should have woken never does. keep going and everyone ends up in the wait set, which is exactly the hang in the figure above. no exception, no CPU, just a stuck process.
+
+`notifyAll()` wakes all of them. most go straight back to sleep (wasteful, but correct). use `notify()` only as an optimization, when you can prove one waiter is enough and it's always the right kind.
+
+<Gotcha title="one wait set, two conditions">
+the real problem is that a monitor has exactly one wait set. "not full" and "not empty" are two different conditions sharing one waiting room, so every wakeup is a guess. a `ReentrantLock` can have several `Condition` objects (`notFull`, `notEmpty`), each with its own wait set, so a producer signals only consumers and vice versa. that's how `ArrayBlockingQueue` is built. more in [locks and AQS](/learn/concurrency/locks-and-aqs).
+</Gotcha>
+
+## use something else
+
+`wait`/`notify` are the assembly language of coordination. you now know how they work, which is useful for reading old code and for interviews. for new code, `java.util.concurrent` already has the thing you were about to build:
+
+<Compare>
+<Bad label="hand-rolled guarded blocks">
+```java
+synchronized void put(T item) throws InterruptedException {
+    while (items.size() == capacity) wait();
+    items.addLast(item);
+    notifyAll();
+}
+```
+</Bad>
+<Good label="a BlockingQueue">
+```java
+BlockingQueue<T> items = new ArrayBlockingQueue<>(2);
+
+items.put(item);        // blocks while full
+T next = items.take();  // blocks while empty
+```
+</Good>
+</Compare>
+
+| you want to | use instead of wait/notify |
+| --- | --- |
+| hand items between threads | `BlockingQueue` ([concurrent collections](/learn/concurrency/concurrent-collections)) |
+| wait until N things are done | `CountDownLatch` ([synchronizers](/learn/concurrency/synchronizers)) |
+| limit how many threads do something | `Semaphore` |
+| wait for a result | `Future`, `CompletableFuture` ([CompletableFuture](/learn/concurrency/completablefuture)) |
+| a condition with your own lock | `Lock` + `Condition` ([locks and AQS](/learn/concurrency/locks-and-aqs)) |
+
+<Effective item={81} title="prefer concurrency utilities to wait and notify">
+the higher-level utilities are easier to get right and usually faster. if you're maintaining code that does use `wait`, always call it inside a loop that tests the condition, and lean towards `notifyAll` unless you have a specific reason not to.
+</Effective>
+
+<Interview q="why should wait() always be called in a loop?">
+because returning from `wait()` doesn't mean the condition is true. another thread may have taken the item between the notify and this thread getting the monitor back, `notifyAll` may have woken several threads for one item, and the spec allows spurious wakeups with no notify at all. the loop re-checks the condition every time the thread wakes, and waits again if it doesn't hold.
+</Interview>
+
+<Keylines>
+- `wait()` releases the monitor and parks in the wait set. `notify()` moves a waiter to the entry set.
+- a woken thread still has to win the monitor back. by then the condition may be false again.
+- always `while (!condition) wait();`. never `if`.
+- one monitor, one wait set. `notify()` can wake the wrong kind of waiter, so prefer `notifyAll()`.
+- you must own the monitor to call any of them, or you get `IllegalMonitorStateException`.
+- for new code: `BlockingQueue`, latches, semaphores, futures. not this.
+</Keylines>

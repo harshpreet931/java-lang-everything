@@ -1,0 +1,117 @@
+import { GenHeap } from "@/components/figures/gc/GenHeap";
+
+<InShort>
+most objects die young. that's the **weak generational hypothesis**, and it's why the heap is split in two: new objects are born in the **young generation** (eden plus two survivor spaces), which is collected often and cheaply by copying. objects that survive a few collections get **promoted** to the **old generation**, which is collected rarely.
+
+a **card table** is what lets a young collection skip the old generation almost entirely.
+</InShort>
+
+## the picture
+
+you know how a desk works? new paper lands on it all day. every evening you clear it: most of it is junk and goes straight in the bin, a few things you're still using go in a tray. stuff that's been sitting in the tray for a week gets filed in the cabinet. and the cabinet only gets a proper clean-out once in a while, because it's big and most of what's in it still matters.
+
+the desk is **eden**. the tray is the **survivor space**. the cabinet is the **old generation**. clearing the desk is a **minor GC**: fast, because you only touch the few papers worth keeping (it's a [copying collection](/learn/gc/gc-fundamentals)). cleaning out the cabinet is a **major** or **full GC**: slow, because there's a lot in there.
+
+it only pays off if most paper really is junk. it is. from a real run in the [TLAB chapter](/learn/gc/allocation-and-tlabs): `153M->1M` in 0.4 ms. 99% of eden was dead by the time the GC got there.
+
+<Figure wide caption={<>allocate, or press keep going and watch. the number in each box is the object's age (minor GCs survived). a <C k="hot">•</C> means it's one GC away from promotion. try a low tenuring age, then a high one, and watch what ends up in the old gen. then press <code>old → young ref</code> and run a minor GC: the <C k="meta">dirty card</C> keeps an object alive that no root points at.</>}>
+<GenHeap />
+</Figure>
+
+see what's doing the work? a minor GC only ever copies the handful of objects that are still alive. the red ones (already garbage) just vanish when eden is reset. that's why young collections stay fast no matter how much you allocate.
+
+## eden, survivors and the old gen
+
+the rules, in order:
+
+1. `new` bump-allocates in eden (through the thread's TLAB).
+2. eden fills up. that triggers a **minor GC**, which stops the app (in Serial, Parallel and G1).
+3. everything live in eden and in the "from" survivor space gets copied into the "to" survivor space. each copy bumps the object's **age** by one.
+4. an object whose age reaches the **tenuring threshold** gets copied into the old gen instead. that's **promotion**.
+5. eden and the "from" space are now completely empty. the two survivor spaces swap roles.
+6. when the old gen fills up, it needs its own collection: a **major GC** (just the old gen, concurrently in G1, ZGC and Shenandoah) or a **full GC** (the whole heap, stop the world).
+
+why two survivor spaces? because copying needs an empty space to copy into. one survivor space is always empty, waiting to be the next "to".
+
+<Quiz question="where does an object's age live?" options={["in a side table the GC keeps", "4 bits in the object's header", "in the survivor space's metadata"]} answer={1}>
+<Explain>
+in the mark word, the first word of every object's [header](/learn/jvm/object-layout). it's 4 bits, which is exactly why `-XX:MaxTenuringThreshold` can't go above 15: there's no room to count higher.
+</Explain>
+</Quiz>
+
+## watching it age
+
+`-Xlog:gc+age=trace` prints the survivor space's age table after every young GC. here's a little program built to show it: every iteration makes one 1 KB object that stays alive for 2,000 iterations, and one 100 KB object that dies immediately.
+
+```java title="Ages.java" run output="2000000000"
+public class Ages {
+    public static void main(String[] args) {
+        byte[][] ring = new byte[2000][];             // each entry lives 2000 iterations
+        long sum = 0;
+        for (int i = 0; i < 20_000; i++) {
+            ring[i % ring.length] = new byte[1000];   // medium-lived
+            sum += new byte[100_000].length;          // dies immediately
+        }
+        System.out.println(sum);
+    }
+}
+```
+
+```bash
+java -XX:+UseSerialGC -Xmx512m -Xmn64m -Xlog:gc,gc+age=trace Ages.java
+```
+
+trimmed output, jdk 25:
+
+```text title="GC log" nolines
+GC(3) Desired survivor size 3342336 bytes, new threshold 15 (max threshold 15)
+GC(3) Age table:
+GC(3) - age   1:     537464 bytes,     537464 total
+GC(3) - age   2:     537464 bytes,    1074928 total
+GC(3) - age   3:     537464 bytes,    1612392 total
+GC(3) - age   4:     510936 bytes,    2123328 total
+GC(3) Pause Young (Allocation Failure) 53M->3M(377M) 0.196ms
+```
+
+read it. 53 MB of young gen went in, 3 MB came out, in a fifth of a millisecond. the survivors are layered by age, about half a megabyte per GC, and the 1 KB objects drop out at age 4 because by then the ring has overwritten them. none of them ever reach the old gen. that's the young gen working exactly as designed.
+
+<Gotcha title="premature promotion">
+the threshold isn't fixed. if the survivors would fill more than half the survivor space (`-XX:TargetSurvivorRatio=50`), the JVM lowers the threshold so objects get promoted sooner. here's the toy service from [reading GC logs](/learn/gc/reading-gc-logs), on the same young gen size:
+
+```text nolines
+GC(0) Desired survivor size 3342336 bytes, new threshold 1 (max threshold 15)
+GC(0) - age   1:    6684672 bytes,    6684672 total
+GC(0) Tenured: 1150K(327680K)->33537K(327680K)
+```
+
+survivors overflowed, the threshold collapsed to 1, and 32 MB of objects that would have died a moment later got promoted to the old gen in one go. now the old gen fills with garbage, and garbage in the old gen is the expensive kind: it needs a major or full GC to clear. the usual fixes are a bigger young gen or bigger survivor spaces, so medium-lived objects get to die young.
+</Gotcha>
+
+## the old-to-young problem
+
+a minor GC wants to look at the young gen only. but its roots aren't just thread stacks and statics: any **old** object might point at a young one, and that young object must survive. scanning the whole old gen to find those pointers would defeat the point of having generations.
+
+the fix is the **card table**. the old gen is divided into **cards** of 512 bytes, with one byte per card in a side table. every time the app stores a reference into an object, a **post-write barrier** marks that object's card dirty:
+
+```text title="card-marking write barrier, for obj.f = v" nolines
+obj.f = v                                // the store you wrote
+card_table[address_of(obj) >> 9] = DIRTY // 2^9 = 512-byte cards. one byte store.
+```
+
+at a minor GC, the collector scans only the dirty cards, treats the references it finds there as extra roots, then cleans them. the old gen might be gigabytes, the dirty cards a few kilobytes. G1 does the same with a **remembered set** per region (more in [G1](/learn/gc/g1)), and its barrier also skips stores that don't cross regions. java 26 made G1's barrier much cheaper: about 12 instructions instead of 50 on x64 (JEP 522).
+
+<Deep title="generational ZGC and Shenandoah">
+for years the low-latency collectors weren't generational: every ZGC or Shenandoah cycle marked the whole heap, young and old together, which wastes work on a heap where most objects die young. that changed. generational ZGC arrived in java 21 (JEP 439), became ZGC's default in 23 and its only mode in 24 (JEP 490). generational Shenandoah became a product feature in java 25 (JEP 521), and is targeted to become Shenandoah's default in 28 (JEP 535). both collect the young gen concurrently, so there's no stop-the-world minor GC at all. see [ZGC](/learn/gc/zgc) and [Shenandoah](/learn/gc/shenandoah).
+</Deep>
+
+<Interview q="what's the difference between a minor, a major and a full GC?">
+a minor (young) GC collects only the young generation: eden and the survivors. it's frequent and short, because it copies only the few survivors. a major GC collects the old generation; in G1, ZGC and Shenandoah most of that work happens concurrently with the app. a full GC collects the whole heap at once with every thread stopped, usually a mark-compact. in a healthy app you see lots of minor GCs, occasional old-gen work, and full GCs almost never. if `System.gc()` is called (and not disabled), it's a full GC in Serial, Parallel and G1.
+</Interview>
+
+<Keylines>
+- most objects die young, so the young gen is collected often, by copying, cheaply.
+- survivors bounce between two survivor spaces, aging by one per minor GC.
+- reach the tenuring threshold (max 15, 4 bits in the header) and you're promoted to old.
+- if survivors overflow, objects get promoted early and fill the old gen with garbage.
+- the card table lets a minor GC find old-to-young pointers without scanning the old gen.
+</Keylines>

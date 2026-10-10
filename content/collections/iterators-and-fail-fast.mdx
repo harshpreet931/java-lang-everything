@@ -1,0 +1,152 @@
+import { FailFastLab } from "@/components/figures/collections/FailFastLab";
+import { CowSnapshot } from "@/components/figures/collections/CowSnapshot";
+
+<InShort>
+every structural change to a collection bumps a counter called **`modCount`**. an iterator remembers that number when it's created and checks it on every `next()`. change the collection behind the iterator's back, even in a single thread, even inside a for-each, and the next `next()` throws **`ConcurrentModificationException`**.
+
+the fix: remove *through* the iterator (`it.remove()`), or let the collection do it (`removeIf`).
+</InShort>
+
+## the picture
+
+you know how you remove one element in a for-each and get an exception called *Concurrent*ModificationException, in a program with exactly one thread? kinda cursed. the name is about the iterator's point of view: something modified the list *concurrently with it*, meaning while it was in the middle of walking. that something was you.
+
+think of a tour guide walking a group through a museum with a printed map. if a room gets closed mid-tour, the map is wrong, and a good guide stops instead of walking people into a wall. the map has a version number (the iterator's `expectedModCount`). the museum has the current one (`modCount`). the guide checks them at every doorway.
+
+## what a for-each really is
+
+the compiler turns a for-each over a collection into an iterator loop:
+
+<Compare>
+<Bad label="what you write">
+```java
+for (String s : list) {
+    if (s.equals("b")) list.remove(s);
+}
+```
+</Bad>
+<Good label="what runs">
+```java
+Iterator<String> it = list.iterator();
+while (it.hasNext()) {
+    String s = it.next();
+    if (s.equals("b")) list.remove(s);
+}
+```
+</Good>
+</Compare>
+
+(the left side isn't wrong *because* it's a for-each. it's wrong because it calls `list.remove` while an iterator is walking `list`, and the for-each hides that iterator from you.)
+
+`ArrayList`'s iterator is three ints: `cursor` (the next index to return), `lastRet` (the index it returned last) and `expectedModCount`. `hasNext()` is just `cursor != size`. `next()` first checks `modCount == expectedModCount`, then returns `elementData[cursor++]`.
+
+<Figure wide caption={<>pick which element to remove and step through. with <code>list.remove(s)</code>, removing <code>"a"</code>, <code>"b"</code> or <code>"d"</code> ends in <C k="dead">ConcurrentModificationException</C>. removing <code>"c"</code> doesn't throw at all, and that's worse: watch which element never gets visited. then switch to <code>it.remove()</code>.</>}>
+<FailFastLab />
+</Figure>
+
+```java title="Main.java" run output="[a, b, c, d]\nException in thread \"main\" java.util.ConcurrentModificationException"
+void main() {
+    List<String> list = new ArrayList<>(List.of("a", "b", "c", "d"));
+    IO.println(list);
+    for (String s : list) {
+        if (s.equals("b")) list.remove(s);
+    }
+}
+```
+
+<Predict options={["ConcurrentModificationException", "[a, b, d]", "[a, b, c, d]"]} answer={1}>
+```java
+List<String> list = new ArrayList<>(List.of("a", "b", "c", "d"));
+for (String s : list) {
+    if (s.equals("c")) list.remove(s);
+}
+IO.println(list);
+```
+<Explain>
+no exception. after `next()` returns `"c"`, the cursor is 3. removing `"c"` makes the size 3. `hasNext()` checks `cursor != size`, which is now false, so the loop just ends, before `next()` ever gets a chance to compare the counts. `"d"` is never visited. removing the second-to-last element is the one case that slips through silently, which is why "it worked in my test" proves nothing.
+</Explain>
+</Predict>
+
+## the fixes
+
+<Compare>
+<Bad label="modifying the list mid-walk">
+```java
+for (String s : list) {
+    if (s.isBlank()) list.remove(s);
+}
+```
+</Bad>
+<Good label="let the collection do it">
+```java
+list.removeIf(String::isBlank);
+```
+</Good>
+</Compare>
+
+- **`removeIf(predicate)`** <Since v={8} />: the clean answer for "remove everything that matches". `ArrayList`'s version is also faster than removing one by one: it marks the doomed elements first, then compacts the array in a single pass, instead of shifting the tail for every removal.
+- **`iterator.remove()`**: removes the element `next()` just returned and resynchronises the iterator (`cursor = lastRet`, `expectedModCount = modCount`). use it when the decision needs more than a predicate.
+- **`ListIterator`**: `set` and `add` through the iterator, for lists.
+- **maps**: `map.entrySet().removeIf(...)`, `map.keySet().removeIf(...)`, and `replaceAll` / `computeIfPresent` for updating values.
+
+```java title="Main.java" run output="[a, c, d] [a, c, d]\n{b=20}"
+void main() {
+    List<String> a = new ArrayList<>(List.of("a", "b", "c", "d"));
+    for (Iterator<String> it = a.iterator(); it.hasNext(); ) {
+        if (it.next().equals("b")) it.remove();
+    }
+    List<String> b = new ArrayList<>(List.of("a", "b", "c", "d"));
+    b.removeIf(s -> s.equals("b"));
+    IO.println(a + " " + b);
+
+    Map<String, Integer> m = new HashMap<>(Map.of("a", 1, "b", 2, "c", 3));
+    m.entrySet().removeIf(e -> e.getValue() % 2 == 1);
+    m.replaceAll((k, v) -> v * 10);
+    IO.println(m);
+}
+```
+
+<Deep title="what counts as a structural modification?">
+only changes to the *shape*: anything that adds or removes elements (and `clear`, and a `HashMap` resize). replacing a value doesn't count. `list.set(i, x)` during a for-each over an `ArrayList` is fine, and so is `map.put(k, v)` for a key that's already there. the one surprise is `LinkedHashMap` in access order, where a plain `get` relinks the entry and counts as structural (see [LRU caches](/learn/collections/linkedhashmap-and-lru)).
+</Deep>
+
+<Gotcha title="fail-fast is best-effort">
+the javadoc is explicit: fail-fast iterators throw on a *best-effort basis*, and you must not write code whose correctness depends on the exception. we just saw a single-threaded case that slips through. with real threads it's worse: `modCount` isn't volatile, so another thread's change may not even be visible, and an unsynchronised `ArrayList` or `HashMap` shared between threads can silently lose elements or corrupt itself. CME is a debugging aid, not a lock.
+</Gotcha>
+
+## fail-safe iterators
+
+the concurrent collections in `java.util.concurrent` don't throw CME. they promise something different instead.
+
+`CopyOnWriteArrayList` copies its whole array on every write. an iterator grabs the array that existed when it was created (a snapshot) and walks that, while writers swap in new arrays:
+
+<Figure caption={<>mid-loop: <code>add("d")</code> built a new 4-element array and pointed the list at it. the iterator still <C k="ref">points at</C> the old 3-element snapshot, which never changes, so iterating can't fail and won't see <code>"d"</code>.</>}>
+<CowSnapshot />
+</Figure>
+
+```java title="Main.java" run output="a b c [a, b, c, d]"
+import java.util.concurrent.CopyOnWriteArrayList;
+
+void main() {
+    List<String> list = new CopyOnWriteArrayList<>(List.of("a", "b", "c"));
+    for (String s : list) {
+        if (s.equals("a")) list.add("d");
+        IO.print(s + " ");
+    }
+    IO.println(list);
+}
+```
+
+great for lists that are read constantly and changed rarely (listener lists, config), terrible for lists that change a lot (every write is O(n)). `ConcurrentHashMap` takes a third approach: its iterators are **weakly consistent**. they never throw, they visit each element at most once, and they may or may not reflect changes made after they started. more in [concurrent collections](/learn/concurrency/concurrent-collections).
+
+<Interview q="why can you get a ConcurrentModificationException with only one thread?">
+because "concurrent" means "while the iterator is in use", not "from another thread". a for-each over a list uses an iterator, and calling `list.remove` inside the loop changes the list's `modCount` without telling the iterator. on the next `next()` call the iterator sees its `expectedModCount` no longer matches and throws. the fixes are `iterator.remove()`, which keeps the two counts in sync, or `removeIf`. and the check is best-effort: removing the second-to-last element ends the loop early without any exception.
+</Interview>
+
+<Keylines>
+- every add/remove bumps `modCount`. iterators check it on every `next()`.
+- `list.remove` inside a for-each: CME (or, worse, a silently skipped element).
+- remove with `it.remove()` or `removeIf`. update values with `set` / `replaceAll`.
+- fail-fast is a debugging aid, not thread-safety.
+- concurrent collections iterate snapshots or weakly consistent views, and never throw CME.
+</Keylines>

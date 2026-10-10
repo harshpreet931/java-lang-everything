@@ -1,0 +1,118 @@
+import { LogViewer } from "@/components/figures/gc/LogViewer";
+import { PauseChart } from "@/components/figures/gc/PauseChart";
+import { Symptoms } from "@/components/figures/gc/Symptoms";
+
+<InShort>
+turn on `-Xlog:gc*` and the JVM writes down every collection: **what kind** it was, **why** it ran, the heap **before → after (committed)**, and **how long the app was stopped**. the one-line summaries are enough most of the time.
+
+read "after" over time for leaks, the pause times for latency, and anything that says **Full** or **Stall** as a bug. and remember that a number at the end of a line isn't always a pause.
+</InShort>
+
+## the picture
+
+you know how "is the GC the problem?" usually gets answered with a guess? the JVM already wrote the answer down, you just have to switch it on and learn to read the receipts.
+
+a GC log is a till receipt for every trip the cleaners make. each one says when they came (uptime), why they were called (the cause), how full the place was when they arrived and when they left (before → after), and how long the shop was closed while they worked (the pause). one receipt tells you almost nothing. a few hundred in a row tell you whether the shop is healthy, or slowly filling up with stuff nobody will ever buy.
+
+## turning it on
+
+GC logging goes through the JVM's unified logging (`-Xlog`, java 9, JEPs 158 and 271). the shape is `-Xlog:what:where:decorations:options`, and every part after the first is optional:
+
+```bash
+# the summary lines only, to stdout
+java -Xlog:gc -jar app.jar
+
+# everything GC-related, to rotating files. a sane production setting.
+java '-Xlog:gc*:file=gc-%p.log:time,uptime,level,tags:filecount=5,filesize=20m' -jar app.jar
+
+# already running? switch it on without a restart
+jcmd <pid> VM.log output=gc.log what='gc*' decorators=time,uptime,level,tags
+```
+
+| part | means |
+| --- | --- |
+| `gc` | lines tagged exactly `gc`: one line per collection |
+| `gc*` | every tag set that includes `gc`: heap, phases, metaspace, cpu, the lot |
+| `gc+heap=debug` | lines tagged with both, at debug level |
+| `file=gc-%p.log` | `%p` is the pid, `%t` the start time. default output is stdout |
+| `time,uptime,level,tags` | the bracketed prefix on every line |
+| `filecount=5,filesize=20m` | rotate, so a long-running service doesn't fill the disk |
+
+quote the whole thing in a shell, because `*` is a glob. the old java 8 flags still work but print a warning: `-XX:+PrintGCDetails` becomes `-Xlog:gc*`, `-Xloggc:x.log` becomes `-Xlog:gc:x.log`, and `-verbose:gc` is just `-Xlog:gc`. the java 8 *format* is gone, though, so any old script that parses GC logs needs rewriting.
+
+## anatomy of one collection
+
+here's the first GC of the toy service from [serial and parallel](/learn/gc/serial-and-parallel) (256 MB heap, G1, jdk 25), every line of it. the last line with no extra tag, `[gc]`, is the summary. everything above it is detail.
+
+<Figure wide caption={<>hover or tap any underlined field to see what it means. switch logs to compare: the G1 cycle shows a pause and a concurrent phase interleaved, ZGC shows why the number at the end of a line can lie. <C k="hot">app stopped</C> marks real pauses. these are real lines from one run, with a few trimmed (···).</>}>
+<LogViewer />
+</Figure>
+
+on almost every line, four fields do most of the work:
+
+<Defs>
+<dt>the kind</dt><dd>`Pause Young`, `Pause Young (Mixed)`, `Pause Remark`, `Pause Full`. young pauses are the normal heartbeat. a full GC on G1 means something went wrong.</dd>
+<dt>the cause</dt><dd>in parentheses: `(G1 Evacuation Pause)`, `(Allocation Failure)`, `(System.gc())`, `(G1 Humongous Allocation)`, `(Metadata GC Threshold)`. it says why, which often says what to fix.</dd>
+<dt>before → after (committed)</dt><dd>`53M->40M(256M)`: heap in use when the GC started and when it finished, and how much heap the JVM has committed right now.</dd>
+<dt>the time</dt><dd>`5.102ms`: on a line that starts with `Pause`, how long every app thread was stopped.</dd>
+</Defs>
+
+<Predict options={["207 MB", "157 MB", "50 MB", "245 MB"]} answer={2}>
+from the Parallel run of the same service:
+
+```text nolines
+GC(3) Pause Full (Allocation Failure) 207M->50M(245M) 3.827ms
+```
+
+roughly how much of the heap is live data right after this?
+<Explain>
+50 MB. a full GC marks the whole heap and keeps only what's reachable, so "after" is (nearly) the live set: here the 20,000 cached 2 KB arrays and the map holding them. 157 MB is what it freed, 245 MB is the committed heap. this "after a full GC" number, tracked over time, is the single best leak detector in the log. after a young GC the "after" still contains old-gen garbage nobody has looked at, so it's only a rough upper bound.
+</Explain>
+</Predict>
+
+## the whole run in one picture
+
+one line is a data point. the shape only shows up when you plot hundreds of them. this chart is built straight from the five logs (one per collector, same program, same 256 MB heap), the same runs the viewer above quotes:
+
+<Figure wide caption={<>switch collectors and hover the bottom lane. top: heap in use before and after every collection (the sawtooth). bottom: every <C k="hot">stop-the-world pause</C>, log scale, <C k="dead">full GCs</C> in red. watch Serial's 26 ms full GCs, one every ~90 ms, and ZGC's pauses sitting near a microsecond.</>}>
+<PauseChart />
+</Figure>
+
+add up the pauses and divide by the run time and you get the fraction of time the app wasn't running at all. on this (very allocation-heavy) program, that's about 31% for G1 (359 ms of pauses in 1.16 s), 37% for Parallel, 69% for Serial, 2.4% for Shenandoah and 0.1% for ZGC. real services allocate far less per second, so expect single digits, but the comparison holds: "how much of my time is GC" is a number the log gives you for free.
+
+<Gotcha title="not every number is a pause">
+```text nolines
+GC(5) Concurrent Mark Cycle 6.022ms
+GC(3) Major Collection (Allocation Rate) 134M(52%)->136M(53%) 0.013s
+```
+
+the first is how long G1's background marking took, with the app running. the second is the length of a whole ZGC cycle, and the pauses inside it added up to 0.019 ms. people grep the last number on every line, add them up, and conclude that ZGC pauses for 13 ms. only lines that say `Pause` are stop-the-world (for ZGC: `Pause Mark Start`, `Pause Mark End` and `Pause Relocate Start`).
+</Gotcha>
+
+## what to look for
+
+most of the time a healthy log is boring: young pauses at a steady rhythm, a marking cycle now and then, "after" values that wander but don't climb. these are the things that aren't boring, every one reproduced on jdk 25:
+
+<Figure wide caption={<>pick a symptom. <C k="dead">red</C> ones mean something is broken, <C k="hot">amber</C> ones are worth a look. lines trimmed to the uptime decorator.</>}>
+<Symptoms />
+</Figure>
+
+the allocation stall one deserves a second read. a dashboard that only plots GC pauses would have shown that ZGC run as perfect (nothing over 12 microseconds) while the main thread spent 4.5 seconds waiting for memory. concurrent collectors move the cost out of the pause, they don't make it disappear. if you run ZGC or Shenandoah, alert on `Allocation Stall` and `Degenerated GC`, not just pause times.
+
+<Deep title="logs, JFR, and tools that read them for you">
+GC logs are text, cheap, and on by default in plenty of production setups, which is why they're worth reading by eye. for anything longer than a few minutes, feed them to a tool: GCViewer (open source) or GCeasy (a hosted service) turn a log into the charts above plus a list of anomalies. [flight recorder](/learn/performance/jfr-and-jmc) records the same information as structured events (`jdk.GarbageCollection`, `jdk.GCPhasePause`, `jdk.GCHeapSummary`, `jdk.G1GarbageCollection`) alongside allocation profiles, so you can see not just *that* the heap filled up but *which code* filled it.
+
+one production detail: log lines are written by the thread that logs them, and GC lines are logged during the pause. a stalled disk can make a pause longer. `-Xlog:async` (java 17) hands lines to a background thread instead.
+</Deep>
+
+<Interview q="how would you tell from a GC log whether an application has a memory leak?">
+look at the heap occupancy *after* collections that see the whole heap: full GCs, or G1's remark and mixed collections. if that floor keeps rising over hours or days of steady load, live data is growing, which is a leak (or an unbounded cache, same thing). the endgame looks the same in every collector: GCs get more frequent, each one frees less, full GCs start appearing back to back, and finally `OutOfMemoryError: Java heap space`. young GC "after" values alone aren't enough, since they include old-gen garbage. once the log says leak, take a heap dump to find what's holding the memory.
+</Interview>
+
+<Keylines>
+- `-Xlog:gc*` to a rotating file in production. `jcmd VM.log` turns it on in a running JVM.
+- every summary line: kind, cause, before → after (committed), pause time.
+- "after" of a full GC or remark ≈ the live set. if it climbs, you have a leak.
+- only lines that say `Pause` are pauses. concurrent cycle times and ZGC's trailing number aren't.
+- red flags: `Pause Full` on G1, back-to-back full GCs, allocation stalls, a cause you didn't expect.
+</Keylines>

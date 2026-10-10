@@ -1,0 +1,255 @@
+import { Avalanche } from "@/components/figures/io/Avalanche";
+import { TlsHandshake } from "@/components/figures/io/TlsHandshake";
+
+<InShort>
+five building blocks, all in the JDK: a **hash** fingerprints data, a **MAC** is a hash only key-holders can make, a **cipher** hides data (AES with one shared key, or public/private key pairs), and a **signature** proves who wrote something. TLS glues them together into a secure connection.
+
+the rules: use the standard algorithms through `java.security` and `javax.crypto`, use **SecureRandom**, hash passwords **slowly**, and never invent your own.
+</InShort>
+
+## the picture
+
+you know how a wax seal on a letter tells you nobody opened it, but doesn't hide what's inside, while a locked box hides the letter but doesn't tell you who sent it? crypto is a toolbox of exactly those separate guarantees, and most mistakes come from using one where you needed another.
+
+| you need | primitive | in java | keys |
+| --- | --- | --- | --- |
+| detect any change to data | hash | `MessageDigest` (SHA-256, SHA3-256) | none |
+| detect changes *and* know it came from a key holder | MAC | `Mac` (HmacSHA256) | one shared secret |
+| hide data | symmetric cipher | `Cipher` (AES/GCM) | one shared secret |
+| agree on a secret over an open wire | key exchange / KEM | `KeyAgreement` (X25519), `KEM` (ML-KEM) | a key pair each |
+| prove who wrote it, to anyone | signature | `Signature` (Ed25519, ML-DSA) | private signs, public verifies |
+| turn a password into a stored hash | slow KDF | `SecretKeyFactory` (PBKDF2) | a salt |
+
+## hashes: fingerprints
+
+a hash turns any input into a fixed-size digest (32 bytes for SHA-256). the same input always gives the same digest; you can't go backwards; and you can't find two inputs with the same digest. the property you can *see* is the avalanche: change one character and roughly half the output bits flip.
+
+<Figure caption={<>edit either input. both digests are real SHA-256, identical to what <code>MessageDigest</code> gives in java (the default pair was checked on jdk 25). each square is one of the 256 output bits; <C k="hot">amber</C> ones differ between the two.</>}>
+<Avalanche />
+</Figure>
+
+```java title="Main.java" run output="75b79cfda6fb32768bca896cfc3fcff96e6dd92c04cbbe894a28774d7902bfab\n7654b974bec8906ba6edcfa6aab07bdf8ac47e1b5a4101f06b25dab834bafb41\n126 of 256 bits differ"
+import java.security.MessageDigest;
+import java.util.HexFormat;
+
+void main() throws Exception {
+    var sha = MessageDigest.getInstance("SHA-256");
+    byte[] a = sha.digest("transfer 100 to bob".getBytes());
+    byte[] b = sha.digest("transfer 900 to bob".getBytes());
+    IO.println(HexFormat.of().formatHex(a));
+    IO.println(HexFormat.of().formatHex(b));
+    int diff = 0;
+    for (int i = 0; i < a.length; i++) diff += Integer.bitCount((a[i] ^ b[i]) & 0xff);
+    IO.println(diff + " of 256 bits differ");
+}
+```
+
+a hash alone proves nothing about *who*: an attacker who changes the message just recomputes the hash. add a secret key and you get a **MAC**, which only key holders can produce. that's how signed cookies, webhook signatures and API request signing work:
+
+```java title="Main.java" run output="tag still valid after edit: false"
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.security.MessageDigest;
+
+void main() throws Exception {
+    byte[] key = "a key only the server knows".getBytes();
+    Mac mac = Mac.getInstance("HmacSHA256");
+    mac.init(new SecretKeySpec(key, "HmacSHA256"));
+    byte[] tag = mac.doFinal("user=ada;role=reader".getBytes());
+
+    byte[] forged = mac.doFinal("user=ada;role=admin".getBytes());
+    IO.println("tag still valid after edit: " + MessageDigest.isEqual(tag, forged));
+}
+```
+
+<Gotcha title="compare tags with MessageDigest.isEqual, not Arrays.equals">
+`Arrays.equals` returns at the first byte that differs, so it's faster for wrong guesses that share a longer prefix. measured over many requests, that timing difference lets an attacker find a valid MAC one byte at a time. `MessageDigest.isEqual` takes the same time however many bytes match. same rule for comparing tokens and password hashes.
+</Gotcha>
+
+## passwords: slow on purpose
+
+SHA-256 is built to be fast, which is exactly wrong for passwords: a leaked table of fast hashes can be brute-forced with GPUs at billions of guesses per second. password hashing uses a deliberately slow function, a random **salt** per user (so identical passwords don't hash alike), and a cost you can raise over time.
+
+<Figure caption="one SHA-256 of a short string versus one PBKDF2-HMAC-SHA256 with 600,000 iterations (OWASP's current recommendation), measured on jdk 25 on an M4 Pro. log scale: the slow one is about a million times slower, which is the whole point.">
+<Bars
+  unit="ns"
+  log
+  data={[
+    { label: "SHA-256, once", value: 49, tone: "dead" },
+    { label: "PBKDF2, 600k iterations", value: 56000000, tone: "live" },
+  ]}
+/>
+</Figure>
+
+```java title="PasswordHash.java"
+byte[] salt = new byte[16];
+new SecureRandom().nextBytes(salt);                           // a new salt per user, stored next to the hash
+
+var spec = new PBEKeySpec(password, salt, 600_000, 256);      // password is a char[], so it can be wiped
+byte[] hash = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+    .generateSecret(spec).getEncoded();
+spec.clearPassword();
+```
+
+PBKDF2 is the one in the JDK. bcrypt, scrypt and Argon2 (the current favourite, also memory-hard) come from libraries such as Spring Security or Bouncy Castle.
+
+## encryption: symmetric and asymmetric
+
+**symmetric** encryption uses one key to lock and unlock: fast, and the workhorse for bulk data. the mode that matters is **AES-GCM**: authenticated encryption, meaning it hides the data *and* detects tampering in one step.
+
+```java title="Main.java" run output="key 256 bits, 9 bytes in, 25 bytes out\nmeet at 6\ntampered: Tag mismatch"
+import javax.crypto.*;
+import javax.crypto.spec.GCMParameterSpec;
+import java.security.SecureRandom;
+
+void main() throws Exception {
+    SecretKey key = KeyGenerator.getInstance("AES").generateKey();      // 256-bit
+    byte[] iv = new byte[12];
+    new SecureRandom().nextBytes(iv);                                    // never reuse with the same key
+
+    Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+    c.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, iv));
+    byte[] sealed = c.doFinal("meet at 6".getBytes());
+    IO.println("key " + key.getEncoded().length * 8 + " bits, 9 bytes in, " + sealed.length + " bytes out");
+
+    c.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+    IO.println(new String(c.doFinal(sealed)));
+
+    sealed[0] ^= 1;                                                      // flip one bit in transit
+    c.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+    try {
+        c.doFinal(sealed);
+    } catch (AEADBadTagException e) {
+        IO.println("tampered: " + e.getMessage());
+    }
+}
+```
+
+9 bytes in, 25 out: the ciphertext is the same length as the plaintext, plus a 16-byte authentication tag. one flipped bit and decryption refuses to return anything at all.
+
+<Gotcha title={'Cipher.getInstance("AES") means ECB'}>
+ask for just `"AES"` and you get `AES/ECB/PKCS5Padding`: every 16-byte block encrypted independently, so identical blocks give identical ciphertext and patterns leak right through (the famous "ECB penguin"). and with GCM, reusing an IV with the same key is catastrophic: it leaks the XOR of the two plaintexts and lets an attacker forge tags. always spell out `AES/GCM/NoPadding` and use a fresh random 12-byte IV per message.
+</Gotcha>
+
+**asymmetric** crypto uses a key pair: a public key you can give anyone, a private key you never share. it's slow, so it's used for two small jobs. **key agreement**: two parties derive the same symmetric key over an open wire. **signatures**: the private key signs, anyone with the public key verifies.
+
+```java title="Main.java" run output="Ed25519: signature 64 bytes, public key 44 bytes, valid true, after edit false\nML-DSA-65: signature 3309 bytes, public key 1974 bytes, valid true, after edit false"
+import java.security.*;
+
+void main() throws Exception {
+    for (String alg : new String[] { "Ed25519", "ML-DSA-65" }) {
+        KeyPair pair = KeyPairGenerator.getInstance(alg).generateKeyPair();
+        byte[] msg = "release 25.0.4 is mine".getBytes();
+
+        Signature s = Signature.getInstance(alg);
+        s.initSign(pair.getPrivate());
+        s.update(msg);
+        byte[] sig = s.sign();
+
+        s.initVerify(pair.getPublic());
+        s.update(msg);
+        boolean ok = s.verify(sig);
+
+        msg[0] ^= 1;
+        s.initVerify(pair.getPublic());
+        s.update(msg);
+        boolean tampered = s.verify(sig);
+
+        IO.println(alg + ": signature " + sig.length + " bytes, public key " + pair.getPublic().getEncoded().length
+            + " bytes, valid " + ok + ", after edit " + tampered);
+    }
+}
+```
+
+that second line is new: ML-DSA, a signature scheme built to survive quantum computers, in the JDK since java 24. the sizes are the price, more on that below.
+
+## post-quantum, already in your JDK
+
+a large enough quantum computer would break RSA and elliptic curves (Shor's algorithm), the asymmetric half of everything above. nobody has one yet, but traffic recorded today could be decrypted later ("harvest now, decrypt later"), so the replacements are rolling out now. java got them early:
+
+| | what | JEP | java |
+| --- | --- | --- | --- |
+| KEM API | a standard API for key encapsulation | [452](https://openjdk.org/jeps/452) | 21 |
+| ML-KEM | quantum-resistant key encapsulation (FIPS 203) | [496](https://openjdk.org/jeps/496) | 24 |
+| ML-DSA | quantum-resistant signatures (FIPS 204) | [497](https://openjdk.org/jeps/497) | 24 |
+| KDF API | key derivation, HKDF built in | [510](https://openjdk.org/jeps/510) | 25 |
+| hybrid TLS 1.3 key exchange | X25519MLKEM768 on by default | [527](https://openjdk.org/jeps/527) | 27 |
+
+a KEM is key exchange shaped differently: one side **encapsulates** a fresh random secret to the other's public key, the other **decapsulates** it with the private key. same secret on both ends, nothing secret on the wire:
+
+```java title="Main.java" run output="encapsulation: 1088 bytes on the wire\nshared secret: 32 bytes\nsame secret on both sides: true"
+import javax.crypto.KEM;
+import java.security.*;
+import java.util.Arrays;
+
+void main() throws Exception {
+    // bob makes a key pair and publishes the public half
+    KeyPair bob = KeyPairGenerator.getInstance("ML-KEM-768").generateKeyPair();
+
+    // alice: encapsulate a fresh secret to bob's public key
+    KEM.Encapsulated enc = KEM.getInstance("ML-KEM").newEncapsulator(bob.getPublic()).encapsulate();
+    byte[] sent = enc.encapsulation();                      // what goes over the wire
+
+    // bob: open it with his private key
+    var bobSecret = KEM.getInstance("ML-KEM").newDecapsulator(bob.getPrivate()).decapsulate(sent);
+
+    IO.println("encapsulation: " + sent.length + " bytes on the wire");
+    IO.println("shared secret: " + enc.key().getEncoded().length + " bytes");
+    IO.println("same secret on both sides: " + Arrays.equals(enc.key().getEncoded(), bobSecret.getEncoded()));
+}
+```
+
+the catch is size: 1,088 bytes on the wire instead of x25519's 32, and an ML-DSA signature is 3,309 bytes against Ed25519's 64. that's why TLS uses **hybrids** (classic and post-quantum together, secure if *either* holds) and why the switch is gradual.
+
+the secret a KEM or key agreement produces is raw material, not a key. the KDF API <Since v={25} /> turns it into keys. this is RFC 5869's first official test vector, and java gets it exactly:
+
+```java title="Main.java" run output="3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+import javax.crypto.KDF;
+import javax.crypto.spec.HKDFParameterSpec;
+import java.util.HexFormat;
+
+void main() throws Exception {
+    var hex = HexFormat.of();
+    // RFC 5869, test case 1
+    byte[] ikm = hex.parseHex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");
+    byte[] salt = hex.parseHex("000102030405060708090a0b0c");
+    byte[] info = hex.parseHex("f0f1f2f3f4f5f6f7f8f9");
+
+    KDF hkdf = KDF.getInstance("HKDF-SHA256");
+    byte[] okm = hkdf.deriveData(HKDFParameterSpec.ofExtract()
+        .addIKM(ikm).addSalt(salt)
+        .thenExpand(info, 42));
+    IO.println(hex.formatHex(okm));
+}
+```
+
+## TLS: all of it at once
+
+every `https://` call your [HttpClient](/learn/io/http-client) makes runs a TLS handshake first, and it uses every primitive on this page. here's TLS 1.3 the way java 27 does it by default, with the hybrid post-quantum key share:
+
+<Figure wide caption={<>step through the handshake. the chips on top show which primitives each step uses. <C k="ref">blue</C> messages travel in the clear, <C k="live">green</C> ones are already encrypted. from ServerHello on, even the certificate is hidden from eavesdroppers.</>}>
+<TlsHandshake />
+</Figure>
+
+in java this all lives in the `SunJSSE` provider behind `SSLSocket`, `SSLEngine` and `HttpClient`. you rarely touch it directly; the knobs you do touch are the trust store (`-Djavax.net.ssl.trustStore`), the enabled protocols and named groups (`jdk.tls.namedGroups`), and `-Djavax.net.debug=ssl:handshake` when it fails and you need to see why.
+
+<Gotcha title="the 'trust all certificates' snippet">
+a `TrustManager` that accepts every certificate, or a `HostnameVerifier` that returns `true`, "fixes" an `SSLHandshakeException` in development and then ships to production, where anyone on the network path can impersonate the server. encryption without authentication is encryption *to the attacker*. fix the trust store instead: add the internal CA to a truststore with `keytool`.
+</Gotcha>
+
+<Deep title="SecureRandom, and why Random is a liability">
+`java.util.Random` is a 48-bit linear congruential generator: fast, fine for simulations, and completely predictable. two `new Random(42)` produce the same sequence, and from a couple of outputs an attacker can recover the internal state and predict every value after. anything an attacker must not guess (keys, IVs, salts, session ids, reset tokens) comes from `SecureRandom`, which on linux and macOS reads the OS's entropy source (`NativePRNG` by default on jdk 25). `SecureRandom.getInstanceStrong()` picks the strongest configured source (`NativePRNGBlocking` here), which may block waiting for entropy, so it's for long-lived keys, not per-request tokens.
+</Deep>
+
+<Interview q="how should you store user passwords?">
+never encrypted (encryption is reversible) and never with a fast hash like SHA-256 (fast means fast to brute-force). use a slow, salted password hash: Argon2id or bcrypt from a library, or PBKDF2-HMAC-SHA256 from the JDK with a high iteration count (OWASP suggests 600,000). store the algorithm, cost and salt with the hash so you can raise the cost later and rehash on next login. bonus point: compare with a constant-time check (`MessageDigest.isEqual`), and keep the password in a `char[]` you can wipe rather than a `String`.
+</Interview>
+
+<Keylines>
+- hash = fingerprint, MAC = fingerprint with a key, cipher = hide, signature = prove who.
+- AES/GCM with a fresh IV per message. never ECB, never a reused IV.
+- passwords get slow, salted hashes (PBKDF2, bcrypt, Argon2), never SHA-256 alone.
+- keys, IVs, salts and tokens come from `SecureRandom`, never `Random`.
+- post-quantum is here: ML-KEM and ML-DSA (24), KDF API (25), hybrid TLS by default (27).
+- TLS uses all of it. never disable certificate checks to make an error go away.
+</Keylines>

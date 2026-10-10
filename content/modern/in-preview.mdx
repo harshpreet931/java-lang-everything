@@ -1,0 +1,203 @@
+import { PreviewBoard } from "@/components/figures/modern/PreviewBoard";
+
+<InShort>
+jdk 27 (september 2026) ships four **preview** features and one **incubator**: primitive types in patterns (JEP 532), lazy constants (JEP 531), structured concurrency (JEP 533), PEM encodings (JEP 538), and the vector API (JEP 537). previews need `--enable-preview` on both `javac` and `java`; the incubator needs `--add-modules jdk.incubator.vector`.
+
+none of them is permanent yet, all of them can change, and preview class files only run on the exact release that compiled them. every example below says what it needs.
+</InShort>
+
+## the picture
+
+you know how a feature shows up in a release note, and then shows up again six months later, slightly different? that's preview working as intended. the feature is finished enough to use, and the JDK team wants to hear from people who use it before it's frozen forever.
+
+think of a play in previews: the full show, real costumes, a paying audience, and the director still rewriting a scene between performances. opening night (final) is when the script stops changing. some shows preview for two weeks, some for months. the [preview process itself](/learn/modern/preview-features) is its own chapter; this one is the program for the shows currently running.
+
+<Figure wide caption={<>every feature in preview or incubation in jdk 27, across releases. click a row for what changed in 27, what&apos;s next, and how to try it. 27 is the <C k="hot">highlighted</C> column; 28 is in development. every JEP checked on openjdk.org.</>}>
+<PreviewBoard />
+</Figure>
+
+trying any of them takes two flags, one for each tool:
+
+```bash
+$ javac --release 27 --enable-preview Main.java   # javac then notes "uses preview features"
+$ java --enable-preview Main
+
+$ java --enable-preview --source 27 Main.java     # or the source launcher, both at once
+```
+
+this site runs its code on jdk 25, the current LTS. three of the five features compile there too (as earlier previews), so their examples below were run on jdk 25 with `--enable-preview` and show real output. the other two are jdk 27 code, shown as is.
+
+## primitive types in patterns
+
+<Since preview v={27} /> patterns, `instanceof` and `switch` have only ever worked with reference types. this feature lets every primitive type join in, and the interesting part is what "matches" means: a primitive pattern matches when the value converts **exactly**, without losing anything.
+
+```java title="Main.java" output="false true\nfits in a byte: 42\ntrue false\nwarning, negative: -4, unknown status: 7\n5.0\nyes"
+record Point(int x, int y) {}
+
+static String status(int code) {
+    return switch (code) {
+        case 0 -> "okay";
+        case 1 -> "warning";
+        case int i when i < 0 -> "negative: " + i;
+        case int i -> "unknown status: " + i;
+    };
+}
+
+void main() {
+    int big = 1000, small = 42;
+    IO.println((big instanceof byte) + " " + (small instanceof byte));
+    if (small instanceof byte b) IO.println("fits in a byte: " + b);
+
+    float f = 1000.0f;
+    IO.println((f instanceof int) + " " + (1000.5f instanceof int));
+
+    IO.println(status(1) + ", " + status(-4) + ", " + status(7));
+
+    Object o = new Point(3, 4);
+    if (o instanceof Point(double x, double y)) IO.println(Math.hypot(x, y));
+
+    boolean done = true;
+    IO.println(switch (done) { case true -> "yes"; case false -> "no"; });
+}
+```
+
+`1000 instanceof byte` is false because 1000 doesn't fit in a byte, and `42 instanceof byte b` is true and hands you the byte. `1000.0f instanceof int` is true, `1000.5f` isn't: the fraction would be lost. `case int i` catches every remaining int, so the switch needs no `default`, and `switch` finally works on `boolean`, `long`, `float` and `double`. record patterns get the same treatment: `Point(double x, double y)` matches a `Point` of `int`s, widening each one. (run on jdk 25 with `--enable-preview`, where this was the third preview, JEP 507. jdk 26 tightened the exactness and dominance rules, jdk 27 previews it unchanged.)
+
+<Predict options={["it prints yes", "compile error", "ClassCastException"]} answer={1}>
+```java
+// jdk 25 or 27, compiled WITHOUT --enable-preview
+static String kind(int n) {
+    return switch (n) {
+        case 0 -> "zero";
+        case int i when i > 0 -> "positive";
+        case int i -> "negative";
+    };
+}
+```
+<Explain>
+`case int i` is a primitive pattern, and that's preview-only. javac 25 says `error: primitive patterns are a preview feature and are disabled by default.` and tells you to use `--enable-preview`. preview features don't sneak into your code by accident: you have to opt in, every time, on every tool.
+</Explain>
+</Predict>
+
+## lazy constants
+
+<Since preview v={27} /> a `final` field is fast (the JVM can trust it never changes) but has to be set in the constructor or initializer, right away. lazy initialization (compute it on first use) has always meant giving that up, or hand-rolling [double-checked locking](/learn/deep-dives/singleton-and-dcl). a **lazy constant** is both: computed at most once, on first access, thread-safe, and after that treated like a constant.
+
+```java
+// jdk 27, --enable-preview. (25 had an earlier design called StableValue.)
+class Config {
+    private static final LazyConstant<Properties> PROPS =
+        LazyConstant.of(Config::load);           // nothing is loaded yet
+
+    static String get(String key) {
+        return PROPS.get().getProperty(key);     // first call runs load(), exactly once
+    }
+
+    private static Properties load() { /* read a file, parse it */ return new Properties(); }
+}
+
+// lazy collections: each element is computed on first access, independently
+static final List<BigInteger> FACTORIALS = List.ofLazy(100, i -> factorial(i));
+```
+
+it started in jdk 25 as `StableValue` (JEP 502), was renamed and slimmed down to `LazyConstant` in 26, and in 27 lost two low-level methods (`isInitialized`, `orElse`) and gained `Set.ofLazy`. JEP 547 proposes previewing it again, unchanged, in 28. that's a lot of change for a small API, which is exactly what previews are for.
+
+## structured concurrency
+
+<Since preview v={27} /> run subtasks in parallel inside one block, and treat them as one unit: the block doesn't end until they're all done, and if one fails, the others are cancelled. it's the seventh preview (after two incubators), and the API has changed almost every time. the core shape has been stable since 25:
+
+```java title="Main.java" output="ada ordered #1042"
+import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.StructuredTaskScope.Subtask;
+
+static String findUser() throws InterruptedException {
+    Thread.sleep(50);
+    return "ada";
+}
+
+static int fetchOrder() throws InterruptedException {
+    Thread.sleep(80);
+    return 1042;
+}
+
+void main() throws Exception {
+    try (var scope = StructuredTaskScope.open()) {
+        Subtask<String> user = scope.fork(() -> findUser());
+        Subtask<Integer> order = scope.fork(() -> fetchOrder());
+
+        scope.join();                       // wait for both; if one fails, the other is cancelled
+
+        IO.println(user.get() + " ordered #" + order.get());
+    }
+}
+```
+
+(run on jdk 25 with `--enable-preview`. it compiles on 27 too: what changed in 27 is mostly *how failures come out*. `join()` now throws a checked `ExecutionException`, which the `throws Exception` covers.) JEP 543 proposes making it final in jdk 28. the whole model, with virtual threads, is in [structured concurrency](/learn/concurrency/structured-concurrency).
+
+## PEM encodings
+
+<Since preview v={27} /> PEM is the `-----BEGIN PUBLIC KEY-----` text format that keys and certificates travel in. java could always do the crypto, but reading and writing PEM meant base64 by hand or a library like Bouncy Castle. `PEMEncoder` and `PEMDecoder` do it in one call each:
+
+```java title="Main.java" output="-----BEGIN PUBLIC KEY-----\ntrue"
+import java.security.*;
+import java.security.interfaces.ECPublicKey;
+
+void main() throws Exception {
+    KeyPair pair = KeyPairGenerator.getInstance("EC").generateKeyPair();
+
+    String pem = PEMEncoder.of().encodeToString(pair.getPublic());
+    IO.println(pem.lines().findFirst().orElseThrow());
+
+    ECPublicKey back = PEMDecoder.of().decode(pem, ECPublicKey.class);
+    IO.println(back.equals(pair.getPublic()));
+}
+```
+
+(run on jdk 25 with `--enable-preview`; the same two calls are in jdk 27's version.) this is the one closest to the finish line: JEP 542 targets it as final in jdk 28.
+
+## the vector API (incubator)
+
+<Since preview v={27} /> not a preview but an incubator, so a different switch: the API lives in the `jdk.incubator.vector` module, and you add it with `--add-modules`. it lets you write loops that process a whole vector of numbers per instruction (SIMD), portably:
+
+```java
+import jdk.incubator.vector.FloatVector;
+import jdk.incubator.vector.VectorSpecies;
+
+static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
+
+static void squares(float[] a, float[] out) {
+    int i = 0;
+    for (; i < SPECIES.loopBound(a.length); i += SPECIES.length()) {
+        var v = FloatVector.fromArray(SPECIES, a, i);   // load a whole lane of floats
+        v.mul(v).intoArray(out, i);                     // square them all at once
+    }
+    for (; i < a.length; i++) out[i] = a[i] * a[i];    // the leftover tail, one by one
+}
+```
+
+```bash
+$ java --add-modules jdk.incubator.vector Main.java
+WARNING: Using incubator modules: jdk.incubator.vector
+[1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0, 81.0, 100.0]
+```
+
+(that run is jdk 25 with a `main` that squares 1 to 10; the API hasn't changed since.) twelve incubators since jdk 16, and it'll stay one until [valhalla](/learn/future/valhalla)'s value classes are available as a preview: vectors want to be values, not objects. more in [the vector API](/learn/performance/vector-api).
+
+<Quiz question="which of these are on the jdk 28 list as final features (targeted or proposed), as of october 2026?" options={["PEM encodings and structured concurrency", "lazy constants and primitive patterns", "the vector API", "all five"]} answer={0}>
+<Explain>
+the jdk 28 project page lists JEP 542 (PEM encodings, targeted) and JEP 543 (structured concurrency, proposed to target), both as final. lazy constants have a fourth preview proposed (JEP 547, a candidate), primitive patterns have nothing on the list yet, and the vector API waits for valhalla. also on the 28 list: value objects as a first preview (JEP 401), strict field initialization in the JVM (preview, JEP 539) and a simple JSON API (incubator, JEP 540). jdk 28 is due in march 2027, and until then the list can change.
+</Explain>
+</Quiz>
+
+<Gotcha title="preview code is pinned to one release">
+a class compiled with `--enable-preview` on jdk 27 gets class file version 71.65535, and runs only on jdk 27, only with the flag. move to 28 and you recompile, and maybe rewrite (structured concurrency code from 21 doesn't compile on 25). use previews to learn and to give feedback, keep them out of libraries, and if you ship one in an application, pin the JDK. the mechanics are in [preview and incubator features](/learn/modern/preview-features).
+</Gotcha>
+
+<Keylines>
+- jdk 27's previews: primitive patterns, lazy constants, structured concurrency, PEM encodings. incubator: the vector API.
+- previews need `--enable-preview` at compile time and run time. incubators need `--add-modules`.
+- primitive patterns match when a conversion is exact: `1000 instanceof byte` is false.
+- lazy constants: computed once on first use, then treated like a constant.
+- PEM (JEP 542) and structured concurrency (JEP 543) are on the list to go final in 28.
+- preview class files run only on the release that compiled them.
+</Keylines>

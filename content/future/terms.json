@@ -1,0 +1,13 @@
+[
+  { "term": "flattening", "short": "storing a value object's fields directly inside an array or field instead of a pointer to a separate object. valhalla's payoff.", "chapter": "valhalla", "aka": ["flattened array", "scalarization", "value class"] },
+  { "term": "null-restricted type", "short": "a type that can't hold null, written Foo! in valhalla's draft JEPs. lets the JVM drop the null flag and flatten more.", "chapter": "valhalla", "aka": ["Foo!", "nullness markers"] },
+  { "term": "training run", "short": "a normal run of your app that records what it loads, links, profiles and compiles, so an AOT cache can give later runs a head start.", "chapter": "leyden", "aka": ["AOTCacheOutput", "AOT training"] },
+  { "term": "condenser", "short": "leyden's long-term idea: a transformation that shifts work ahead of time in exchange for constraints you choose. a design note, not a feature.", "chapter": "leyden", "aka": ["condensers"] },
+  { "term": "derived record creation", "short": "the proposed `record with { x = 0; }` expression: a copy of a record with some components changed. JEP 468, a candidate.", "chapter": "amber", "aka": ["with expression", "wither", "JEP 468"] },
+  { "term": "carrier class", "short": "an exploratory generalization of records from amber's 2026 design note: a component list without records' restrictions.", "chapter": "amber", "aka": ["beyond records"] },
+  { "term": "joiner", "short": "the policy object of a StructuredTaskScope: when join() returns, what it returns, and what it throws.", "chapter": "loom-next", "aka": ["StructuredTaskScope.Joiner"] },
+  { "term": "SIMD", "short": "single instruction, multiple data: one CPU instruction working on a whole vector of numbers. what the vector API exposes.", "chapter": "panama-and-babylon", "aka": ["vector instructions", "lanes", "vector API"] },
+  { "term": "code reflection", "short": "project babylon's idea: a library reads a java method as a code model and transforms it, say into a GPU kernel. research, no JEP.", "chapter": "panama-and-babylon", "aka": ["Babylon", "code model", "HAT"] },
+  { "term": "JEP", "short": "JDK enhancement proposal: the document that tracks a feature from draft to candidate, targeted, integrated and delivered.", "chapter": "whats-next", "aka": ["JDK Enhancement Proposal", "proposed to target"] },
+  { "term": "CRaC", "short": "coordinated restore at checkpoint: save a warmed-up JVM process to disk and restore it in milliseconds. vendor builds on linux, not mainline.", "chapter": "whats-next", "aka": ["checkpoint/restore", "org.crac"] }
+]

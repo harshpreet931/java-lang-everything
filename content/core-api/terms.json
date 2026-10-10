@@ -1,0 +1,17 @@
+[
+  { "term": "compact strings", "short": "since java 9 a String stores one byte per char when every char fits in latin-1, two otherwise.", "chapter": "string-api", "aka": ["coder", "LATIN1", "UTF16"] },
+  { "term": "StringBuilder", "short": "a growable byte[] for building text. grows as old * 2 + 2, so appends are amortized O(1).", "chapter": "string-api", "aka": ["StringBuffer"] },
+  { "term": "wrapper class", "short": "the object version of a primitive: Integer for int, Long for long, and so on.", "chapter": "wrappers-and-boxing", "aka": ["boxed primitive", "Integer"] },
+  { "term": "BigDecimal", "short": "an exact decimal number: an unscaled BigInteger plus a scale. what money should be.", "chapter": "math-and-random", "aka": ["BigInteger"] },
+  { "term": "checked exception", "short": "an exception the compiler makes callers catch or declare. Exception, minus RuntimeException.", "chapter": "exceptions", "aka": ["throws clause"] },
+  { "term": "unchecked exception", "short": "RuntimeException, Error and their subclasses. nobody is forced to catch them.", "chapter": "exceptions", "aka": ["RuntimeException"] },
+  { "term": "stack unwinding", "short": "popping frames one by one after a throw, running finally blocks, until a catch matches.", "chapter": "try-catch-finally", "aka": ["exception propagation"] },
+  { "term": "exception table", "short": "per-method rows of from, to, target, type in the class file. how the JVM finds a catch.", "chapter": "try-catch-finally" },
+  { "term": "suppressed exception", "short": "a close() failure attached to the body's exception instead of replacing it. getSuppressed().", "chapter": "try-with-resources", "aka": ["addSuppressed"] },
+  { "term": "AutoCloseable", "short": "the one-method interface that lets an object go in a try-with-resources.", "chapter": "try-with-resources", "aka": ["Closeable", "try-with-resources"] },
+  { "term": "exception chaining", "short": "wrapping a lower-level exception as the cause of a new one, so the log keeps the root.", "chapter": "designing-exceptions", "aka": ["cause", "exception translation", "getCause"] },
+  { "term": "Optional", "short": "a box that holds one value or nothing. a return type for maybe-no-result.", "chapter": "optional", "aka": ["orElse", "orElseGet"] },
+  { "term": "DST gap", "short": "local times that never happen when clocks jump forward. java shifts them forward.", "chapter": "date-and-time", "aka": ["daylight saving time", "DST overlap", "ZonedDateTime"] },
+  { "term": "catastrophic backtracking", "short": "a regex that can match the same text many ways, making a failing match exponential.", "chapter": "regex", "aka": ["ReDoS"] },
+  { "term": "logging facade", "short": "an API like SLF4J or System.Logger that code logs through, with the backend chosen by the app.", "chapter": "logging", "aka": ["SLF4J", "System.Logger"] }
+]

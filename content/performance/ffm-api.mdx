@@ -1,0 +1,224 @@
+import { ArenaLifetimes } from "@/components/figures/performance/ArenaLifetimes";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+the **Foreign Function & Memory API** (`java.lang.foreign`, final in java 22, [JEP 454](https://openjdk.org/jeps/454)) <Since v={22} /> lets plain java code call C functions and use memory outside the heap, with no C glue code. a **`MemorySegment`** is a bounded, checked view of some memory. an **`Arena`** decides how long it lives. a **`Linker`** turns a C function into a [method handle](/learn/meta/method-handles-and-varhandles) you call like any other.
+
+it replaces most uses of [JNI](/learn/performance/jni) and of `sun.misc.Unsafe`'s memory methods, and it's safe by default: no reading past the end, no use after free.
+</InShort>
+
+## the picture
+
+there's a whole world of code outside the JVM: the C standard library, the operating system, sqlite, openssl, GPU drivers, every library with a C interface. JNI could reach it, but only through C code you wrote and compiled yourself for every platform. Unsafe could poke raw memory, but nothing stopped you poking the wrong address.
+
+FFM is like a well-run embassy. you don't need to learn the local language (C), there's an interpreter (the `Linker`) who knows the calling conventions of each country (platform ABI). you can rent space outside the compound (off-heap memory), but every lease has a clear term (an `Arena`), the guards check you're inside the walls you rented (bounds checks), and when the lease ends, the key stops working (use-after-free becomes an exception, not a crash).
+
+## calling C: strlen
+
+the smallest real call: C's `strlen`, from the standard library that's already loaded into every process.
+
+```java title="Main.java" run output="13 (the segment is 14 bytes: 13 chars + the 0 at the end)"
+import java.lang.foreign.*;
+import java.lang.invoke.MethodHandle;
+import static java.lang.foreign.ValueLayout.*;
+
+void main() throws Throwable {
+    Linker linker = Linker.nativeLinker();
+    MethodHandle strlen = linker.downcallHandle(
+        linker.defaultLookup().find("strlen").orElseThrow(),
+        FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+
+    try (Arena arena = Arena.ofConfined()) {
+        MemorySegment hello = arena.allocateFrom("hello, panama");
+        long len = (long) strlen.invokeExact(hello);
+        IO.println(len + " (the segment is " + hello.byteSize() + " bytes: 13 chars + the 0 at the end)");
+    }
+}
+```
+
+four steps, each one doing one job:
+
+1. **find the symbol.** `defaultLookup()` covers the C library; `SymbolLookup.libraryLookup(path, arena)` loads any other shared library.
+2. **describe the signature.** `FunctionDescriptor.of(JAVA_LONG, ADDRESS)` is C's `size_t strlen(const char*)`: returns a 64-bit integer, takes a pointer. the linker uses it to put arguments in the right registers for this CPU and OS.
+3. **get a method handle.** `downcallHandle` returns a plain `MethodHandle` of type `(MemorySegment)long`, so `invokeExact` applies, and the JIT can inline the call stub like any constant handle.
+4. **pass memory, not objects.** C can't see java objects (the GC moves them), so `allocateFrom` copies the string into off-heap memory as UTF-8 bytes plus a terminating zero.
+
+<Figure caption="hover a stage. what one strlen.invokeExact(hello) does, all of it generated from the FunctionDescriptor.">
+<Flow stages={[
+  { label: "invokeExact(hello)", sub: "your java", note: "a normal call on a constant MethodHandle of type (MemorySegment)long. the JIT can inline everything up to the native call." },
+  { label: "downcall stub", sub: "generated once", note: "the linker generated a small stub for this descriptor and this platform's ABI: the segment's address goes in the first argument register (x0 on arm64, rdi on x86 linux)." },
+  { label: "thread → native", sub: "state change", note: "the thread switches to 'in native', which counts as safe for the GC. skipped for critical downcalls, which is why those are cheaper and must be short." },
+  { label: "strlen", sub: "libc", note: "plain C code runs, reading the bytes the segment points at." },
+  { label: "back to java", sub: "result in a register", note: "the return value comes back in a register, the thread switches back to 'in java' (checking for a pending safepoint), and the long is returned." },
+]} />
+</Figure>
+
+run it with plain `java Main.java` and you also get this on stderr:
+
+```text
+WARNING: A restricted method in java.lang.foreign.Linker has been called
+WARNING: java.lang.foreign.Linker::downcallHandle has been called by Main in an unnamed module (file:/.../Main.java)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+```
+
+calling C is outside java's safety guarantees (a wrong descriptor can crash the JVM), so creating downcall handles is a **restricted method**. today that's a warning; the plan is for it to become an error unless the application opts in with `--enable-native-access=ALL-UNNAMED` (or a module name, or `Enable-Native-Access: ALL-UNNAMED` in a jar manifest). the same rule now covers JNI's `System.loadLibrary`, see [JNI](/learn/performance/jni).
+
+## memory with a lifetime
+
+a `MemorySegment` is an address plus a size plus a lifetime. every access is checked against all three:
+
+```java title="Main.java" run output="40 bytes, [3] = 9\nout of bounds: caught\nAlready closed"
+import java.lang.foreign.*;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+
+void main() {
+    MemorySegment squares;
+    try (Arena arena = Arena.ofConfined()) {
+        squares = arena.allocate(JAVA_INT, 10);          // 40 bytes, off the heap, zeroed
+        for (int i = 0; i < 10; i++) squares.setAtIndex(JAVA_INT, i, i * i);
+        IO.println(squares.byteSize() + " bytes, [3] = " + squares.getAtIndex(JAVA_INT, 3));
+        try {
+            squares.getAtIndex(JAVA_INT, 10);             // one past the end
+        } catch (IndexOutOfBoundsException e) {
+            IO.println("out of bounds: caught");
+        }
+    }                                                     // freed, right here
+    try {
+        squares.getAtIndex(JAVA_INT, 3);                  // use after free
+    } catch (IllegalStateException e) {
+        IO.println(e.getMessage());
+    }
+}
+```
+
+the out-of-bounds exception's message tells you exactly what happened:
+
+```text
+Out of bound access on segment MemorySegment{ kind: native, address: 0x76192d34b0, byteSize: 40 }; new offset = 40; new length = 4
+```
+
+in C, both of those bugs are silent memory corruption. here they're exceptions.
+
+who frees the memory, and when, is the arena's job. there are four kinds:
+
+<Figure caption={<>pick an arena and try to break it. <C k="live">green</C> worked, <C k="dead">red</C> is what the runtime refused (with its real message). notice which arenas free memory deterministically, and which one just leaks if you forget it.</>}>
+<ArenaLifetimes />
+</Figure>
+
+`ofConfined` is the default choice: one owner thread, freed exactly at `close()` (so use try-with-resources), and the cheapest checks. `ofShared` for memory several threads use, still closed explicitly (closing it has to coordinate with every thread, so it's slower). `ofAuto` hands the job to the garbage collector, like a direct `ByteBuffer`: convenient, but you don't control *when*. `global` is for memory that should live as long as the program.
+
+## structs, without the pointer arithmetic
+
+C data has a layout. describe it once, and get [VarHandles](/learn/meta/method-handles-and-varhandles) that compute the offsets:
+
+```java title="Main.java" run output="[i4(x)i4(y)], 24 bytes for 3\npoints[2] = (20, 21)"
+import java.lang.foreign.*;
+import java.lang.invoke.VarHandle;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+
+// struct point { int x; int y; };   and an array of 3 of them
+static final StructLayout POINT = MemoryLayout.structLayout(
+    JAVA_INT.withName("x"), JAVA_INT.withName("y"));
+static final VarHandle X = POINT.arrayElementVarHandle(MemoryLayout.PathElement.groupElement("x"));
+static final VarHandle Y = POINT.arrayElementVarHandle(MemoryLayout.PathElement.groupElement("y"));
+
+void main() {
+    try (Arena arena = Arena.ofConfined()) {
+        MemorySegment points = arena.allocate(POINT, 3);
+        for (int i = 0; i < 3; i++) {
+            X.set(points, 0L, (long) i, i * 10);
+            Y.set(points, 0L, (long) i, i * 10 + 1);
+        }
+        IO.println(POINT + ", " + points.byteSize() + " bytes for 3");
+        IO.println("points[2] = (" + (int) X.get(points, 0L, 2L) + ", " + (int) Y.get(points, 0L, 2L) + ")");
+    }
+}
+```
+
+`[i4(x)i4(y)]` is the layout's own description: two 4-byte ints named x and y. padding and alignment are explicit in a layout (`MemoryLayout.paddingLayout`), which is exactly what you need to match a real C header.
+
+## C calling back into java
+
+some C APIs take a function pointer. `qsort` wants a comparator. an **upcall stub** is a C function pointer whose body is a java method:
+
+```java title="Main.java" run output="[1, 3, 7, 19, 42, 88]"
+import java.lang.foreign.*;
+import java.lang.invoke.*;
+import java.util.Arrays;
+import static java.lang.foreign.ValueLayout.*;
+
+// C calls back into java: qsort with a comparator written in java
+static int compare(MemorySegment a, MemorySegment b) {
+    return Integer.compare(a.get(JAVA_INT, 0), b.get(JAVA_INT, 0));
+}
+
+void main() throws Throwable {
+    Linker linker = Linker.nativeLinker();
+    MethodHandle qsort = linker.downcallHandle(
+        linker.defaultLookup().find("qsort").orElseThrow(),
+        FunctionDescriptor.ofVoid(ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS));
+
+    FunctionDescriptor cmpDesc = FunctionDescriptor.of(JAVA_INT,
+        ADDRESS.withTargetLayout(JAVA_INT), ADDRESS.withTargetLayout(JAVA_INT));
+    MethodHandle cmp = MethodHandles.lookup().findStatic(MethodHandles.lookup().lookupClass(), "compare",
+        cmpDesc.toMethodType());
+
+    try (Arena arena = Arena.ofConfined()) {
+        MemorySegment cmpPtr = linker.upcallStub(cmp, cmpDesc, arena);   // a C function pointer to java code
+        MemorySegment array = arena.allocateFrom(JAVA_INT, 42, 7, 19, 3, 88, 1);
+        qsort.invokeExact(array, 6L, JAVA_INT.byteSize(), cmpPtr);
+        IO.println(Arrays.toString(array.toArray(JAVA_INT)));
+    }
+}
+```
+
+java memory, sorted by C, with a java comparator, and no C compiler anywhere. (`withTargetLayout(JAVA_INT)` tells FFM what the pointers point at, so `a.get(JAVA_INT, 0)` is allowed to read through them.)
+
+<Quiz question="the upcall stub was allocated in a confined arena. what happens if C keeps the function pointer and calls it after the arena is closed?" options={["it still works, the stub is code", "the JVM throws IllegalStateException in the caller", "undefined behaviour: probably a crash", "the GC keeps the arena alive"]} answer={2}>
+<Explain>
+undefined behaviour, most likely a crash. closing the arena frees the stub, and C has no idea: it still holds a raw address. FFM can check every access *java* makes, but it can't check what C does with a pointer you handed it. that's why downcall and upcall creation are restricted methods: once a pointer leaves java, the safety is yours to keep. match the arena to how long C will hold on to the pointer (often `Arena.global()` for callbacks a library keeps forever).
+</Explain>
+</Quiz>
+
+## how fast is a native call?
+
+the same C function, `int add(int, int)`, called from java four ways, measured with [JMH](/learn/performance/jmh) on the M4 Pro:
+
+<Figure caption={<>ns per call, 2 forks × 5 iterations. an FFM downcall beats a JNI call to the identical function. <code>Linker.Option.critical</code> trims the transition further, for short functions that never call back into java or block.</>}>
+<Bench
+  unit="ns/op"
+  data={[
+    { label: "plain java: a + b", value: 0.472, err: 0.005, tone: "live" },
+    { label: "FFM downcall, critical", value: 2.161, err: 0.1 },
+    { label: "FFM downcall", value: 2.5, err: 0.062 },
+    { label: "JNI native method", value: 3.126, err: 0.05 },
+  ]}
+/>
+</Figure>
+
+a couple of nanoseconds to cross into C and back. that's nothing for a call that does real work (compress a buffer, query sqlite), and too much for something you'd call a billion times in a loop: there, the JIT can't inline across the boundary, so a java version of a tiny function often wins.
+
+## jextract
+
+writing `FunctionDescriptor`s by hand for a big library is tedious and error-prone. **jextract** (a separate download from the OpenJDK project) reads a C header and generates the java side for you: a class with a static method per C function, layouts for every struct, constants for the `#define`s. you point it at `sqlite3.h` and call `sqlite3_open(...)` from java, with the descriptors written by a tool that read the real header instead of by you.
+
+<Gotcha title="the descriptor is a promise you can break">
+`FunctionDescriptor.of(JAVA_INT, JAVA_INT)` for a function that actually takes a `long` and returns a pointer isn't caught anywhere: the linker trusts you, puts values in the registers your descriptor says, and C reads whatever is there. the best case is a garbage result; the worst is a JVM crash with an `hs_err_pid.log`. FFM's safety covers memory *segments*. at the C boundary, use jextract, or check the header twice.
+</Gotcha>
+
+<Deep title="what FFM replaced">
+`ByteBuffer.allocateDirect` was the old way to get off-heap memory: capped at 2 GB per buffer (an `int` index), freed only when the GC got around to the buffer object, and stateful (position, limit, flip). `sun.misc.Unsafe.allocateMemory` had no size cap and no safety at all; its memory methods were deprecated for removal in java 23 ([JEP 471](https://openjdk.org/jeps/471)) and print a warning on first use since java 24 ([JEP 498](https://openjdk.org/jeps/498)), with exceptions planned from jdk 26 or later. a `MemorySegment` has 64-bit sizes, deterministic freeing, bounds and lifetime checks, and the JIT removes most of those checks in hot loops. libraries have been moving over: Lucene's `MMapDirectory`, for one, maps its index files as memory segments.
+</Deep>
+
+<Interview q="how would you call a C library from java today?">
+with the Foreign Function & Memory API, final since java 22. look up the symbol with a `SymbolLookup`, describe its C signature with a `FunctionDescriptor`, and get a `MethodHandle` from `Linker.nativeLinker().downcallHandle(...)`. arguments that are pointers become `MemorySegment`s allocated from an `Arena`, which controls when the memory is freed; out-of-bounds and use-after-free become exceptions instead of crashes. callbacks are upcall stubs. for anything bigger than a few functions, generate the bindings with jextract. it needs no C code, unlike JNI, and on my machine a downcall was a bit faster than the equivalent JNI call. run with `--enable-native-access` so the restricted-method warnings (later errors) go away.
+</Interview>
+
+<Keylines>
+- `java.lang.foreign`, final in java 22: call C and manage off-heap memory with no C glue.
+- a `MemorySegment` is checked: out of bounds and use after free are exceptions.
+- an `Arena` owns the lifetime: confined, shared, auto (the GC) or global.
+- `Linker` + `FunctionDescriptor` → a `MethodHandle`. upcall stubs go the other way.
+- creating downcalls is restricted: pass `--enable-native-access`. and the descriptor has to match the header.
+</Keylines>

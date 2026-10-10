@@ -1,0 +1,140 @@
+import { JdkPicker } from "@/components/figures/start/JdkPicker";
+import { JavaHomePath } from "@/components/figures/start/JavaHomePath";
+
+<InShort>
+install **one JDK** (if nobody's told you otherwise: **temurin 25**), check that `java -version` and `javac -version` both say 25, and point **JAVA_HOME** at it. that's the whole setup.
+</InShort>
+
+## the picture
+
+you go to download java and there are like ten of them. temurin, corretto, zulu, liberica, oracle, graalvm, microsoft... which one is "real"?
+
+all of them. they're all built from the same OpenJDK source code, and the ones worth using pass the same official compatibility test suite (the TCK). think of the same recipe baked by different bakeries: same bread. what differs is who sells it, how long they keep fixing it, and the license on the bag.
+
+<Figure caption={<>pick what you're installing it for, your OS and how you like to install things. the command is the one you'd actually run. version numbers move every quarter, so <code>sdk list java</code> shows what's current.</>}>
+<JdkPicker />
+</Figure>
+
+if you install a lot of JDKs (you will, eventually), use [sdkman](https://sdkman.io). it installs any vendor's JDK into your home folder, switches between them with one command, and sets `JAVA_HOME` for you:
+
+```bash
+$ curl -s "https://get.sdkman.io" | bash
+$ sdk install java          # no version: sdkman's default, temurin 25
+$ sdk list java             # every build of every vendor, with its id
+$ sdk use java <id>         # switch, in this terminal only
+```
+
+## check it worked
+
+open a **new** terminal (old ones don't see the changes) and ask both the runtime and the compiler:
+
+```bash
+$ java -version
+openjdk version "25.0.4.1" 2026-08-18 LTS
+OpenJDK Runtime Environment Temurin-25.0.4.1+1 (build 25.0.4.1+1-LTS)
+OpenJDK 64-Bit Server VM Temurin-25.0.4.1+1 (build 25.0.4.1+1-LTS, mixed mode, sharing)
+
+$ javac -version
+javac 25.0.4.1
+```
+
+both should say 25. read the first line for the version, the second for who built it (temurin, corretto...), the third for the JVM (HotSpot's "Server VM", in "mixed mode": interpreter plus JIT, like in [what java actually is](/learn/start/what-is-java)).
+
+<Gotcha title="javac: command not found">
+`java` works but `javac` doesn't? you have a runtime without the compiler (an old JRE, or a slim docker image), or `PATH` only points at a folder with `java` in it. install a full JDK and put its `bin` on your PATH. on a mac, also know that `/usr/bin/java` is a little stub from apple that forwards to whatever `/usr/libexec/java_home` picks, which might not be the JDK you just installed.
+</Gotcha>
+
+## JAVA_HOME and PATH
+
+two environment variables, two different jobs, and most "java is broken on my machine" problems are these two disagreeing.
+
+- **PATH** is how your shell finds a program when you type `java`. it's a list of folders, checked in order. **first match wins.**
+- **JAVA_HOME** is the folder of one JDK. maven, gradle, IntelliJ and most scripts read it to decide which java to use. your shell never looks at it.
+
+<Figure caption={<>flip the PATH order and unset JAVA_HOME. the terminal and your build tools only agree when the first <code>java</code> on PATH is the one inside <code>$JAVA_HOME</code>. green is a match, <C k="dead">red</C> is the setup that wastes your afternoon.</>}>
+<JavaHomePath />
+</Figure>
+
+the fix is the same everywhere: set `JAVA_HOME`, then put `$JAVA_HOME/bin` at the **front** of PATH, so they can't drift apart.
+
+<Tabs>
+<Tab label="mac (zsh)">
+```bash title="~/.zshrc"
+export JAVA_HOME=$(/usr/libexec/java_home -v 25)
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+`/usr/libexec/java_home -V` (capital V) lists every JDK the mac knows about.
+</Tab>
+<Tab label="linux (bash)">
+```bash title="~/.bashrc"
+export JAVA_HOME=/usr/lib/jvm/temurin-25-jdk-amd64
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+not sure where yours landed? `readlink -f "$(which javac)"` prints the real path; `JAVA_HOME` is that minus the trailing `/bin/javac`.
+</Tab>
+<Tab label="windows (powershell)">
+```text title="powershell"
+setx JAVA_HOME "C:\Program Files\Eclipse Adoptium\<your jdk-25 folder>"
+```
+then add `%JAVA_HOME%\bin` to the top of your user `Path` ("edit environment variables for your account" in the start menu). or tick "set JAVA_HOME variable" in the temurin installer, which does both. don't `setx PATH ...`: it cuts long paths off at 1024 characters, silently.
+</Tab>
+<Tab label="sdkman">
+nothing to do. sdkman points `JAVA_HOME` at `~/.sdkman/candidates/java/current` and puts its `bin` first on PATH. `sdk default java <version>` changes it for every new terminal.
+</Tab>
+</Tabs>
+
+<Quiz question={<>you run <code>java -version</code> and it says 25. but your build fails with <code>error: release version 25 not supported</code>. what's going on?</>} options={["JAVA_HOME points at an older JDK", "java 25 isn't fully installed", "you need --enable-preview"]} answer={0}>
+<Explain>
+the terminal found java 25 through PATH. the build tool ignored PATH and used `JAVA_HOME`, which still points at an older JDK whose `javac` has never heard of 25. point `JAVA_HOME` at the 25 install (and restart the IDE, they cache it).
+</Explain>
+</Quiz>
+
+## what's in the box
+
+a JDK is just a folder. nothing gets "installed into the system" beyond what PATH and JAVA_HOME point at, which is why having five of them side by side is totally fine.
+
+<Figure caption={<>temurin 25 on a mac. click a folder to fold it. the two <C k="meta">purple</C> files are the actual runtime: the whole class library in one file, and the JVM.</>}>
+<Tree>{`
+temurin-25.jdk/Contents/Home
+    bin // java, javac, jshell, jar, javap, jdb... 30 programs
+    conf // security settings, logging defaults
+    include // C headers, for calling native code
+    legal // licenses, one folder per module
+    lib
+        modules #meta // the entire class library: 69 modules, 138 MB
+        server
+            libjvm.dylib #meta // the JVM itself, 19 MB
+    man // manual pages
+    release // a text file: version, vendor, module list
+`}</Tree>
+</Figure>
+
+```bash
+$ cat "$JAVA_HOME/release" | head -3
+IMPLEMENTOR="Eclipse Adoptium"
+IMPLEMENTOR_VERSION="Temurin-25.0.4.1+1"
+JAVA_RUNTIME_VERSION="25.0.4.1+1-LTS"
+```
+
+## an editor
+
+anything works for this site, because every example is one file you can run with `java Main.java` (more on that in [compile and run](/learn/start/compile-and-run)). for real projects:
+
+| editor | when |
+| --- | --- |
+| IntelliJ IDEA | the java IDE. understands your whole project, refactors safely, best debugger. the free tier is plenty. |
+| VS Code + the "Extension Pack for Java" | lighter. good if you already live in VS Code. |
+| any text editor + a terminal | honestly great while learning. you see every step the IDE would hide. |
+
+whichever you pick, tell it which JDK to use (IntelliJ calls it the "project SDK"). editors keep their own setting and don't always read `JAVA_HOME`.
+
+<Deep title="why java -version prints to stderr">
+try `java -version > out.txt`: the version still shows up in your terminal and `out.txt` is empty. `-version` has always printed to stderr (that's just how it was written in the 90s). java 9 added `--version` with two dashes, which prints the same thing to stdout, so scripts can capture it. same story for `-help` vs `--help`.
+</Deep>
+
+<Keylines>
+- every JDK worth installing is built from the same OpenJDK code. pick temurin 25 unless you have a reason not to.
+- `java -version` and `javac -version` should both say 25.
+- PATH decides what your terminal runs. JAVA_HOME decides what your tools use. make them point at the same JDK.
+- a JDK is just a folder. having several is normal, sdkman makes switching painless.
+</Keylines>

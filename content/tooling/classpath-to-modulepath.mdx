@@ -1,0 +1,125 @@
+import { ModuleKinds } from "@/components/figures/tooling/ModuleKinds";
+import { AutoModuleName } from "@/components/figures/tooling/AutoModuleName";
+import { Migration } from "@/components/figures/tooling/Migration";
+
+<InShort>
+the class path and the module path live side by side. everything on the **class path** becomes one big **unnamed module** that reads everything. a plain jar on the **module path** becomes an **automatic module**, named after its file. jars with a `module-info` are **named modules**.
+
+you can migrate one jar at a time, which is exactly why java 9 didn't break the world.
+</InShort>
+
+## the picture
+
+think of moving house. the class path is the old flat: everything in one room, every box open, you can grab anything from anywhere. the module path is the new house with labelled rooms and doors. you don't have to move every box on day one. some boxes go into proper rooms (named modules), some get dumped in the hallway with a sticky note on them (automatic modules), and the old flat stays rented for whatever's left (the unnamed module).
+
+<Figure caption={<>pick where your code lives. a named module is the only kind that's blind to something: it <C k="dead">can't see the class path</C> at all. the other two <C k="ref">read</C> everything.</>}>
+<ModuleKinds />
+</Figure>
+
+that one red box explains most migration pain. the moment you write a `module-info.java`, every dependency you use has to be on the module path too, named or automatic, because named modules don't read the unnamed module. ever.
+
+your own code can tell you which module it's in:
+
+<Predict options={["module java.base / false / true / false", "module java.base / false / true / true", "unnamed / true / true / true"]} answer={0}>
+```java run output="module java.base\nfalse\ntrue\nfalse"
+void main() {
+    Module mine = getClass().getModule();
+    Module base = String.class.getModule();
+    IO.println(base);
+    IO.println(mine.isNamed());
+    IO.println(mine.canRead(base));
+    IO.println(base.canRead(mine));
+}
+```
+<Explain>
+this file runs on the class path, so it's in the unnamed module (`isNamed()` is false). the unnamed module reads every module, `java.base` included. but readability is one-way: `java.base` is a named module, and named modules never read the unnamed one.
+</Explain>
+</Predict>
+
+## automatic modules and their names
+
+an automatic module is a bridge. it's a plain jar that gets treated as a module: it **exports and opens every package** (it has no idea which ones are internal), it **reads every other module**, and it gets a **name** so named modules can `requires` it. that name comes from the manifest, or failing that, from the jar's file name.
+
+<Figure caption={<>pick a jar or type one. the <C k="hot">manifest entry</C> beats the file name every time. every preset here gave exactly this answer from <code>jar --describe-module</code> on jdk 25, including the two <C k="dead">failures</C>.</>}>
+<AutoModuleName />
+</Figure>
+
+see the problem? the name of a module your code `requires` is now an accident of how someone named a file. the library ships `1.0` as `acme-json-1.0.jar` (name `acme.json`), then publishes a real `module-info` named `com.acme.json`, and your `requires acme.json;` stops compiling. that's why library authors add one line to their manifest long before they modularize:
+
+```text title="META-INF/MANIFEST.MF"
+Automatic-Module-Name: com.acme.json
+```
+
+it costs nothing, it doesn't make the jar a module, and it reserves the name forever.
+
+<Quiz question="what module name does my-utils_v2-1.4.jar get on the module path?" options={["my-utils_v2", "my.utils.v2", "my.utils.v2.1.4", "it can't be derived"]} answer={1}>
+<Explain>
+`.jar` goes, then the first `-` followed by a digit starts the version (`1.4`), then every non-alphanumeric becomes a dot. `jar --describe-module` prints `my.utils.v2@1.4 automatic`. the `2` in `v2` is fine because no part starts with a digit.
+</Explain>
+</Quiz>
+
+## two ways to migrate
+
+there are two classic orders. **bottom-up** starts at the jars that depend on nothing and works upwards. **top-down** throws everything onto the module path as automatic modules first, then converts from the top. step through both.
+
+<Figure caption={<>switch plans, then step. the <C k="hot">amber</C> jars are the ones that changed. bottom-up works when you own the whole tree. top-down is what you do when you don't own your dependencies.</>} wide>
+<Migration />
+</Figure>
+
+either way, you need a starting `module-info`. `jdeps` writes one for you from the bytecode:
+
+```bash
+$ jdeps --generate-module-info gen-out money-1.0.jar
+writing to gen-out/money/module-info.java
+$ cat gen-out/money/module-info.java
+module money {
+    exports shop.money;
+
+}
+```
+
+it exports everything it found and guesses `requires` from what the classes touch. treat it as a draft: delete the exports for packages that are really internal, and give the module a proper reverse-DNS name.
+
+## the escape hatches
+
+when a dependency isn't ready, you can patch the module graph from the command line. every one of these is a sign you're working around something.
+
+| flag | what it does |
+| --- | --- |
+| `--add-modules m` | resolve `m` even though nothing requires it (needed when main is on the class path) |
+| `--add-reads a=b` | make module `a` read module `b` (`b` can be `ALL-UNNAMED`) |
+| `--add-exports m/p=a` | export package `p` of `m` to `a`, at compile time and/or runtime |
+| `--add-opens m/p=a` | open `p` of `m` for deep reflection by `a` |
+| `--patch-module m=dir` | add or replace classes inside module `m` (tests, hotfixes) |
+
+<Gotcha title="split packages: two jars, one package">
+the class path never cared if two jars both had classes in `com.acme`. the module system does: a package may belong to exactly one module. put both jars on the module path and the JVM refuses to start:
+
+```text
+Error occurred during initialization of boot layer
+java.lang.module.ResolutionException: Module acme.core contains package com.acme,
+module acme.extras exports package com.acme to acme.core
+```
+
+javac says the same thing in its own words: `module app reads package com.acme from both acme.core and acme.extras`. old projects split packages all the time (a `-api` jar and an `-impl` jar sharing a package was common). on the class path it worked, so nobody noticed. the fix is renaming packages or merging jars, which is why some libraries took years to modularize.
+</Gotcha>
+
+<Gotcha title="main on the class path doesn't see the module path">
+when your main class is on the class path, the JVM only resolves the JDK's default modules. modules sitting on `-p` are ignored until something asks for them, so you get `ClassNotFoundException` for a class that is clearly in a jar you passed. add `--add-modules com.acme.util` (or `ALL-MODULE-PATH`).
+</Gotcha>
+
+<Deep title="do i actually need to modularize my app?">
+honestly, often no. plenty of production java runs entirely on the class path, including most spring boot fat jars, and the JDK's own strong encapsulation applies to you either way. modules pay off when you're a library that wants a real API boundary, when you want `jlink` to build a small runtime that includes your code, or when a big codebase needs walls the compiler enforces. if you publish a library, the minimum is still worth it: add `Automatic-Module-Name` so people who do modularize get a stable name.
+</Deep>
+
+<Interview q="what's an automatic module?">
+a plain jar (no `module-info`) placed on the module path. the JVM gives it a name from its manifest's `Automatic-Module-Name` or from the file name, exports and opens all its packages, and lets it read every other module including the unnamed one. it exists so a modular app can depend on libraries that haven't modularized yet. bonus point: the file-name-derived name is unstable, which is why `Automatic-Module-Name` exists.
+</Interview>
+
+<Keylines>
+- class path → one unnamed module that reads everything. module path → named or automatic modules.
+- named modules can't see the class path. that's the rule behind every migration headache.
+- automatic modules export everything and get their name from the manifest or the file name.
+- libraries: add `Automatic-Module-Name` today, it's one line.
+- a package can live in only one module. split packages have to be fixed, not flagged around.
+</Keylines>

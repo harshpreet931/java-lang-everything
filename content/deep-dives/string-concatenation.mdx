@@ -1,0 +1,207 @@
+import { ExactSize } from "@/components/figures/deep-dives/ExactSize";
+
+<InShort>
+before java 9, javac turned `a + b + c` into a `StringBuilder` chain baked into your class file. since java 9 ([JEP 280](https://openjdk.org/jeps/280)) it emits one **`invokedynamic`** instead, and the first time it runs, **`StringConcatFactory`** decides how to build the string. on jdk 25 that means generating a tiny class that measures every piece, allocates **one exact-size array**, and fills it. the one thing that didn't change: `+=` in a loop is still quadratic.
+</InShort>
+
+## the picture
+
+the [strings chapter](/learn/basics/strings-101) says "use `+` for one-liners, `StringBuilder` in loops". that advice is still right. the reason behind the first half changed completely in java 9, and almost nobody noticed, because the source code didn't change at all.
+
+think of ordering a cake. javac 8 wrote the recipe into your class file step by step (get a bowl, add flour, oh the bowl's too small, get a bigger bowl...). javac 9+ writes "a cake, these ingredients" on the order slip, and the bakery (the JDK) decides how to make it, the first time you order. when the bakery gets better equipment, every old order slip benefits.
+
+same method, same `javac` from jdk 25, two flags:
+
+<Tabs>
+<Tab label="javac 9+ (default)">
+```bash
+$ javac Concat.java && javap -c Concat
+static String greet(String, int);
+   0: aload_0
+   1: iload_1
+   2: invokedynamic #7, 0  // makeConcatWithConstants:(Ljava/lang/String;I)Ljava/lang/String;
+   7: areturn
+```
+</Tab>
+<Tab label="javac 8 style">
+```bash
+$ javac -XDstringConcat=inline Concat.java && javap -c Concat
+static String greet(String, int);
+   0: new           #7    // class java/lang/StringBuilder
+   3: dup
+   4: invokespecial #9    // StringBuilder."<init>":()V
+   7: ldc           #10   // String hi
+   9: invokevirtual #12   // StringBuilder.append:(String)
+  12: aload_0
+  13: invokevirtual #12   // StringBuilder.append:(String)
+  16: ldc           #16   // String , you have
+  18: invokevirtual #12   // StringBuilder.append:(String)
+  21: iload_1
+  22: invokevirtual #18   // StringBuilder.append:(I)
+  25: ldc           #21   // String  messages
+  27: invokevirtual #12   // StringBuilder.append:(String)
+  30: invokevirtual #23   // StringBuilder.toString:()
+  33: areturn
+```
+</Tab>
+</Tabs>
+
+the method is `return "hi " + name + ", you have " + n + " messages";`. the hidden `-XDstringConcat=inline` flag gives you the old shape on a new compiler (`--release 8` produces the exact same 34 bytes). four instructions against fifteen, and notice what's missing from the indy version: the constants. they moved into the bootstrap arguments as a **recipe**:
+
+```bash
+$ javap -v Concat | grep -A3 BootstrapMethods
+BootstrapMethods:
+  0: #21 REF_invokeStatic java/lang/invoke/StringConcatFactory.makeConcatWithConstants:(...)
+    Method arguments:
+      #19 hi \u0001, you have \u0001 messages
+```
+
+`\u0001` marks "an argument goes here". (a `\u0002` marks a constant passed separately, which javac only needs when your literal itself contains `\u0001` or `\u0002`.)
+
+## what happens on the first call
+
+an `invokedynamic` instruction starts out unlinked. the first time it runs, the JVM calls its bootstrap method, gets back a `CallSite`, and from then on that instruction jumps straight to the call site's target. the general mechanism is in [invokedynamic](/learn/meta/invokedynamic). for string concatenation, the bootstrap is `StringConcatFactory.makeConcatWithConstants`:
+
+<Figure caption="hover a stage. everything left of the call site happens once per concat expression, the first time it runs. every later call is just the generated method.">
+<Flow
+  stages={[
+    { label: "invokedynamic", sub: "unlinked", note: "first execution of this instruction. the JVM resolves the bootstrap method from the BootstrapMethods attribute." },
+    { label: "bootstrap", sub: "makeConcatWithConstants", note: "called with a Lookup for your class, the method type (String, int)String, and the recipe. it refuses more than 200 argument slots." },
+    { label: "parse recipe", sub: "constants + holes", note: "splits the recipe into the constants between the holes: \"hi \", \", you have \", \" messages\"." },
+    { label: "pick a strategy", sub: "simple, or generate", note: "trivial shapes (one argument, or two object arguments and no constants) get a shared fast path. anything else: a hidden class, generated and cached by shape." },
+    { label: "ConstantCallSite", sub: "linked for good", note: "the target method handle is fixed. the JIT can inline straight through it like any normal call." },
+  ]}
+/>
+</Figure>
+
+on jdk 25 the "generate" branch writes a hidden class called `java.lang.String$$StringConcat` with the ClassFile API, and caches it by argument *shape*, so every `(Object, int)` concat in the process shares one class and only the constants differ. you can dump it with a system property and read it with `javap`:
+
+```bash
+$ java -Djava.lang.invoke.StringConcatFactory.dump=true Run
+hi ada, you have 3 messages
+$ javap -c -p 'stringConcatClasses/java.lang.String$$StringConcat.0x00000fff01040800.class'
+final class java.lang.String$$StringConcat extends java.lang.StringConcatHelper$StringConcatBase {
+  final java.lang.String concat(java.lang.Object, int);
+     ...
+    24: invokestatic  #44   // Method length:(ILjava/lang/String;I)I
+     ...
+    49: invokestatic  #57   // StringConcatHelper.newArrayWithSuffix:(Ljava/lang/String;IB)[B
+     ...
+    64: invokestatic  #59   // Method prepend:(IB[B[Ljava/lang/String;Ljava/lang/String;I)I
+    67: new           #50   // class java/lang/String
+    75: invokespecial #62   // String."<init>":([BB)V
+```
+
+read the calls in order: add up the lengths, allocate the array with the last constant already at the end, prepend everything else backwards, wrap the array in a `String`. that's the whole algorithm.
+
+## one array instead of three
+
+here's what that buys, for one call of our method with `name = "ada"` and `n = 3`:
+
+<Figure wide caption={<>step through both. <C k="hot">amber</C> bytes were just written; <C k="dead">red</C> arrays are already garbage. the builder guesses, grows, and copies at the end. the generated concat knows the size up front and never copies.</>}>
+<ExactSize />
+</Figure>
+
+measured on jdk 25 on an apple M4 Pro, 200,000 calls per run (50 million for the warmed-up row). allocation comes from the JVM's own per-thread byte counter, time from `System.nanoTime`. there's no JMH here, so read the times as rough and the bytes as exact:
+
+| mode | indy (jdk 25 default) | StringBuilder chain |
+| --- | --- | --- |
+| interpreted (`-Xint`) | ~1.3 µs, **74 bytes** per call | ~1.9 µs, **186 bytes** per call |
+| C1 only (`TieredStopAtLevel=1`) | 47 to 92 ns, 74 bytes | ~63 ns, 186 bytes |
+| fully warmed (C2) | 10 to 13 ns, 50 bytes | 10 to 15 ns, 50 bytes |
+| C2 with `-XX:-OptimizeStringConcat` | (same as above) | 17 to 22 ns, 162 bytes |
+
+the last two rows are the honest part. once C2 compiles the method, both versions cost the same, because C2 has a pass (`OptimizeStringConcat`) that recognizes `StringBuilder` append chains and rewrites them into exactly what the indy version does. turn that pass off and the builder is back to allocating three times as much.
+
+so indy's win isn't "faster at peak". it's that the good version doesn't depend on C2 noticing your pattern: it's good in the interpreter, good in C1, good in code C2 never gets to. and the bytecode is a quarter the size, which helps inlining budgets.
+
+<Interview q="why did java 9 change how string concatenation is compiled, if C2 could already optimize StringBuilder chains?">
+because the strategy used to be frozen into every class file. with `invokedynamic`, javac only records *what* to concatenate (the recipe and the argument types) and the JDK decides *how* at link time, so a JDK upgrade improves code you compiled years ago. that's not theoretical: jdk 21's `StringConcatFactory` built a tree of method-handle combinators, jdk 25's default generates a hidden class per shape, and no application was recompiled for either. it also stops depending on C2 recognizing a fragile bytecode pattern, and the bytecode is much smaller. the spec is JEP 280.
+</Interview>
+
+## loops still need StringBuilder
+
+`invokedynamic` makes *one expression* efficient. it can't see across loop iterations, so `s += x` in a loop still builds a brand new String every time, copying everything so far. that's O(n²) bytes copied:
+
+```java
+String s = "";
+for (int i = 0; i < n; i++) s += i % 10;   // copies 1, 2, 3 ... n chars
+```
+
+measured on the same machine: each method run 10 times to warm up, then 11 timed runs, median shown. separate JVM per method.
+
+<Figure caption={<>log scale. the <C k="dead">+= loop</C> roughly quadruples every time n doubles; the <C k="live">StringBuilder</C> barely moves. at 100,000 iterations it&apos;s 186 ms against 0.3 ms (the bars are in microseconds).</>}>
+<Bars
+  unit="µs"
+  log
+  data={[
+    { label: "+=, 1k", value: 114, tone: "dead" },
+    { label: "builder, 1k", value: 26, tone: "live" },
+    { label: "+=, 10k", value: 1751, tone: "dead" },
+    { label: "builder, 10k", value: 41, tone: "live" },
+    { label: "+=, 50k", value: 44700, tone: "dead" },
+    { label: "builder, 50k", value: 179, tone: "live" },
+    { label: "+=, 100k", value: 186450, tone: "dead" },
+    { label: "builder, 100k", value: 312, tone: "live" },
+  ]}
+/>
+</Figure>
+
+<Compare>
+<Bad label="+= in a loop">
+```java
+String csv = "";
+for (var row : rows) {
+    csv += row.id() + "," + row.name() + "\n";
+}
+```
+</Bad>
+<Good label="one builder, or a joiner">
+```java
+var sb = new StringBuilder(rows.size() * 32);
+for (var row : rows) {
+    sb.append(row.id()).append(',').append(row.name()).append('\n');
+}
+String csv = sb.toString();
+```
+</Good>
+</Compare>
+
+(`String.join`, `Collectors.joining` and `StringJoiner` are the same idea with less typing.)
+
+## the small print
+
+<Predict options={["a1! then !a1", "98! then !a1", "98! then !98"]} answer={1}>
+```java
+char c = 'a';
+int n = 1;
+IO.println(c + n + "!");
+IO.println("!" + c + n);
+```
+<Explain>
+`+` is left-associative, and it only means "concatenate" once one side is a `String`. in the first line `c + n` happens first, and `char + int` is plain arithmetic: 97 + 1 = 98. then `98 + "!"` is a concat. in the second line the string comes first, so every `+` after it is a concat. this is decided by javac's types, long before any `invokedynamic`.
+</Explain>
+</Predict>
+
+```java run output="98!\n!a1\nxnull"
+void main() {
+    char c = 'a';
+    int n = 1;
+    IO.println(c + n + "!");
+    IO.println("!" + c + n);
+    String s = null;
+    IO.println("x" + s);
+}
+```
+
+- **null is fine.** concatenating `null` gives the text `"null"`, no exception, in both the old and the new scheme.
+- **200 slots, max.** the bootstrap rejects more than 200 argument slots (a `long` or `double` takes two). javac knows, and splits huge expressions: a 250-`int` concat compiled on jdk 25 became three `invokedynamic`s, 198 arguments, then 52, then one joining the two halves.
+- **constants are folded first.** `"a" + "b"` never reaches any of this; javac turns it into the constant `"ab"`. that's what makes `==` behave strangely, see [the string pool](/learn/deep-dives/string-pool).
+
+<Keylines>
+- javac 9+ compiles `a + b + c` to one `invokedynamic`. the constants live in a recipe string.
+- the first call bootstraps through `StringConcatFactory`, which picks a strategy and links a call site for good.
+- jdk 25 generates a hidden class that sizes the result exactly, allocates once, and fills it back to front.
+- at C2 peak, old and new cost the same (C2 rewrites builder chains too). the win is everywhere else, and in letting the JDK improve without recompiling you.
+- `+=` in a loop is still O(n²). use `StringBuilder`, `String.join` or a joining collector.
+</Keylines>

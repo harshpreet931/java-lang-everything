@@ -1,0 +1,120 @@
+import { CtlBits } from "@/components/figures/deep-dives/CtlBits";
+import { ExecuteSim } from "@/components/figures/deep-dives/ExecuteSim";
+
+<InShort>
+a `ThreadPoolExecutor` is a `BlockingQueue` plus a set of **Worker** threads that loop "take a task, run it". its whole lifecycle lives in one `AtomicInteger` called **`ctl`**: the top **3 bits** are the run state (RUNNING, SHUTDOWN, STOP, TIDYING, TERMINATED), the low **29 bits** count the workers. `execute()` is three steps: start a core thread, else **queue** it, else start an extra thread, else **reject**. that order is why a pool with an unbounded queue never grows past its core size.
+</InShort>
+
+## the picture
+
+the [executors chapter](/learn/concurrency/executors) is about using pools. this one is about the 2,000 lines under `execute()`.
+
+think of a restaurant kitchen. there's a fixed crew of cooks on staff (core threads), a ticket rail with limited hooks (the queue), and a phone number for temp cooks (threads up to max). a new order goes to a free staff cook if the crew isn't full yet. otherwise it's pinned on the rail. only when the rail is full do you call in a temp. and when even the temps are maxed out, you turn customers away at the door.
+
+the subtle part is the order: the rail fills *before* any temp is called. keep that in mind for the gotcha below.
+
+## ctl: two numbers in one int
+
+the pool constantly needs to ask questions like "am I still accepting work *and* is there room for another worker?" and act on the answer atomically. two separate fields would need a lock. so Doug Lea packed both into one `AtomicInteger`, and a single CAS changes both at once:
+
+<Figure caption={<>pick a state and a worker count. the <C k="meta">top 3 bits</C> are the run state, the <C k="hot">low 29</C> the worker count. RUNNING is <code>-1 &lt;&lt; 29</code>, the only negative state, so &quot;is it running?&quot; is just <code>c &lt; 0</code>. click a state below to jump to it.</>}>
+<CtlBits />
+</Figure>
+
+we read `ctl` out of live pools with reflection on jdk 25, to make sure the figure isn't lying:
+
+```bash
+$ java --add-opens java.base/java.util.concurrent=ALL-UNNAMED Ctl
+new pool:         -536870912  0xe0000000  111 00000000000000000000000000000
+3 workers:        -536870909  0xe0000003  111 00000000000000000000000000011
+after shutdown():  3          0x00000003  000 00000000000000000000000000011
+terminated:       1610612736  0x60000000  011 00000000000000000000000000000
+shutdownNow():    536870913   0x20000001  001 00000000000000000000000000001
+```
+
+three details worth noticing:
+
+- the states are ordered numerically (RUNNING < SHUTDOWN < STOP < TIDYING < TERMINATED) and the state only ever moves forward, so "is it at least SHUTDOWN?" is a single `>=`.
+- the worker count is capped at 2²⁹ - 1, about 536 million. the source comment says that if anyone ever needs more, it becomes an `AtomicLong`. nobody has.
+- `addWorker` doesn't take a lock to bump the count. it loops: read `ctl`, check the state still allows a new worker and the count is under the limit, CAS `ctl` to count + 1. if anything changed in between, the CAS fails and it re-checks.
+
+## execute(): the three steps
+
+the method's own comment numbers them, and the code is about 15 lines. press the buttons and watch which step each task takes:
+
+<Figure caption={<>a pool with core 2, max 4 and a 2-slot queue. submit seven tasks: 1 and 2 start threads, 3 and 4 <em>queue</em>, 5 and 6 start the extra threads, 7 is <C k="dead">rejected</C>. then let tasks finish and time pass to watch the pool shrink back to core.</>}>
+<ExecuteSim />
+</Figure>
+
+the same seven submissions against a real pool (each task blocks on a latch so nothing finishes):
+
+```java title="Main.java" run output="task 1: threads=1 queued=0\ntask 2: threads=2 queued=0\ntask 3: threads=2 queued=1\ntask 4: threads=2 queued=2\ntask 5: threads=3 queued=2\ntask 6: threads=4 queued=2\ntask 7: rejected"
+import java.util.concurrent.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        var gate = new CountDownLatch(1);
+        var pool = new ThreadPoolExecutor(2, 4, 60, TimeUnit.SECONDS, new ArrayBlockingQueue<>(2));
+        for (int i = 1; i <= 7; i++) {
+            try {
+                pool.execute(() -> { try { gate.await(); } catch (InterruptedException e) {} });
+                System.out.println("task " + i + ": threads=" + pool.getPoolSize() + " queued=" + pool.getQueue().size());
+            } catch (RejectedExecutionException e) {
+                System.out.println("task " + i + ": rejected");
+            }
+        }
+        gate.countDown();
+        pool.shutdown();
+    }
+}
+```
+
+<Predict options={["threads: 10, queued: 990", "threads: 2, queued: 998", "a RejectedExecutionException"]} answer={1}>
+```java
+var pool = new ThreadPoolExecutor(2, 10, 60, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+for (int i = 0; i < 1000; i++) pool.execute(blockingTask);
+System.out.println("threads: " + pool.getPoolSize() + ", queued: " + pool.getQueue().size());
+```
+<Explain>
+step 2 always wins. a `LinkedBlockingQueue` with no capacity is effectively unbounded, so `offer` never fails, so step 3 (grow past core) never runs. `maximumPoolSize = 10` is dead configuration: we ran it on jdk 25 and got exactly 2 threads and 998 queued tasks. if you want a pool that grows under load, give it a bounded queue (or a `SynchronousQueue`, which holds nothing and hands tasks straight to a thread).
+</Explain>
+</Predict>
+
+that's also how the `Executors` factory methods are built, which explains their failure modes:
+
+| factory | core / max | queue | how it fails under overload |
+| --- | --- | --- | --- |
+| `newFixedThreadPool(n)` | n / n | unbounded `LinkedBlockingQueue` | the queue grows until `OutOfMemoryError` |
+| `newCachedThreadPool()` | 0 / `Integer.MAX_VALUE` | `SynchronousQueue` | one new thread per waiting task, until you run out of threads |
+| `newSingleThreadExecutor()` | 1 / 1 | unbounded | same as fixed |
+| `newVirtualThreadPerTaskExecutor()` | not a `ThreadPoolExecutor` at all | none | a virtual thread per task. no pool to tune, see [virtual threads, inside](/learn/deep-dives/virtual-thread-internals) |
+
+## the Worker
+
+each thread in the pool is owned by a `Worker`, a small inner class that is two things at once:
+
+<Defs>
+<dt>a Runnable</dt><dd>the thread's body. `run()` calls `runWorker(this)`: run `firstTask` if there is one, then loop on `getTask()` until it returns `null`, then exit.</dd>
+<dt>a lock</dt><dd>it `extends AbstractQueuedSynchronizer` (see [locks and AQS](/learn/concurrency/locks-and-aqs)) as a tiny non-reentrant mutex. the worker holds it while running a task.</dd>
+</Defs>
+
+why does a thread need its own lock? for interrupts. `shutdown()` wants to wake up *idle* workers (so they notice the shutdown and exit) without interrupting workers in the middle of your task. so it walks the workers and calls `tryLock()` on each: a busy worker holds its own lock, the `tryLock` fails, and it's left alone. the lock is deliberately *not* reentrant, as the source explains, so a task that calls back into pool control methods like `setCorePoolSize` can't reacquire it from inside.
+
+`getTask()` is where threads die. if there are more workers than `corePoolSize` (or `allowCoreThreadTimeOut` is on), the worker waits with `poll(keepAliveTime)` instead of `take()`. a `null` from that poll means "timed out", `getTask` decrements the count in `ctl`, returns `null`, and the thread ends. there's no "core thread" flag on a worker: whichever idle worker times out first goes.
+
+<Gotcha title="execute() and submit() lose exceptions differently">
+`execute(runnable)` lets an exception escape `runWorker`: the worker thread dies (the pool replaces it) and the uncaught exception handler prints the stack trace. `submit(runnable)` wraps your task in a `FutureTask`, which catches *everything* and parks it in the future. if nobody calls `get()`, the exception is gone without a trace. log inside the task, or call `get()`.
+</Gotcha>
+
+<Interview q="why does a ThreadPoolExecutor with core 2, max 10 and a LinkedBlockingQueue never use more than 2 threads?">
+`execute` tries three things in order: start a thread if below `corePoolSize`, otherwise `offer` the task to the queue, and only if the queue refuses, start a thread up to `maximumPoolSize`. an unbounded queue never refuses, so step three never runs. bonus: the state and the worker count live in one `AtomicInteger` (`ctl`, 3 bits of run state, 29 bits of count), so `addWorker` can check "still running and under the limit" and increment in one CAS. workers are AQS-based non-reentrant locks so `shutdown()` can `tryLock` to find and interrupt only idle workers.
+</Interview>
+
+<Keylines>
+- `ctl` packs the run state (top 3 bits) and the worker count (low 29) into one `AtomicInteger`, so one CAS updates both.
+- RUNNING is the only negative state. states only move forward: RUNNING → SHUTDOWN/STOP → TIDYING → TERMINATED.
+- `execute`: below core, start a thread. else queue. else grow toward max. else reject.
+- an unbounded queue means max is never reached. bound your queues.
+- a Worker is a thread plus a non-reentrant AQS lock that marks it busy, so shutdown only interrupts idle ones.
+- surplus workers die by timing out in `getTask()`. any worker can be the one that goes.
+</Keylines>

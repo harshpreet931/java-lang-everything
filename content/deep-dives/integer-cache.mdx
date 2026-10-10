@@ -1,0 +1,196 @@
+import { CacheRange } from "@/components/figures/deep-dives/CacheRange";
+
+export const boxes = {
+  file: "Main.java",
+  source: `void main() {
+    Integer a = 127;
+    Integer b = 127;
+    Integer c = 128;
+    Integer d = 128;
+    IO.println(a == b);
+    IO.println(c == d);
+    IO.println(c.equals(d));
+}`,
+  steps: [
+    { line: 2, frames: [{ name: "main", locals: {} }], heap: {}, note: "four boxed ints coming up. each line compiles to Integer.valueOf(...)." },
+    {
+      line: 3,
+      frames: [{ name: "main", locals: { a: { ref: "o2" } } }],
+      heap: { o2: { type: "Integer", value: "127", tag: "IntegerCache" } },
+      note: "valueOf(127) is in range, so it returns the pre-made Integer from the cache. nothing was allocated.",
+    },
+    {
+      line: 4,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" } } }],
+      heap: { o2: { type: "Integer", value: "127", tag: "IntegerCache" } },
+      note: "valueOf(127) again: the same cached object. a and b are one arrow.",
+    },
+    {
+      line: 5,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" } } }],
+      heap: { o2: { type: "Integer", value: "127", tag: "IntegerCache" }, o3: { type: "Integer", value: "128", state: "new" } },
+      note: "128 is one past the cache. valueOf falls through to new Integer(128).",
+    },
+    {
+      line: 6,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o4" } } }],
+      heap: {
+        o2: { type: "Integer", value: "127", tag: "IntegerCache" },
+        o3: { type: "Integer", value: "128" },
+        o4: { type: "Integer", value: "128", state: "new" },
+      },
+      note: "and again: a second, separate Integer holding 128.",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o4" } } }],
+      heap: { o2: { type: "Integer", value: "127", tag: "IntegerCache" }, o3: { type: "Integer", value: "128" }, o4: { type: "Integer", value: "128" } },
+      stdout: "true\n",
+      note: "a == b compares arrows. same object: true.",
+    },
+    {
+      line: 8,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o4" } } }],
+      heap: { o2: { type: "Integer", value: "127", tag: "IntegerCache" }, o3: { type: "Integer", value: "128" }, o4: { type: "Integer", value: "128" } },
+      stdout: "true\nfalse\n",
+      note: "c == d: equal values, different objects. false.",
+    },
+    {
+      line: 9,
+      frames: [{ name: "main", locals: { a: { ref: "o2" }, b: { ref: "o2" }, c: { ref: "o3" }, d: { ref: "o4" } } }],
+      heap: { o2: { type: "Integer", value: "127", tag: "IntegerCache" }, o3: { type: "Integer", value: "128" }, o4: { type: "Integer", value: "128" } },
+      stdout: "true\nfalse\ntrue\n",
+      note: "equals compares the ints inside. true, for every value, cached or not.",
+    },
+  ],
+};
+
+<InShort>
+autoboxing an `int` calls **`Integer.valueOf`**, and `valueOf` hands out pre-made objects for **-128 to 127** from a static array (`IntegerCache`). inside that range two boxes of the same value are the same object, so `==` "works". outside it you get a new object each time and `==` is false. the upper end can be raised with **`-XX:AutoBoxCacheMax`**; nothing else about it is configurable.
+</InShort>
+
+## the picture
+
+the [wrappers chapter](/learn/core-api/wrappers-and-boxing) shows the symptom: `127 == 127` but `128 != 128`. this one opens `Integer.java` and looks at the array that causes it.
+
+think of a coffee shop with a shelf of pre-filled cups for the 256 most common orders. ask for one of those and you get *the* cup off the shelf, the same physical cup everyone else who ordered it is holding (it's immutable, so sharing is fine). ask for anything else and they make you a fresh one. two fresh cups of the same order are still two cups.
+
+<Figure wide caption={<>a real run, traced on jdk 25. <code>a</code> and <code>b</code> share one <C k="meta">cached</C> Integer; <code>c</code> and <code>d</code> each get their own. the values are equal in both cases. the objects aren&apos;t.</>}>
+<MemoryStepper trace={boxes} />
+</Figure>
+
+## valueOf, from the source
+
+`Integer a = 127` isn't magic. javac rewrites boxing and unboxing into plain method calls:
+
+```bash
+$ javap -c Box     # Integer a = 127; int x = a;
+   0: bipush        127
+   2: invokestatic  #7    // Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;
+   5: astore_0
+   6: aload_0
+   7: invokevirtual #13   // Method java/lang/Integer.intValue:()I
+```
+
+and `valueOf` in jdk 25 is four lines. in range? return the pre-made object at index `i + 128` of the cache array. out of range? `new Integer(i)`. the cache is a nested class with a static initializer, so it's built the first time anything touches it (and on jdk 25 its objects can even come pre-made from the [CDS archive](/learn/jvm/aot-and-leyden), which is why the source has an `archivedCache` field).
+
+<Figure caption={<>drag the value or tap a preset, then raise the cache with the flag. inside the <C k="meta">cache</C>, <code>a == b</code> is <C k="live">true</C> because both are the same object. one step outside it&apos;s <C k="dead">false</C>, and <code>equals</code> doesn&apos;t care either way.</>}>
+<CacheRange />
+</Figure>
+
+<Predict options={["true then true", "true then false", "false then false"]} answer={1}>
+```java
+var votes = new HashMap<String, Integer>();
+for (int i = 0; i < 100; i++) { votes.merge("ada", 1, Integer::sum); votes.merge("bob", 1, Integer::sum); }
+IO.println(votes.get("ada") == votes.get("bob"));
+for (int i = 0; i < 100; i++) { votes.merge("ada", 1, Integer::sum); votes.merge("bob", 1, Integer::sum); }
+IO.println(votes.get("ada") == votes.get("bob"));
+```
+<Explain>
+a map can only hold objects, so every count is a boxed `Integer`. at 100 votes each, both counts are the cached `Integer` for 100: `true`. at 200 votes each, `Integer::sum` boxes 200 twice and gets two different objects: `false`. this exact bug ships to production all the time, because every test with small numbers passes. compare with `equals`, or unbox first (`int a = votes.get("ada")`).
+</Explain>
+</Predict>
+
+## why -128 to 127
+
+not a JDK whim. the language spec (JLS §5.1.7, boxing conversion) *requires* boxing to give back the identical object for small values: `true` and `false`, a `char` up to `\u007f`, and whole numbers from -128 to 127. the source even says so in a comment right after building the array. so the JDK can make the cache bigger, but never smaller, and the lower bound is fixed at -128.
+
+here's every wrapper in jdk 25, read from its `valueOf`:
+
+| type | cached range | configurable? |
+| --- | --- | --- |
+| `Integer` | -128 to 127 | the upper bound only: `-XX:AutoBoxCacheMax=N` |
+| `Short` | -128 to 127 | no |
+| `Byte` | all 256 values | no (there's nothing left to cache) |
+| `Long` | -128 to 127 | no. `128L == 128L` is false even with the flag |
+| `Character` | `\u0000` to `\u007f` (0 to 127) | no |
+| `Boolean` | both: `TRUE` and `FALSE` | no |
+| `Float`, `Double` | **nothing**. `valueOf` is just `new` | no |
+
+```java run output="Integer 127: true, 128: false\nLong 127: true, 128: false\nCharacter 127: true, 128: false\nDouble 1.0: false"
+void main() {
+    Integer a = 127, b = 127, c = 128, d = 128;
+    IO.println("Integer 127: " + (a == b) + ", 128: " + (c == d));
+    Long l1 = 127L, l2 = 127L, l3 = 128L, l4 = 128L;
+    IO.println("Long 127: " + (l1 == l2) + ", 128: " + (l3 == l4));
+    Character c1 = 127, c2 = 127, c3 = 128, c4 = 128;
+    IO.println("Character 127: " + (c1 == c2) + ", 128: " + (c3 == c4));
+    Double d1 = 1.0, d2 = 1.0;
+    IO.println("Double 1.0: " + (d1 == d2));
+}
+```
+
+## making it bigger
+
+two spellings, same effect, and they only move the top:
+
+```bash
+$ java -XX:AutoBoxCacheMax=1000 Cache
+Integer 127: true, 128: true, 1000: true
+Long 127: true, 128: false
+
+$ java -Djava.lang.Integer.IntegerCache.high=1000 Cache
+Integer 127: true, 128: true, 1000: true
+
+$ java -XX:AutoBoxCacheMax=50 Cache        # below 127 is ignored
+Integer 127: true, 128: false, 1000: false
+```
+
+`-XX:AutoBoxCacheMax` is listed as a C2 flag (its default prints as `128` in `-XX:+PrintFlagsFinal`), but all it really does is pass the system property to `IntegerCache`, so it worked the same with `-Xint` and with C1 only. when it isn't set, the property isn't set either, and the cache stops at 127.
+
+should you? rarely. it costs one 16-byte `Integer` per value (plus a slot in the array) on the heap for the life of the JVM, and it only helps code that boxes the same small-ish numbers over and over. if a profile shows millions of short-lived `Integer`s, the better fix is usually not boxing at all: `int[]` instead of `List<Integer>`, [primitive streams](/learn/functional/primitive-streams), or a primitive collection library.
+
+## the traps that aren't ==
+
+<Gotcha title="unboxing null">
+unboxing is a method call (`intValue()`), so unboxing `null` throws. the sneaky version is a ternary: if one branch is an `int`, the whole expression is an `int`, so the `Integer` branch gets unboxed even though you assign the result back to an `Integer`.
+
+```java run output="looking up...\nException in thread \"main\" java.lang.NullPointerException: Cannot invoke \"java.lang.Integer.intValue()\" because the return value of \"java.util.HashMap.get(Object)\" is null"
+void main() {
+    var stock = new HashMap<String, Integer>();
+    boolean known = true;
+    IO.println("looking up...");
+    Integer n = known ? stock.get("apples") : 0;
+    IO.println(n);
+}
+```
+
+the fix is to make both branches the same box type (`Integer.valueOf(0)`), or use `getOrDefault`.
+</Gotcha>
+
+- **`==` between an `Integer` and an `int` unboxes.** `Integer x = 1000; x == 1000` is a numeric comparison and is `true`. it's only `Integer == Integer` that compares objects.
+- **`new Integer(...)` is deprecated** (since java 9). it always allocates and skips the cache. `Integer.valueOf` or plain autoboxing is the same code, minus the waste.
+- **the JIT can remove boxes entirely.** `valueOf` is an intrinsic, and C2's `EliminateAutoBox` plus escape analysis can delete a box that never escapes. so "boxing is slow" is sometimes true and sometimes compiled away; measure it, don't assume it.
+- **identity might stop mattering.** project Valhalla plans to turn the wrapper classes into value classes, where `==` compares values. that's future work, see [valhalla](/learn/future/valhalla). on jdk 25, identity is very much real.
+
+<Interview q="why does Integer a = 127, b = 127; a == b print true, but 128 prints false?">
+autoboxing compiles to `Integer.valueOf`, which returns cached instances for -128 to 127 from `IntegerCache` and creates new objects outside that range. `==` on two `Integer`s compares references, so it's true only when both came from the cache. the range isn't arbitrary: JLS 5.1.7 requires boxing of small values to be identity-preserving. you can raise the upper bound with `-XX:AutoBoxCacheMax` (or the `java.lang.Integer.IntegerCache.high` property), but not the lower one. `Short`, `Long` and `Character` have fixed caches, `Byte` and `Boolean` are fully cached, `Float` and `Double` have none. the real answer: never compare boxed numbers with `==`.
+</Interview>
+
+<Keylines>
+- autoboxing is `Integer.valueOf`, unboxing is `intValue()`. javac writes the calls for you.
+- `valueOf` returns cached objects for -128..127, new ones everywhere else.
+- the range comes from the JLS. you can raise the top with `-XX:AutoBoxCacheMax`, never lower anything.
+- `Long`, `Short` and `Character` cache small values too; `Float` and `Double` never do.
+- `Integer == Integer` compares objects. use `equals`, or unbox.
+</Keylines>

@@ -1,0 +1,105 @@
+import { CollectionPicker } from "@/components/figures/collections/CollectionPicker";
+
+<InShort>
+start with the defaults: **`ArrayList`**, **`HashMap`**, **`HashSet`**, **`ArrayDeque`**. switch only when a question demands it: need order? `LinkedHashMap` / `TreeMap`. need the minimum? `PriorityQueue`. enum keys? `EnumMap` / `EnumSet`. shared between threads? the concurrent versions.
+
+and almost never `LinkedList`, `Vector`, `Stack` or `Hashtable`.
+</InShort>
+
+## the picture
+
+you know how there's always a coworker who reaches for a `TreeMap` "because it's sorted" when nothing ever reads it in order? the collection you pick is a claim about how the data is used. pick by the questions you'll ask of it, not by the name that sounds most capable.
+
+<Figure wide caption={<>answer the questions the way your code actually uses the data. the <C k="live">recommendation</C> links to the chapter that explains it. click an earlier answer to go back.</>}>
+<CollectionPicker />
+</Figure>
+
+the questions, in the order that matters:
+
+1. **values or key → value pairs?** that's `Collection` vs `Map`.
+2. **will threads modify it concurrently?** if yes, everything below has a different answer (see [concurrent collections](/learn/concurrency/concurrent-collections)). wrapping in `Collections.synchronizedX` works for simple cases, but compound actions still need your own locking.
+3. **duplicates?** no → a `Set`.
+4. **what order do you need back?** none → hash. insertion → linked hash. sorted or ranges → tree. by priority → heap.
+5. **how do you take things out?** by index → `ArrayList`. from the ends → `ArrayDeque`.
+6. **does it change after you build it?** no → `List.copyOf` / `Set.copyOf` / `Map.copyOf`, and stop worrying about who modifies it.
+
+## the cheat sheet
+
+| collection | get / lookup | add | remove | ordered by | inside |
+| --- | --- | --- | --- | --- | --- |
+| `ArrayList` | `get(i)` O(1) | end: O(1)*, middle: O(n) | end: O(1), middle: O(n) | index | `Object[]` |
+| `LinkedList` | `get(i)` O(n) | ends: O(1) | ends: O(1) | index | nodes |
+| `ArrayDeque` | ends only, O(1) | ends: O(1)* | ends: O(1) | insertion | circular `Object[]` |
+| `PriorityQueue` | `peek` O(1) | O(log n) | `poll` O(log n) | priority (only the head) | heap in `Object[]` |
+| `HashMap` / `HashSet` | O(1) avg | O(1) avg* | O(1) avg | nothing | buckets |
+| `LinkedHashMap` / `LinkedHashSet` | O(1) avg | O(1) avg* | O(1) avg | insertion (or access) | buckets + list |
+| `TreeMap` / `TreeSet` | O(log n) | O(log n) | O(log n) | sorted | red-black tree |
+| `EnumMap` / `EnumSet` | O(1) | O(1) | O(1) | declaration | array / bits |
+
+<span className="text-12 text-mute">* amortized: the occasional resize copies everything. `contains(x)` on any list is O(n).</span>
+
+big-O hides constants, and the constants are mostly about memory: a flat array of references beats a web of node objects, because the CPU can prefetch an array and can't predict pointers. that's why `ArrayList` and `ArrayDeque` win so often even where the big-O ties.
+
+## what the big-O looks like in nanoseconds
+
+rough numbers, same setup as the [deque chapter](/learn/collections/linkedlist-and-arraydeque): jdk 25.0.4 (temurin), apple M4 Pro, default G1 and heap, 100,000 `Integer`s, `System.nanoTime` around whole loops after warmup rounds, median of 7, three runs agreeing within about 20%. **not** a JMH benchmark: treat these as orders of magnitude, not as the speed of your code.
+
+<Figure caption={<>log scale. the first group is "is x in here?" over 100,000 elements: a list scans, a hash set jumps, a tree set walks ~17 levels. the second is <code>get(key)</code> on 100,000 entries.</>}>
+<div className="grid gap-8">
+<div>
+<div className="mb-3 text-12 text-faint">contains(x), 100,000 elements</div>
+<Bars unit="ns/op" log data={[
+  { label: "ArrayList", value: 15300, tone: "dead" },
+  { label: "TreeSet", value: 98 },
+  { label: "HashSet", value: 37, tone: "live" },
+]} />
+</div>
+<div>
+<div className="mb-3 text-12 text-faint">get(key), 100,000 entries</div>
+<Bars unit="ns/op" log data={[
+  { label: "TreeMap", value: 164 },
+  { label: "HashMap", value: 33, tone: "live" },
+]} />
+</div>
+</div>
+</Figure>
+
+the gap that matters is the 400x between scanning and hashing, not the 3 to 5x between hashing and a tree. if you call `list.contains` inside a loop, that's the bug. if you're choosing between `HashMap` and `TreeMap`, choose by whether you need the order.
+
+<Quiz question="you need to look users up by id, and also list them in the order they signed up. which one?" options={["HashMap", "TreeMap", "LinkedHashMap", "ArrayList"]} answer={2}>
+<Explain>
+lookup by key says map. "in the order they signed up" is insertion order, which a `HashMap` doesn't keep and a `TreeMap` would replace with sorted-by-id. `LinkedHashMap` gives you O(1) lookups and insertion-order iteration. (if "signed up" order were the same as id order, a `TreeMap` would also work, at O(log n) per lookup.)
+</Explain>
+</Quiz>
+
+<Quiz question="a job scheduler keeps adding tasks and always runs the most urgent one next. which one?" options={["TreeSet", "PriorityQueue", "ArrayDeque", "sorted ArrayList"]} answer={1}>
+<Explain>
+"always the most urgent next" is exactly what a heap does: O(log n) to add, O(log n) to take the best, and it never wastes time keeping the rest sorted. a `TreeSet` also works but drops tasks whose priorities compare equal (a set!), and a sorted `ArrayList` pays O(n) per insert. if several threads add and take, use `PriorityBlockingQueue`.
+</Explain>
+</Quiz>
+
+## the ones to skip
+
+| skip | why | use |
+| --- | --- | --- |
+| `LinkedList` | 24 bytes per element, O(n) indexing, cache-hostile | `ArrayList` or `ArrayDeque` |
+| `Vector`, `Stack` | every method synchronized, legacy since java 1.2 | `ArrayList`, `ArrayDeque` |
+| `Hashtable` | same story, and no `null`s | `HashMap` or `ConcurrentHashMap` |
+| `Collections.synchronizedList(...)` for heavy concurrency | one lock for everything | the `java.util.concurrent` classes |
+
+<Gotcha title="the right collection, used wrong">
+the most common performance bug isn't picking the wrong class. it's an O(n) call hiding in a loop: `list.contains` (use a `HashSet` alongside), `list.remove(0)` (use an `ArrayDeque`), `linkedList.get(i)` (iterate), or `map.containsValue` (keep a reverse map). when something is slow, look for a linear operation inside a loop before you swap classes.
+</Gotcha>
+
+<Interview q="which collection would you use, and why?">
+the answer that lands names the access pattern first, then the class, then the cost: "we look up by key and iterate in insertion order, so `LinkedHashMap`: O(1) average lookups, predictable iteration, about 8 extra bytes per entry over `HashMap`." and know the defaults cold: `ArrayList` for lists, `HashMap` / `HashSet` for lookup, `ArrayDeque` for stacks and queues, `PriorityQueue` for "next best", `TreeMap` when you need sorted keys or ranges, the concurrent classes when threads share it.
+</Interview>
+
+<Keylines>
+- defaults: `ArrayList`, `HashMap`, `HashSet`, `ArrayDeque`.
+- need order? linked for insertion, tree for sorted, heap for "next best".
+- enum keys or elements: `EnumMap`, `EnumSet`.
+- threads modifying it: the `java.util.concurrent` versions.
+- an O(n) call inside a loop beats any class choice for slowness. find it first.
+- built once, never changed: `List.copyOf` and friends.
+</Keylines>

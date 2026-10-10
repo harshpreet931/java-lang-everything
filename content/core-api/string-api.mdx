@@ -1,0 +1,205 @@
+import { BuilderGrowth } from "@/components/figures/core-api/BuilderGrowth";
+import { CompactStrings } from "@/components/figures/core-api/CompactStrings";
+
+<InShort>
+a `String` never changes, so every "edit" builds a new one. when you build text piece by piece, use a **StringBuilder**: a `byte[]` that grows by roughly doubling. and since java 9 strings are **compact**: one byte per char whenever every char fits in latin-1.
+
+the rest is knowing about fifteen methods, and that `split` and `replaceAll` take a **regex**.
+</InShort>
+
+## the picture
+
+a `String` is a printed page. you can read it, copy bits of it, staple two pages together, but you can't edit it. every "change" prints a fresh page. (why they're immutable is in [strings, the basics](/learn/basics/strings-101).)
+
+a `StringBuilder` is a whiteboard. you write on it as much as you like. when it's full, you grab a bigger whiteboard, copy everything over, and keep going. when you're done, `toString()` prints the page.
+
+that difference is the whole performance story:
+
+<Compare>
+<Bad label="+= in a loop">
+```java
+String csv = "";
+for (String name : names) {
+    csv += name + ",";   // a brand new String, every time
+}
+```
+iteration *i* copies everything built so far. that's 1 + 2 + 3 + … + n copies: quadratic.
+</Bad>
+<Good label="one builder">
+```java
+var sb = new StringBuilder();
+for (String name : names) {
+    sb.append(name).append(',');
+}
+String csv = sb.toString();
+```
+appends write into spare room. a copy only happens when the buffer grows, and it grows by doubling.
+</Good>
+</Compare>
+
+<Figure caption={<>appending one <code>"x"</code> n times, best of 5 runs after warm-up. temurin 25 on an M4 Pro. at 100,000 appends, <C k="dead">+=</C> is about 1,000× slower than a <C k="live">StringBuilder</C>, and it gets worse with every extra zero.</>}>
+<Bars
+  unit="ms"
+  log
+  data={[
+    { label: "+= × 10,000", value: 1.8, tone: "dead" },
+    { label: "StringBuilder × 10,000", value: 0.16, tone: "live" },
+    { label: "+= × 100,000", value: 135, tone: "dead" },
+    { label: "StringBuilder × 100,000", value: 0.12, tone: "live" },
+  ]}
+/>
+</Figure>
+
+(yes, the builder got *faster* with more work. by the bigger run the JIT had compiled the loop. at that speed it's basically free either way.)
+
+## StringBuilder is a byte[] that grows
+
+inside, a `StringBuilder` is a `byte[]`, a count of how much of it is used, and a coder (more on that below). `capacity()` is the size of the array, `length()` is how much you've written. start empty and you get room for 16.
+
+<Figure caption={<>append and watch the buffer. <C k="hot">amber</C> is what the last append wrote. when it doesn't fit, a new array is allocated, everything is copied, and the old one becomes <C k="dead">garbage</C>. then try <code>'€'</code>: one char that doesn't fit in a byte, and every char now takes two.</>}>
+<BuilderGrowth />
+</Figure>
+
+the rule, straight from `AbstractStringBuilder` in jdk 25: the new capacity is `old * 2 + 2`, or exactly what you asked for if that's bigger. so 16 → 34 → 70 → 142 → 286. doubling means the total copying stays proportional to the final length (each byte gets copied about once on average), which is why appending is "amortized O(1)".
+
+if you know roughly how big the result will be, say so up front and skip the copies entirely:
+
+```java
+var sb = new StringBuilder(4096);   // one allocation, no growing
+```
+
+<Predict options={["5", "16", "21"]} answer={2}>
+```java
+var sb = new StringBuilder("hello");
+IO.println(sb.capacity());
+```
+<Explain>
+starting from a string gives you that string's length plus the usual 16 spare: 5 + 16 = 21. the builder assumes you're about to append more.
+</Explain>
+</Predict>
+
+the handful you'll actually use:
+
+```java title="Builder.java" run output="!olleh >>\n!ol\nababab--"
+void main() {
+    var sb = new StringBuilder("hello");
+    sb.insert(0, ">> ").append('!').reverse();   // every method returns the builder, so they chain
+    IO.println(sb);
+    sb.setLength(3);                             // truncate (or pad with \0 if longer)
+    IO.println(sb);
+    IO.println(new StringBuilder().repeat("ab", 3).repeat('-', 2));
+}
+```
+
+`repeat` on a builder is <Since v={21} />. there's also `deleteCharAt`, `replace(start, end, str)`, `charAt`/`setCharAt` and `indexOf`.
+
+<Gotcha title="StringBuffer is the old one">
+`StringBuffer` is the same thing with every method `synchronized`. it's from java 1.0, back when someone thought you'd share a half-built string between threads. you won't. use `StringBuilder`, and if you ever do need text built by several threads, build per thread and join at the end.
+</Gotcha>
+
+## what a String actually stores
+
+before java 9, a `String` was a `char[]`: two bytes per character, always. but most strings in most programs are ascii (keys, ids, json, log lines), so half of every string was zeros. [JEP 254](https://openjdk.org/jeps/254) changed the inside to a `byte[]` plus a one-byte **coder**: `LATIN1` (one byte per char) when every char is ≤ `0xFF`, `UTF16` (two bytes per char) otherwise.
+
+<Figure caption={<>pick a string or type one. these are the real bytes inside <code>value</code>, read with reflection on jdk 25. <C k="hot">amber</C> chars don't fit in one byte, and one of them is enough to make the whole string pay double. the emoji is two chars (a surrogate pair), so its <code>length()</code> counts it twice.</>}>
+<CompactStrings />
+</Figure>
+
+you never see the coder from the outside. `charAt`, `length` and friends behave exactly the same. it's just memory, and it's a lot of memory: strings are often the biggest thing on a heap.
+
+<Gotcha title="length() counts chars, not characters">
+a java `char` is a UTF-16 code unit, and anything outside the basic multilingual plane (emoji, some CJK, math symbols) takes two of them. so `"hi😀".length()` is 4, and `substring` can cut an emoji in half. when you mean "characters a human would count", use `codePoints()` or `codePointCount(0, s.length())`, which says 3.
+</Gotcha>
+
+## the methods worth knowing
+
+`String` has about 70 public methods. these are the ones that pull their weight, plus the java 11+ ones people don't know exist yet:
+
+| method | since | what it does |
+| --- | --- | --- |
+| `isBlank()` | 11 | true for `""` and whitespace-only. `isEmpty()` only checks `""` |
+| `strip()`, `stripLeading()`, `stripTrailing()` | 11 | trim, but unicode-aware |
+| `repeat(n)` | 11 | `"ab".repeat(3)` → `"ababab"` |
+| `lines()` | 11 | a `Stream<String>`, splitting on `\n`, `\r` or `\r\n` |
+| `formatted(args...)` | 15 | `"%d items".formatted(n)`, same as `String.format` |
+| `indent(n)`, `stripIndent()` | 12, 15 | add/remove leading spaces on every line |
+| `transform(f)` | 12 | `s.transform(f)` is `f.apply(s)`, for chaining |
+| `chars()`, `codePoints()` | 9 on `String` | an `IntStream` of chars / of real code points |
+| `indexOf(ch, from, to)` | 21 | search inside a range without `substring` |
+| `splitWithDelimiters(regex, limit)` | 21 | split, but keep the delimiters in the result |
+| `String.join(sep, parts...)` | 8 | `join("/", "usr", "bin")` → `"usr/bin"` |
+| `contains`, `startsWith`, `endsWith`, `indexOf` | old | plain text, no regex |
+| `replace(a, b)` | old | plain text, replaces every match |
+| `split`, `replaceAll`, `replaceFirst`, `matches` | old | **regex**. see below |
+
+```java title="Main.java" run output="[hi]\ntrue false\nababab\n3\nx is 42\nusr/local/bin\n4 3\n2"
+void main() {
+    String s = "　 hi 　";             // 　 is the ideographic space
+    IO.println("[" + s.strip() + "]");         // trim() would leave the 　 alone
+    IO.println("  ".isBlank() + " " + "  ".isEmpty());
+    IO.println("ab".repeat(3));
+    IO.println("a\nb\r\nc".lines().count());
+    IO.println("%s is %d".formatted("x", 42));
+    IO.println(String.join("/", "usr", "local", "bin"));
+    IO.println("hi😀".length() + " " + "hi😀".codePointCount(0, 4));
+    IO.println("hello".chars().filter(c -> c == 'l').count());
+}
+```
+
+`trim()` is from java 1.0 and removes everything `<= ' '` (space and the ascii control chars). `strip()` asks `Character.isWhitespace`, so it also knows about the dozen-odd unicode spaces. new code: `strip`.
+
+<Predict options={["3", "1", "0"]} answer={2}>
+```java
+IO.println("a.b.c".split(".").length);
+```
+<Explain>
+`split` takes a regex, and `.` in a regex means "any character". every char is a delimiter, so you get a row of empty strings, and `split` drops trailing empty strings. all of them are trailing. result: an empty array.
+
+write `split("\\.")` or `split(Pattern.quote("."))`. same trap with `replaceAll(".", "-")`, which gives `"-----"`. if you don't want regex, `replace` does plain text and still replaces every match.
+</Explain>
+</Predict>
+
+## formatting
+
+`String.format`, `"...".formatted(...)` and `printf` all use the same little language from `java.util.Formatter`:
+
+| spec | gives | for |
+| --- | --- | --- |
+| `%s` | `toString()` | anything |
+| `%d` | `42` | integers |
+| `%,d` | `1,234,567` | grouping (locale decides the separator) |
+| `%05d` | `00042` | zero-padded to width 5 |
+| `%.2f` | `3.14` | 2 decimals, rounded half-up |
+| `%-6s\|` | `ab    \|` | left-aligned in a 6-wide column |
+| `%x`, `%08X` | `ff`, `000000FF` | hex |
+| `%n` | the OS line separator | use it in `printf` instead of `\n` |
+| `%%` | `%` | a literal percent |
+
+```java title="Fmt.java" run output="1,234,567|ab    |  3.14|00042|ff"
+import java.util.Locale;
+
+void main() {
+    IO.println(String.format(Locale.ROOT, "%,d|%-6s|%6.2f|%05d|%x", 1234567, "ab", Math.PI, 42, 255));
+}
+```
+
+<Gotcha title="format uses your machine's locale">
+`String.format("%.2f", 3.14159)` is `"3.14"` on a US laptop and `"3,14"` on a server in germany. same for `%,d`, and `"TITLE".toLowerCase()` turns into `"tıtle"` (dotless i) in a turkish locale. anything a machine will parse again (json, csv, file names, protocol headers) should pass `Locale.ROOT` explicitly. anything a human reads can use the default.
+</Gotcha>
+
+<Deep title="what javac does with a + b + c">
+a single expression like `"id=" + id + ", name=" + name` doesn't build a `StringBuilder` anymore. since java 9 ([JEP 280](https://openjdk.org/jeps/280)), javac emits one `invokedynamic` instruction, and at first call the JVM's `StringConcatFactory` spins up a strategy that measures every part, allocates one exactly-sized `byte[]`, and fills it. so `+` in one expression is as fast as anything you'd write by hand. it only goes wrong across statements, like `+=` in a loop, where each statement is its own concatenation producing its own new string. the full story is in [string concatenation](/learn/deep-dives/string-concatenation).
+</Deep>
+
+<Interview q="String vs StringBuilder vs StringBuffer?">
+`String` is immutable, so it's safe to share and cache (and its hash is computed once). `StringBuilder` is a mutable, growable buffer for building text, not thread-safe. `StringBuffer` is the java 1.0 version of the same thing with synchronized methods: slower and almost never what you need. bonus points: `+` in a single expression compiles to `invokedynamic` and is already optimal, so you only reach for a builder when you build across statements or in a loop.
+</Interview>
+
+<Keylines>
+- strings are immutable. every "change" is a new string.
+- building in a loop? one `StringBuilder`. it grows as `old * 2 + 2`, so appends are amortized O(1).
+- strings store one byte per char when they can (latin-1), two when they can't. one emoji flips the whole string.
+- `length()` counts UTF-16 chars, not what a human calls characters.
+- `split`, `replaceAll` and `matches` take a regex. `replace` doesn't.
+- format for machines with `Locale.ROOT`.
+</Keylines>

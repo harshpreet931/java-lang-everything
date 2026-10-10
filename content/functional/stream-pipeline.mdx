@@ -1,0 +1,143 @@
+import { MarblePipeline } from "@/components/figures/functional/MarblePipeline";
+
+<InShort>
+a stream is a pipeline: a **source**, some **intermediate operations** (`filter`, `map`...) and exactly one **terminal operation** (`toList`, `count`, `forEach`...).
+
+intermediate operations are **lazy**: they only record what to do. the terminal operation pulls elements through **one at a time**, and each element goes as far down the pipeline as it can before the next one is even looked at.
+</InShort>
+
+## the picture
+
+you know how `list.stream().filter(...).map(...)` looks like it loops over the list twice, once to filter and once to map? it doesn't. it loops once, and it might not even finish the loop.
+
+think of a cook working a ticket rail. each order goes all the way from chopping to the plate before the next ticket is read. nobody chops onions for all fifty orders up front, and if the restaurant only needs two plates, the other forty-eight tickets are never touched.
+
+<Figure caption="hover a stage. the three parts of every stream. there's always exactly one source and one terminal operation, and any number of intermediate operations in between.">
+<Flow
+  stages={[
+    { label: "source", sub: "list.stream(), Stream.of, IntStream.range", note: "where elements come from. a collection, an array, a generator, a file's lines. nothing is copied." },
+    { label: "intermediate ops", sub: "filter, map, sorted, limit", note: "each one returns a new Stream and does no work. it just adds a stage to the pipeline." },
+    { label: "terminal op", sub: "toList, count, forEach, reduce", note: "the trigger. it builds the chain, pulls elements through it, and produces a result. after it runs, the stream is used up." },
+  ]}
+/>
+</Figure>
+
+## one element at a time
+
+this is the whole chapter. press play and follow one marble.
+
+<Figure wide caption={<>switch the <em>model</em> to see the picture most people have in their head, and why it's wrong. switch the <em>terminal</em> to <code>none</code> to see what happens without one (nothing). the <C k="hot">amber</C> marble is the one being worked on, <C k="dead">red</C> ones were dropped, <C k="live">green</C> ones made it into the list.</>}>
+<MarblePipeline />
+</Figure>
+
+see? the pipeline is vertical, not horizontal. element 2 is filtered, mapped, counted by `limit` and stored in the list before element 3 leaves the source. and because `limit(2)` is satisfied after element 4, elements 5 through 8 never exist as far as the pipeline is concerned.
+
+here's the real program the figure is drawn from, with print statements inside the lambdas so you can see the order:
+
+```java title="Main.java" run output="filter 1\nfilter 2\nmap    2\nfilter 3\nfilter 4\nmap    4\n[20, 40]"
+import java.util.stream.*;
+
+void main() {
+    var result = Stream.of(1, 2, 3, 4, 5, 6, 7, 8)
+            .filter(n -> { IO.println("filter " + n); return n % 2 == 0; })
+            .map(n -> { IO.println("map    " + n); return n * 10; })
+            .limit(2)
+            .toList();
+    IO.println(result);
+}
+```
+
+<Predict options={["done", "ADA BOB CY done", "compile error"]} answer={0}>
+```java
+List<String> names = List.of("ada", "bob", "cy");
+names.stream().map(s -> { IO.print(s.toUpperCase() + " "); return s; });
+IO.println("done");
+```
+<Explain>
+no terminal operation, so `map` only recorded a stage and the lambda never ran. it compiles fine (javac doesn't warn either). a stream without a terminal operation is a recipe nobody cooks.
+</Explain>
+</Predict>
+
+## laziness, proven
+
+the stages are built when you call `filter` and `map`. the lambdas only run when the terminal operation starts pulling:
+
+```java title="Main.java" run output="pipeline built\nfilter 1\nmap 1\nfilter 2\nmap 2\nfilter 3\nmap 3\n[10, 20, 30]"
+import java.util.stream.*;
+
+void main() {
+    Stream<Integer> s = Stream.of(1, 2, 3)
+            .filter(n -> { IO.println("filter " + n); return true; })
+            .map(n -> { IO.println("map " + n); return n * 10; });
+    IO.println("pipeline built");
+    IO.println(s.toList());
+}
+```
+
+laziness isn't just a performance trick. it's what makes infinite sources usable. `Stream.iterate(1, n -> n * 2)` never ends, and this still finishes instantly, because `findFirst` stops pulling as soon as it has an answer:
+
+```java title="Main.java" run output="128"
+import java.util.stream.*;
+
+void main() {
+    int first = Stream.iterate(1, n -> n * 2)
+            .filter(n -> n > 100)
+            .findFirst()
+            .orElseThrow();
+    IO.println(first);
+}
+```
+
+operations that can finish without seeing every element are called **short-circuiting**: `limit`, `takeWhile`, `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`. put one of those in front of an infinite source and you're fine. put `sorted()` or `count()` there instead and it runs forever.
+
+## what's actually in memory
+
+each intermediate operation returns a brand new stage object that points back at the one before it. here's the pipeline from the figure, after `.limit(2)` and before `.toList()`, with the real class names from jdk 25:
+
+<Figure caption={<>four stage objects, chained by <C k="ref">previousStage</C>. the class names are the JDK's anonymous classes (<code>$2</code> is filter's stage, <code>$3</code> is map's). no element has moved yet: this is just a linked list of instructions.</>}>
+<Memory
+  frames={[{ name: "main", locals: { a: { ref: "h" }, b: { ref: "f" }, c: { ref: "m" }, d: { ref: "l" } } }]}
+  heap={{
+    h: { type: "ReferencePipeline$Head", fields: { previousStage: null, depth: 0, linkedOrConsumed: true } },
+    f: { type: "ReferencePipeline$2", fields: { previousStage: { ref: "h" }, depth: 1, linkedOrConsumed: true }, tag: "filter" },
+    m: { type: "ReferencePipeline$3", fields: { previousStage: { ref: "f" }, depth: 2, linkedOrConsumed: true }, tag: "map" },
+    l: { type: "SliceOps$1", fields: { previousStage: { ref: "m" }, depth: 3, linkedOrConsumed: false }, tag: "limit" },
+  }}
+/>
+</Figure>
+
+when `toList()` runs on `d`, it walks that chain backwards and wraps one **sink** inside another: the list's sink, inside limit's, inside map's, inside filter's. then it feeds the source's elements into the outermost sink, one by one. filter's sink calls map's sink only if the predicate passed, map's sink calls limit's, and so on. that nesting is why each element goes all the way down before the next one starts. limit stops the whole thing by answering "yes" when the source asks `cancellationRequested()`.
+
+<Gotcha title="a stream can only be used once">
+look at `linkedOrConsumed` in the figure. once a stage has something chained after it, or a terminal operation has run on it, it's spent. touch it again and you get an exception, not a second pass:
+
+```java title="Main.java" run output="[1, 2, 3]\nException in thread \"main\" java.lang.IllegalStateException: stream has already been operated upon or closed"
+import java.util.stream.*;
+
+void main() {
+    Stream<Integer> s = Stream.of(1, 2, 3);
+    IO.println(s.toList());
+    IO.println(s.count());
+}
+```
+
+if you need to go over the data twice, keep the collection and call `.stream()` twice, or pass around a `Supplier<Stream<T>>`.
+</Gotcha>
+
+<Deep title="stream flags, and the work the JDK skips">
+every stage carries flags: `SIZED` (the count is known up front), `ORDERED`, `DISTINCT`, `SORTED`, `SHORT_CIRCUIT`. operations read them and skip work they can prove is pointless. a natural-order `sorted()` on a stream already flagged `SORTED` (say, from a `TreeSet`) does nothing. `distinct()` on a `DISTINCT` stream does nothing.
+
+the surprising one: `count()` on a `SIZED` stream doesn't run the pipeline at all if nothing in it can change the size. on jdk 25, `Stream.of(1, 2, 3).map(x -> { IO.println("map " + x); return x; }).count()` prints nothing and returns 3. put a `filter` in front and suddenly every element goes through, because now the size isn't known. this has been the case since java 9, and it's the reason the `peek` docs warn you not to rely on it for side effects. more in [stream operations](/learn/functional/stream-operations).
+</Deep>
+
+<Interview q="what does it mean that streams are lazy?">
+intermediate operations like `filter` and `map` don't process anything when you call them, they just add a stage to the pipeline and return a new stream. the work happens when a terminal operation runs, and then elements flow through the stages one at a time, depth-first, rather than stage by stage. bonus points: that's what lets short-circuiting operations like `limit` and `findFirst` stop early, which makes infinite streams usable, and it's why a stream without a terminal operation silently does nothing.
+</Interview>
+
+<Keylines>
+- source → intermediate ops → one terminal op. no terminal op, no work.
+- intermediate ops only build stages. the terminal op pulls elements through them.
+- each element goes all the way down the pipeline before the next one starts.
+- short-circuiting ops (`limit`, `findFirst`, `anyMatch`...) stop pulling early. that's what makes infinite streams safe.
+- a stream is single-use. a second terminal op throws `IllegalStateException`.
+</Keylines>

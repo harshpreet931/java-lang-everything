@@ -1,0 +1,159 @@
+import { RuntimeShrink } from "@/components/figures/tooling/RuntimeShrink";
+
+<InShort>
+three steps from your code to someone else's machine. a **jar** is a zip of class files plus a manifest. **jlink** builds a custom runtime that contains only the JDK modules you use (a hello world needs 45 MB instead of 293). **jpackage** wraps that runtime and your app into a real installer: `.dmg`, `.msi`, `.deb`.
+
+each step removes one thing the user has to install themselves.
+</InShort>
+
+## the picture
+
+think of sending someone a meal. a jar is the recipe and the ingredients: useful only if they already own a kitchen (a JDK). jlink packs a tiny kitchen with only the pans this recipe needs. jpackage puts the kitchen and the ingredients in one box with a big "open me" label on it, in the shape their country's front door expects.
+
+<Figure caption="hover a stage. the left half is what developers ship to other developers. the right half is what you ship to people who have never heard of a JDK.">
+<Flow
+  stages={[
+    { label: "*.class", sub: "javac output", note: "one file per class. not something you hand to anyone." },
+    { label: "app.jar", sub: "jar", note: "a zip with META-INF/MANIFEST.MF. needs a JDK or JRE already installed on the machine." },
+    { label: "runtime/", sub: "jlink", note: "a folder with bin/java, the JVM, and only the modules you named. your app can ride along." },
+    { label: "App.dmg / .msi / .deb", sub: "jpackage", note: "a native installer with the runtime inside. the user double-clicks it, like any other app." },
+  ]}
+/>
+</Figure>
+
+## what's in a jar
+
+a jar is literally a zip file. `unzip -l` works on it. the only special part is `META-INF/MANIFEST.MF`, a text file the launcher reads.
+
+```bash
+$ jar --create --file hello.jar --main-class Hello -C out .
+$ jar --list --file hello.jar
+META-INF/
+META-INF/MANIFEST.MF
+Hello.class
+$ unzip -p hello.jar META-INF/MANIFEST.MF
+Manifest-Version: 1.0
+Created-By: 25.0.4.1 (Eclipse Adoptium)
+Main-Class: Hello
+$ java -jar hello.jar
+hello, world
+```
+
+`Main-Class` is what makes `java -jar` work. a manifest can also carry `Class-Path` (other jars to load), `Automatic-Module-Name` (from [the last chapter](/learn/tooling/classpath-to-modulepath)) and `Multi-Release`.
+
+### multi-release jars
+
+a library that wants to support java 8 users *and* use `List.getFirst()` (java 21) on newer JVMs can ship both versions of a class in one jar ([JEP 238](https://openjdk.org/jeps/238), java 9). the JVM picks the highest version that's not newer than itself.
+
+<Figure caption="the real jar, built with javac --release 8 and --release 21. click a folder to fold it.">
+<Tree>{`
+greeter.jar
+    META-INF
+        MANIFEST.MF               // Multi-Release: true
+        versions
+            21
+                com/acme/Greeter.class   #hot // xs.getFirst(), used on java 21+
+    com/acme
+        Greeter.class             // xs.get(0), for java 8 to 20
+        Main.class
+`}</Tree>
+</Figure>
+
+```bash
+$ jar --create --file greeter.jar --main-class com.acme.Main \
+      -C base . --release 21 -C v21 .
+$ java -jar greeter.jar                 # java 25
+hi (the java 21 way)
+$ unzip -q greeter.jar -d x && java -cp x com.acme.Main
+hi (the java 8 way)
+```
+
+that second run is the gotcha. versioned classes only work *inside a jar*. unzip it onto a plain directory class path and `META-INF/versions` is just a folder nobody looks in.
+
+<Gotcha title="--release 8 caught a bug for free">
+the first time i built that jar, the java 8 half didn't compile: `Main` called `List.of(...)`, which is java 9. `javac --release 8` refused with `cannot find symbol`. without `--release`, it would have compiled fine on jdk 25 and crashed on every java 8 machine. (jdk 25 also warns that `source value 8 is obsolete and will be removed in a future release`. the clock is ticking for java 8 targets.)
+</Gotcha>
+
+## jlink: a runtime made to measure
+
+a full JDK is 293 MB on disk: compiler, javadoc, debuggers, 69 modules. a server running your app needs none of the tools and maybe five of the modules. `jlink` ([JEP 282](https://openjdk.org/jeps/282), java 9) copies just those modules into a new runtime folder. the recipe is two commands:
+
+```bash
+$ jdeps --print-module-deps --ignore-missing-deps app.jar
+java.base,java.net.http,java.sql
+$ jlink --add-modules java.base,java.net.http,java.sql \
+        --strip-debug --no-header-files --no-man-pages \
+        --output runtime
+$ runtime/bin/java -jar app.jar
+```
+
+<Figure caption={<>pick modules and flags. every combination was built and timed on jdk 25 (M4 Pro, macOS): size is the sum of the files, startup is the median of 40 runs of hello world. watch what happens to startup when you <C k="hot">compress without a CDS archive</C>.</>} wide>
+<RuntimeShrink />
+</Figure>
+
+so the flags aren't free wins:
+
+- **`--no-header-files`, `--no-man-pages`**: pure savings, nobody needs C headers or man pages on a server.
+- **`--strip-debug`** saves another 4.5 MB, and it isn't free: it removes the line number tables from the JDK's own classes. your code keeps its line numbers, but every JDK frame in a stack trace turns into `Unknown Source` (see below). usually fine, sometimes annoying at 3am.
+- **`--compress zip-6`** shrinks `lib/modules` from 25 MB to 11 MB but costs 10 to 15 ms of startup, because classes get inflated as they load. `zip-9` saved another 22 KB. not worth thinking about.
+- **`--generate-cds-archive`** adds ~28 MB of pre-parsed classes (two archives, with and without compressed oops) and wins all the startup back. the full JDK ships with these archives already, which is why a plain jlinked runtime starts *slower* than the JDK it came from. kinda surprising the first time.
+
+```text title="the same exception, two runtimes"
+# jlink --strip-debug
+	at java.base/java.util.ImmutableCollections$List12.get(Unknown Source)
+	at Boom.main(Boom.java:3)
+# jlink without it
+	at java.base/java.util.ImmutableCollections$List12.get(ImmutableCollections.java:612)
+	at Boom.main(Boom.java:3)
+```
+
+<Note title="no jmods folder? that's on purpose">
+older JDKs had a `jmods/` directory that jlink read from. temurin 25 doesn't ship one: since java 24, jlink can link straight from the running JDK's own image ([JEP 493](https://openjdk.org/jeps/493)), and `jlink --help` says `Linking from run-time image enabled`. one catch: that mode can't build a runtime for a different OS. to make a linux runtime on a mac, download a linux JDK with jmods and point `--module-path` at them.
+</Note>
+
+<Quiz question="you jlink a runtime for your app, but your app is a plain jar (no module-info) and depends on two plain library jars. what goes into --add-modules?" options={["your jar and both libraries", "only the JDK modules from jdeps --print-module-deps", "java.se, to be safe", "nothing, jlink can't help non-modular apps"]} answer={1}>
+<Explain>
+jlink only links named modules. put a plain jar on its module path and it stops with `Error: automatic module cannot be used with jlink`. so for a classic app you jlink only the JDK modules your code needs, then run your jars on the class path of that runtime: `runtime/bin/java -cp "app.jar:libs/*" com.acme.Main`. `java.se` works too, but it's 85 MB instead of 45.
+</Explain>
+</Quiz>
+
+## jpackage: a real installer
+
+a runtime folder still needs someone to type `runtime/bin/java -jar app.jar`. `jpackage` ([JEP 392](https://openjdk.org/jeps/392), final in java 16) runs jlink for you, adds a native launcher, an icon and metadata, and builds the installer format each OS expects:
+
+| built on | `--type` | what you get |
+| --- | --- | --- |
+| macOS | `app-image`, `dmg`, `pkg` | `Hello.app`, a disk image, an installer package |
+| windows | `app-image`, `exe`, `msi` | needs the WiX toolset for `exe`/`msi` |
+| linux | `app-image`, `deb`, `rpm` | needs `dpkg`/`rpmbuild` on that machine |
+
+```bash
+$ jpackage --type app-image --name Hello --input input --main-jar hello.jar \
+           --add-modules java.base \
+           --jlink-options "--strip-debug --no-header-files --no-man-pages --strip-native-commands" \
+           --dest out
+$ out/Hello.app/Contents/MacOS/Hello small
+hello, small
+```
+
+that `Hello.app` is 44.6 MB. leave out `--add-modules` and jpackage plays it safe with a default set of 52 modules: 122.9 MB for the same hello world. tell it what you need.
+
+<Gotcha title="jpackage doesn't cross-compile">
+the windows installer has to be built on windows, the `.deb` on linux, the `.dmg` on a mac. CI with a runner per OS is the usual answer. and on macOS, an app you hand to strangers also needs code signing and notarization (`--mac-sign` and friends), or Gatekeeper refuses to open it.
+</Gotcha>
+
+<Deep title="fat jars, jlink, native images: which one?">
+a **fat jar** (all dependencies unzipped into one jar, what spring boot and the shade plugin produce) is the most common way to ship a server: one file, any JDK. **jlink** is for when you control the machine and want a small, pinned runtime, often as a container image layer. **jpackage** is for desktop apps and tools that end users install. and if startup time or memory really matter, GraalVM **native image** compiles the whole app ahead of time into one native executable, with tradeoffs (no dynamic class loading without config, slower peak throughput for some workloads). the JDK's own answer to startup is project Leyden's AOT cache, see [AOT and Leyden](/learn/jvm/aot-and-leyden).
+</Deep>
+
+<Interview q="what replaced the JRE?">
+since java 11 there's no separate JRE download from oracle. you either install a full JDK, or you use `jlink` to build a runtime with exactly the modules your app needs and ship that. `jdeps --print-module-deps` tells you which modules. bonus point: the jlinked runtime starts slower than the JDK unless you add `--generate-cds-archive`, because the JDK ships CDS archives and jlink doesn't copy them.
+</Interview>
+
+<Keylines>
+- a jar is a zip with a manifest. `Main-Class` makes it runnable.
+- multi-release jars pick per-JVM class versions, but only when run from the jar.
+- jdeps finds the modules, jlink builds the runtime. 45 MB for hello world.
+- compressing a runtime costs startup. a CDS archive buys it back.
+- jpackage = jlink + launcher + installer, built on the OS you're targeting.
+</Keylines>

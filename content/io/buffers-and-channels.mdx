@@ -1,0 +1,244 @@
+import { ByteBufferLab } from "@/components/figures/io/ByteBufferLab";
+import { CopyPath } from "@/components/figures/io/CopyPath";
+
+<InShort>
+a **ByteBuffer** is a fixed block of bytes plus three cursors: **position** (where the next read or write happens), **limit** (how far you're allowed to go) and **capacity** (the end of the block). you fill it, `flip()` it, drain it, `compact()` or `clear()` it, repeat.
+
+a **channel** reads into and writes from buffers, a block at a time. that's NIO: no streams, no per-byte calls, just blocks and cursors. and when you really want speed, the buffer can live outside the heap, or *be* the file.
+</InShort>
+
+## the picture
+
+you know how everyone's first NIO bug is writing to a buffer, handing it to a channel, and nothing gets written? that's because one cursor does double duty. writing moves `position` forward. reading *also* reads from `position`. so after a write, position sits right after your data, pointing at garbage, until you `flip()`.
+
+think of a notepad with a pen. capacity is the bottom of the page. while you write, the pen (position) moves down, and limit is the bottom of the page. to read back what you wrote, you draw a line under the last word (limit = where the pen is) and move your finger to the top (position = 0). that's `flip()`. that's genuinely all it does.
+
+<Figure wide caption={<>walk through the classic sequence, or switch to play and break it yourself. the <C k="live">green bracket</C> is <code>remaining()</code>: position up to limit, the part the next read or write can touch. <C k="ref">blue</C> arrows are the cursors, <C k="hot">amber</C> is what just changed, <C k="dead">red</C> is java saying no.</>}>
+<ByteBufferLab />
+</Figure>
+
+the walk-through is a real program. here's the core of it, run for real:
+
+```java title="Main.java" run output="put   pos=5 lim=8 rem=3\nflip  pos=0 lim=5 rem=5\nget×2 pos=2 lim=5 rem=3\ncmpct pos=3 lim=8 rem=5\nLLOLO"
+import java.nio.ByteBuffer;
+
+static void show(String op, ByteBuffer b) {
+    IO.println(op + " pos=" + b.position() + " lim=" + b.limit() + " rem=" + b.remaining());
+}
+
+void main() {
+    ByteBuffer buf = ByteBuffer.allocate(8);
+    buf.put("HELLO".getBytes());    show("put  ", buf);
+    buf.flip();                     show("flip ", buf);
+    buf.get(); buf.get();           show("get×2", buf);
+    buf.compact();                  show("cmpct", buf);
+    IO.println(new String(buf.array(), 0, 5));
+}
+```
+
+`LLOLO`: compact moved `LLO` to the front and left the old `LO` behind at 3 and 4. buffers never erase, they only move cursors and overwrite.
+
+| method | position | limit | use it when |
+| --- | --- | --- | --- |
+| `flip()` | 0 | old position | done writing, about to read what you wrote |
+| `clear()` | 0 | capacity | done reading everything, about to write fresh |
+| `compact()` | after the unread bytes | capacity | done reading *some*, keep the rest and write more |
+| `rewind()` | 0 | unchanged | read the same data again |
+| `mark()` / `reset()` | remember / go back | unchanged | peek ahead, then return |
+
+<Predict options={["0", "3", "5"]} answer={2}>
+```java
+ByteBuffer buf = ByteBuffer.allocate(8);
+buf.put((byte) 1).put((byte) 2).put((byte) 3);
+IO.println(buf.remaining());   // no flip
+```
+<Explain>
+`remaining()` is limit minus position, and without a flip that's "room left to write": 8 - 3 = 5. hand this buffer to `channel.write(buf)` and it writes the 5 zero bytes after your data, not your data. every forgotten flip looks exactly like this.
+</Explain>
+</Predict>
+
+## channels: the other half
+
+a channel is a connection to something that does I/O (a file, a socket) that speaks in buffers. unlike streams, one channel can both read and write, and `read(buf)` fills as much of the buffer as it can in one call.
+
+| channel | for |
+| --- | --- |
+| `FileChannel` | files: positional reads, `map`, locks, `transferTo` |
+| `SocketChannel` / `ServerSocketChannel` | TCP, blocking or not. see [sockets and selectors](/learn/io/networking) |
+| `DatagramChannel` | UDP |
+| `Pipe` | two channels connected to each other, inside one JVM |
+
+the canonical copy loop is where flip and compact earn their keep. `write` isn't obliged to take everything (a slow socket might take half), so the loop compacts whatever's left instead of losing it:
+
+```java title="Main.java" run output="21000 bytes, 6 loops, identical: true"
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import static java.nio.file.StandardOpenOption.*;
+
+void main() throws Exception {
+    Path src = Files.createTempFile("src", ".txt");
+    Path dst = Files.createTempFile("dst", ".txt");
+    Files.writeString(src, "bytes in, bytes out. ".repeat(1000));
+
+    ByteBuffer buf = ByteBuffer.allocateDirect(4096);
+    int reads = 0;
+    try (FileChannel in = FileChannel.open(src, READ);
+         FileChannel out = FileChannel.open(dst, WRITE, TRUNCATE_EXISTING)) {
+        while (in.read(buf) != -1 || buf.position() > 0) {
+            reads++;
+            buf.flip();       // switch to draining
+            out.write(buf);   // may not write everything
+            buf.compact();    // keep the leftovers, switch back to filling
+        }
+    }
+    IO.println(Files.size(dst) + " bytes, " + reads + " loops, identical: " + (Files.mismatch(src, dst) == -1));
+    Files.delete(src); Files.delete(dst);
+}
+```
+
+21,000 bytes through a 4 KiB buffer: 6 trips (five full ones and a partial). and if all you're doing is copying channel to channel, skip the loop: `in.transferTo(0, in.size(), out)` hands the whole job to the OS.
+
+## heap or direct?
+
+`ByteBuffer.allocate(n)` wraps a plain `byte[]` on the heap. `ByteBuffer.allocateDirect(n)` grabs native memory outside the heap. the difference only matters once the bytes have to cross into the OS, and it's all about copies.
+
+<Figure caption={<>pick a kind of buffer and follow one read from the disk up into your code. <C k="hot">amber</C> hops are copies the CPU does. a <C k="meta">purple</C> box is the JDK's own machinery. <C k="ref">mapped</C> means your buffer points at the OS's pages instead of holding a copy.</>}>
+<CopyPath />
+</Figure>
+
+how much does that copy cost? less than you'd think, because memory bandwidth is huge. reading a 256 MiB file that's already in the OS page cache, 64 KiB at a time:
+
+<Figure caption="median of 11 runs, jdk 25, M4 Pro, macOS. the file was in the page cache, so this measures copies and calls, not the disk. allocation: one 1 MiB buffer, averaged over 2,000.">
+<Bars
+  unit="ms"
+  data={[
+    { label: "read 256 MiB · heap buffer", value: 22 },
+    { label: "read 256 MiB · direct buffer", value: 20, tone: "live" },
+    { label: "read + sum every long · heap", value: 45 },
+    { label: "read + sum every long · mapped", value: 33, tone: "live" },
+  ]}
+/>
+<div className="mt-6" />
+<Bars
+  unit="µs"
+  data={[
+    { label: "allocate 1 MiB · heap", value: 65 },
+    { label: "allocate 1 MiB · direct", value: 180, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+so: direct buffers win around 10% on raw throughput and lose about 3× on allocation. the rule that falls out is the usual one. **allocate direct buffers once, keep them, reuse them** (one per connection, one per thread). allocating a fresh direct buffer per request is slower than just using the heap.
+
+<Gotcha title="direct memory has its own limit">
+direct buffers don't count against `-Xmx`. they have their own cap, `-XX:MaxDirectMemorySize` (by default, about the same as the max heap). the memory is freed only when the GC notices the tiny `DirectByteBuffer` object is unreachable, which can take a long time if the heap is quiet. leak them and you get this, with plenty of heap to spare:
+
+```text
+java.lang.OutOfMemoryError: Cannot reserve 1048576 bytes of direct buffer memory (allocated: 524288, limit: 1048576)
+```
+
+that's real output from jdk 25 with `-XX:MaxDirectMemorySize=1m`. it also won't show up in a heap dump, since the bytes aren't in the heap. see [native memory](/learn/gc/native-memory).
+</Gotcha>
+
+## memory-mapped files
+
+`FileChannel.map` asks the OS to map a region of the file straight into your address space. you get a `MappedByteBuffer`, and reading it is just reading memory: no `read()` calls, no copies. the OS loads pages lazily on first touch (a page fault) and writes dirty pages back to the file on its own schedule.
+
+```java title="Main.java" run output="ca fe ba be 00 00 00 00\n8"
+import java.nio.*;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import java.util.HexFormat;
+import static java.nio.file.StandardOpenOption.*;
+
+void main() throws Exception {
+    Path file = Files.createTempFile("mapped", ".bin");
+    Files.write(file, new byte[8]);
+
+    try (FileChannel ch = FileChannel.open(file, READ, WRITE)) {
+        MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_WRITE, 0, 8);
+        m.putInt(0, 0xCAFEBABE);       // a plain memory write
+        IO.println(HexFormat.ofDelimiter(" ").formatHex(Files.readAllBytes(file)));
+
+        Files.write(file, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });   // change the file
+        IO.println(m.get(7));          // the mapping sees it
+    }
+    Files.delete(file);
+}
+```
+
+see? a memory write showed up in the file without a single `write()`, and a file write showed up in the buffer. they're the same pages. that's how databases, search indexes (Lucene), Kafka's log index and the JDK's own `lib/modules` get random access to huge files without reading them.
+
+<Gotcha title="you can't unmap a MappedByteBuffer">
+there's no `unmap()`. the mapping lives until the GC collects the buffer object, which on windows also means the file stays locked (you can't delete or truncate it). and a `MappedByteBuffer` is indexed by `int`, so one mapping tops out at 2 GiB. the fix for both is the [FFM API](/learn/performance/ffm-api) <Since v={22} />: `channel.map(mode, offset, size, arena)` returns a `MemorySegment`, which is `long`-indexed and unmapped the moment you close its `Arena`.
+</Gotcha>
+
+## byte order, slices and views
+
+a buffer that holds bytes still has to decide how to write an `int` as four of them. `ByteBuffer` is **big-endian** by default (network order, what java's own formats use), no matter what CPU you're on:
+
+```java title="Main.java" run output="BIG_ENDIAN: 00 00 00 01\nLITTLE_ENDIAN: 01 00 00 00\nthis CPU: LITTLE_ENDIAN"
+import java.nio.*;
+import java.util.HexFormat;
+
+void main() {
+    var hex = HexFormat.ofDelimiter(" ");
+    ByteBuffer b = ByteBuffer.allocate(4);
+    b.putInt(1);
+    IO.println(b.order() + ": " + hex.formatHex(b.array()));
+
+    b.clear().order(ByteOrder.LITTLE_ENDIAN).putInt(1);
+    IO.println(b.order() + ": " + hex.formatHex(b.array()));
+    IO.println("this CPU: " + ByteOrder.nativeOrder());
+}
+```
+
+reading a file format written by C code on x86 or arm? it's little-endian. call `order(ByteOrder.LITTLE_ENDIAN)` before the first `getInt`, or every number comes out byte-swapped.
+
+`slice()`, `duplicate()` and `asReadOnlyBuffer()` make **views**: new cursors over the same bytes, not copies.
+
+<Figure caption={<>one array, two buffers. the slice starts at the parent's position 5 and has its own index 0. writing through either one changes the <C k="hot">same byte</C>.</>}>
+<div className="grid gap-5">
+<ArrayViz label='b = ByteBuffer.wrap("HELLOWORLD")' values={["H", "E", "L", "L", "O", "w", "O", "R", "L", "D"]} tones={{ 5: "hot" }} range={[5, 9, "live"]} pointers={{ 5: "position" }} cell={40} />
+<ArrayViz label="world = b.slice() · its own position 0, capacity 5" values={["w", "O", "R", "L", "D"]} tones={{ 0: "hot" }} cell={40} />
+</div>
+</Figure>
+
+```java title="Main.java" run output="HELLOwORLD 5 0\nReadOnlyBufferException"
+import java.nio.ByteBuffer;
+
+void main() {
+    ByteBuffer b = ByteBuffer.wrap("HELLOWORLD".getBytes());
+    b.position(5);
+    ByteBuffer world = b.slice();          // a window, not a copy
+    world.put(0, (byte) 'w');
+    IO.println(new String(b.array()) + " " + world.capacity() + " " + world.position());
+
+    ByteBuffer ro = b.asReadOnlyBuffer();
+    try {
+        ro.put(0, (byte) 'h');
+    } catch (Exception e) {
+        IO.println(e.getClass().getSimpleName());
+    }
+}
+```
+
+notice `put(0, ...)`: the **absolute** methods take an index and don't move position at all. the relative ones (`put(b)`, `get()`) use and advance position. mixing them up is the second most common buffer bug.
+
+<Deep title="why big heap buffers can eat native memory">
+when you do I/O with a heap buffer, the JDK borrows a temporary direct buffer of the same size (the copy #1 in the figure) and caches it **per thread** so the next call doesn't have to allocate. if 200 threads each write a 10 MiB heap buffer to a socket once, that's up to 2 GiB of native memory sitting in thread-local caches, invisible in heap dumps. the cap is the system property `jdk.nio.maxCachedBufferSize`: temporary buffers bigger than it aren't cached. the better fix is not doing big I/O through heap buffers: write in chunks, or keep your own direct buffer per thread.
+</Deep>
+
+<Interview q="what do flip(), clear() and compact() do on a ByteBuffer?">
+`flip()` switches from writing to reading: limit becomes the current position, position goes to 0. `clear()` switches back to writing from scratch: position 0, limit capacity, and it doesn't erase any bytes. `compact()` is for partial reads: it copies the unread bytes (position to limit) to the start, sets position just after them and limit to capacity, so you can keep writing without losing them. bonus point: `rewind()` keeps limit and resets position to re-read, and forgetting `flip()` before a channel write is the classic "wrote zeros" bug.
+</Interview>
+
+<Keylines>
+- a buffer is bytes plus cursors. position moves on every relative get and put.
+- write → `flip()` → read → `compact()` or `clear()` → write. that's the loop.
+- channels read and write whole buffers. `transferTo` lets the OS copy without you.
+- heap buffers cost an extra copy per I/O, direct ones cost more to allocate. allocate direct once and reuse.
+- a mapped buffer is the file's pages in your memory. for deterministic unmapping and >2 GiB, use FFM's `MemorySegment`.
+- `ByteBuffer` is big-endian unless you say otherwise.
+</Keylines>

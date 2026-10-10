@@ -1,0 +1,232 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { PecsGrid } from "@/components/figures/effective-java/PecsGrid";
+
+<InShort>
+generics move type errors from **run time** to **compile time**. items 26 to 33 are about not throwing that away: no raw types, take unchecked warnings seriously, prefer lists to arrays (they don't mix), and use **wildcards** so your APIs accept everything they safely can. producer `extends`, consumer `super`.
+</InShort>
+
+<Figure caption={<>items 26 to 33. generics haven&apos;t changed much since 2018, so most of these hold exactly as written.</>}>
+<ItemMap
+  items={[
+    { n: 26, t: "no raw types", lens: "diamond, var" },
+    { n: 27, t: "every unchecked warning is a possible ClassCastException" },
+    { n: 28, t: "lists over arrays" },
+    { n: 29, t: "make your types generic" },
+    { n: 30, t: "make your methods generic" },
+    { n: 31, t: "wildcards make APIs flexible" },
+    { n: 32, t: "generics and varargs mix badly", lens: "@SafeVarargs on private methods" },
+    { n: 33, t: "Class objects as keys: typesafe heterogeneous containers" },
+  ]}
+/>
+</Figure>
+
+## the rules
+
+### item 26 · no raw types
+
+a raw type (`List` with no `<...>`) exists only so pre-2004 code still compiles. it switches off the type checks, so the bug surfaces far away from where it was made:
+
+```java title="Main.java" run
+static void addDefaults(List list) { // raw: anything goes
+    list.add(42);
+}
+
+void main() {
+    List<String> names = new ArrayList<>(List.of("ada"));
+    addDefaults(names);                       // compiles, with a warning
+    for (String n : names) IO.println(n.toUpperCase());
+}
+```
+
+```text nolines
+ADA
+Exception in thread "main" java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String
+```
+
+the cast that fails is one the compiler inserted in `main`, two calls away from the line that broke things. if you want "a list of anything", say so: `List<?>` (a list of some unknown type, which won't let you add to it) or `List<Object>` (a list that really can hold anything). raw types are only correct in class literals (`List.class`) and `instanceof` (`o instanceof Set<?>` is fine too).
+
+<Lens v={7}>the diamond (`new ArrayList<>()`, 7) and `var` (10) took away the last excuse, "the type arguments are too long to type". erasure is why raw types exist at all, see [type erasure](/learn/generics/type-erasure).</Lens>
+
+### item 27 · every unchecked warning is a possible ClassCastException
+
+compile with `-Xlint:unchecked` and fix every warning you can. for the ones you can prove safe, suppress on the smallest possible scope (one local variable, not the whole class), and write down why:
+
+```java
+class Ring<E> {
+    private final E[] slots;
+
+    Ring(int capacity) {
+        // safe: the array never leaves this class, and only Es go in
+        @SuppressWarnings("unchecked") E[] array = (E[]) new Object[capacity];
+        slots = array;
+    }
+}
+```
+
+a warning you suppress without proof is a `ClassCastException` you've scheduled for later, somewhere else.
+
+### item 28 · lists over arrays
+
+arrays and generics disagree on two things. arrays are **covariant** (`Long[]` is an `Object[]`) and **reified** (they check element types at run time). generics are **invariant** (`List<Long>` is not a `List<Object>`) and **erased** (no type info at run time). so the same mistake fails at a different time:
+
+<Compare>
+<Bad label="compiles, fails when it runs">
+```java title="Main.java" run output="compiled fine\nException in thread \"main\" java.lang.ArrayStoreException: java.lang.String"
+void main() {
+    Object[] things = new Long[1];
+    IO.println("compiled fine");
+    things[0] = "hi";
+}
+```
+</Bad>
+<Good label="doesn't compile at all">
+```java
+List<Object> things =
+    new ArrayList<Long>(); // [!code error]
+// error: incompatible types:
+// ArrayList<Long> cannot be
+// converted to List<Object>
+```
+</Good>
+</Compare>
+
+that's also why `new List<String>[10]` is illegal: an array of a generic type would let you smuggle the wrong list in without either check catching it. reach for `List<E>` by default; use arrays for primitives and performance-critical internals. the details are in [arrays, varargs and other limits](/learn/generics/generics-limitations).
+
+### item 29 · make your types generic
+
+if your class stores `Object` and makes callers cast, make it generic. inside, you'll hit "can't create a `new E[]`": either keep an `Object[]` and cast on the way out (one suppressed warning on `get`), or create an `E[]` from an `Object[]` once in the constructor. the `Stack<T>` in [item 7](/learn/effective-java/creating-and-destroying-objects) takes the first route. callers get `String s = stack.pop()`, no cast.
+
+### item 30 · make your methods generic
+
+static utility methods are the easiest win. declare the type parameters before the return type and let inference do the rest:
+
+```java title="Main.java" run output="http"
+static <K, V> Map<V, K> invert(Map<K, V> m) {
+    Map<V, K> out = new HashMap<>();
+    m.forEach((k, v) -> out.put(v, k));
+    return out;
+}
+
+void main() {
+    Map<String, Integer> ports = Map.of("http", 80);
+    Map<Integer, String> byPort = invert(ports); // K and V inferred
+    IO.println(byPort.get(80));
+}
+```
+
+two related idioms: a **generic singleton factory** (one shared stateless object, handed out at any type, like `Collections.emptyList()` or `Function.identity()`), and a **recursive bound** like `<T extends Comparable<T>>`, which reads "a T that can be compared with other Ts".
+
+## wildcards
+
+### item 31 · wildcards make APIs flexible
+
+invariance is safe but stiff: a method that takes `Collection<Number>` won't accept a `List<Integer>`. bounded wildcards loosen it exactly as far as is safe. the mnemonic is **PECS**: producer `extends`, consumer `super`.
+
+<Figure caption={<>flip the wildcards on. a parameter you only read from can take any subtype&apos;s list; one you only write into can take any supertype&apos;s list. every cell is what javac 25 says.</>}>
+<PecsGrid />
+</Figure>
+
+```java title="Main.java" run output="6.0 4.0\n[0, 0] [0]"
+static double sum(Collection<? extends Number> xs) {   // produces Numbers for us
+    double total = 0;
+    for (Number n : xs) total += n.doubleValue();
+    return total;
+}
+
+static void fillZeros(List<? super Integer> out, int n) { // consumes Integers from us
+    for (int i = 0; i < n; i++) out.add(0);
+}
+
+void main() {
+    IO.println(sum(List.of(1, 2, 3)) + " " + sum(List.of(1.5, 2.5)));
+    List<Number> nums = new ArrayList<>();
+    List<Object> objs = new ArrayList<>();
+    fillZeros(nums, 2);
+    fillZeros(objs, 1);
+    IO.println(nums + " " + objs);
+}
+```
+
+two more rules of thumb. wildcards go on parameters, never on return types (they'd force wildcards onto your callers). and `Comparable` and `Comparator` are always consumers, which is why you see `<T extends Comparable<? super T>>` all over the JDK. try `<T extends Comparable<T>>` with a `List<LocalDate>`: it won't compile, because `LocalDate` is comparable to `ChronoLocalDate` (its supertype), not to `LocalDate` itself. the long version is in [wildcards and PECS](/learn/generics/wildcards-and-pecs).
+
+<Quiz question="a method only reads Shapes out of its argument. which parameter type accepts the most callers safely?" options={["List\u003cShape>", "List<? extends Shape>", "List<? super Shape>", "List<?>"]} answer={1}>
+<Explain>
+the argument produces shapes, so `? extends Shape`: a `List<Circle>` or a `List<Square>` both work, and every element you read is guaranteed to be a `Shape`. `? super Shape` would let you write shapes in but only read `Object`s out. `List<?>` accepts everything but tells you nothing about the elements.
+</Explain>
+</Quiz>
+
+### item 32 · generics and varargs mix badly
+
+a varargs parameter is an array, and generic arrays can't be checked (item 28). so `static <T> void m(T... xs)` creates an array of an erased type: "heap pollution", a variable of a parameterized type pointing at something that isn't really that type. the method is safe only if it doesn't store into the array and doesn't let the array escape:
+
+```java title="Main.java" run output="2\nException in thread \"main\" java.lang.ClassCastException: class [Ljava.lang.Object; cannot be cast to class [Ljava.lang.String; ([Ljava.lang.Object; and [Ljava.lang.String; are in module java.base of loader 'bootstrap')"
+@SafeVarargs // a lie: the array escapes
+static <T> T[] arrayOf(T... xs) { return xs; }
+
+static <T> T[] twice(T x) { return arrayOf(x, x); } // T is erased here: this makes an Object[]
+
+void main() {
+    Object[] fine = twice("hi");  // it really is an Object[]
+    IO.println(fine.length);
+    String[] both = twice("hi");  // the hidden cast to String[] fails
+}
+```
+
+if the method is safe, annotate it `@SafeVarargs` so callers don't get warnings (that's what `List.of(E...)` and `Arrays.asList` do). if you're not sure, take a `List<T>` instead of `T...`.
+
+<Lens v={9}>`@SafeVarargs` works on private instance methods since java 9 (before that, only on static and final methods), since those can't be overridden by something unsafe.</Lens>
+
+### item 33 · Class objects as keys: typesafe heterogeneous containers
+
+normally the type parameters belong to the container: a `Set<String>` holds strings. sometimes you want a container that holds one value of *each* type, safely. the trick: put the type parameter on the **key**, and use the `Class<T>` object as that key.
+
+```java title="Main.java" run output="java 25 Thread"
+final class TypedBag {
+    private final Map<Class<?>, Object> items = new HashMap<>();
+
+    <T> void put(Class<T> type, T value) {
+        items.put(Objects.requireNonNull(type), type.cast(value)); // checked even against raw callers
+    }
+
+    <T> T get(Class<T> type) {
+        return type.cast(items.get(type)); // a checked cast, no warning
+    }
+}
+
+void main() {
+    var bag = new TypedBag();
+    bag.put(String.class, "java");
+    bag.put(Integer.class, 25);
+    bag.put(Class.class, Thread.class);
+
+    String s = bag.get(String.class);       // no cast at the call site
+    int n = bag.get(Integer.class);
+    Class<?> c = bag.get(Class.class);
+    IO.println(s + " " + n + " " + c.getSimpleName());
+}
+```
+
+<Figure caption={<>inside the bag: the keys are Class objects, each <C k="ref">pointing</C> at a value of exactly that type. <code>type.cast</code> is what keeps it honest.</>}>
+<Memory
+  frames={[{ name: "main", locals: { bag: { ref: "bag" } } }]}
+  heap={{
+    bag: { type: "TypedBag", fields: { items: { ref: "map" } } },
+    map: { type: "HashMap<Class<?>, Object>", entries: [["String.class", { ref: "s" }], ["Integer.class", { ref: "i" }], ["Class.class", { ref: "c" }]] },
+    s: { type: "String", value: '"java"' },
+    i: { type: "Integer", value: "25" },
+    c: { type: "Class", value: "Thread.class" },
+  }}
+/>
+</Figure>
+
+the limits: `Class` objects can't express `List<String>` (there's only `List.class`), and the JDK uses the same pattern in `Class.cast`, annotations (`getAnnotation(Class<A>)`), and `ServiceLoader.load(Class<S>)`. more on what survives erasure in [generics at runtime](/learn/generics/generics-and-reflection).
+
+<Keylines>
+- raw types switch the compiler off. use `List<?>` or `List<Object>` instead.
+- every unchecked warning is a future ClassCastException. fix it, or prove it and suppress it narrowly.
+- arrays fail at run time, generics fail at compile time. prefer lists.
+- PECS: read from `? extends T`, write into `? super T`. never wildcards in return types.
+- generic varargs are safe only if the array never escapes and is never written.
+- `Class<T>` as a map key gives you a typesafe bag of one value per type.
+</Keylines>

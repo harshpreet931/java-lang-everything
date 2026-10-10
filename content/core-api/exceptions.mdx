@@ -1,0 +1,194 @@
+import { StackTraceAnatomy } from "@/components/figures/core-api/StackTraceAnatomy";
+import { CheckedOrNot } from "@/components/figures/core-api/CheckedOrNot";
+
+<InShort>
+an exception is an **object** describing what went wrong. `throw` hands it up the call stack until some caller `catch`es it, or it falls off the end of the thread and gets printed.
+
+everything throwable extends `Throwable`, in three families: **Error** (the JVM is in trouble, don't catch), **checked** exceptions (the compiler makes callers deal with them) and **unchecked** ones, `RuntimeException` and below (usually a bug, no forcing).
+</InShort>
+
+## the picture
+
+someone pulls the fire alarm on floor 7 (that's `throw`). the alarm doesn't go to whoever's nearest: it goes down the building, floor by floor, to the people who sent you up there (the callers), and the first one whose job it is to handle fires handles it (that's `catch`). if nobody does, everyone's evacuated: the thread dies and the alarm gets printed on stderr.
+
+```java title="Main.java" run output="Index 3 out of bounds for length 3\njava.lang.ArrayIndexOutOfBoundsException\nMain.main(Main.java:4)"
+void main() {
+    try {
+        int[] a = new int[3];
+        a[3] = 1;                                   // the JVM throws for you
+    } catch (ArrayIndexOutOfBoundsException e) {    // e is just an object
+        IO.println(e.getMessage());
+        IO.println(e.getClass().getName());
+        IO.println(e.getStackTrace()[0]);           // where it happened
+    }
+}
+```
+
+you can throw your own just as easily:
+
+```java
+throw new IllegalArgumentException("qty must be > 0");
+```
+
+`new` builds the object, `throw` starts the trip down the stack. exactly how that trip goes, frame by frame, is the next chapter: [try, catch, finally](/learn/core-api/try-catch-finally).
+
+## the family tree
+
+<Figure caption={<>click a class to fold it. <C k="dead">Error</C> means the JVM or the deployment is broken. <C k="hot">amber</C> classes are <strong>checked</strong>: the compiler won't let you ignore them. everything under <code>RuntimeException</code> is unchecked. the hierarchy is real, read from jdk 25 with reflection.</>}>
+<Tree>{`
+Throwable                              // anything you can throw or catch
+    Error #dead                        // the JVM or the deployment is broken
+        VirtualMachineError
+            OutOfMemoryError
+            StackOverflowError
+        LinkageError
+            NoClassDefFoundError       // compiled against it, missing at runtime
+            ExceptionInInitializerError
+        AssertionError                 // a failed assert
+    Exception #hot                     // checked, unless it's a RuntimeException
+        IOException #hot
+            FileNotFoundException #hot
+            FileSystemException #hot
+                NoSuchFileException #hot
+            InterruptedIOException #hot
+                SocketTimeoutException #hot
+        InterruptedException #hot      // someone asked this thread to stop
+        ReflectiveOperationException #hot
+            ClassNotFoundException #hot
+        TimeoutException #hot
+        ExecutionException #hot        // a Future's task threw
+        RuntimeException               // unchecked: usually a bug
+            NullPointerException
+            IllegalArgumentException
+                NumberFormatException
+            IllegalStateException
+            IndexOutOfBoundsException
+                ArrayIndexOutOfBoundsException
+                StringIndexOutOfBoundsException
+            ArithmeticException        // / by zero, *Exact overflow
+            ClassCastException
+            UnsupportedOperationException
+            ConcurrentModificationException
+            NoSuchElementException
+            UncheckedIOException       // an IOException, wrapped
+            DateTimeException
+`}</Tree>
+</Figure>
+
+`Throwable` holds everything an exception carries: a message, an optional **cause** (another throwable that led to this one), a stack trace, and a list of **suppressed** exceptions (for [try-with-resources](/learn/core-api/try-with-resources)). the subclasses mostly just add a name. the name *is* the information: `catch` picks handlers by class.
+
+## checked vs unchecked
+
+checked exceptions are part of a method's signature. if a method can throw one, it must say so with `throws`, and every caller must either catch it or declare it too. javac enforces this, not the JVM:
+
+```java title="Config.java"
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class Config {
+    static String load(Path p) {
+        return Files.readString(p);   // [!code error]
+    }
+}
+```
+
+```text
+Config.java:6: error: unreported exception IOException; must be caught or declared to be thrown
+        return Files.readString(p);
+                               ^
+```
+
+two ways out: handle it with a `try`/`catch`, or pass it on by adding `throws IOException` to the signature, which makes it your callers' problem. unchecked exceptions (`RuntimeException`, `Error` and their subclasses) skip all of that. you can still catch them, nobody makes you.
+
+so which should *your* code throw? three questions settle almost every case:
+
+<Figure caption={<>pick a situation and follow the questions. the answer is the <C k="hot">kind</C> of throwable, and the line below is what the JDK itself throws in that situation.</>}>
+<CheckedOrNot />
+</Figure>
+
+the idea behind the split: a **checked** exception is part of the method's contract, a thing that can go wrong even in a perfect program, so the caller should be made to think about it. an **unchecked** exception means someone broke the contract: the fix is to change code, not to catch.
+
+<Effective item={70} title="checked for recoverable conditions, runtime for programming errors">
+throw checked exceptions when a reasonable caller can recover, and unchecked ones for broken preconditions. items 71 and 72 add: don't make callers handle a checked exception they can't do anything useful with, and reuse the standard exceptions (`IllegalArgumentException`, `IllegalStateException`, `UnsupportedOperationException`, ...) before inventing your own.
+</Effective>
+
+<Quiz question="which one will the compiler make you catch or declare?" options={["NullPointerException", "IllegalArgumentException", "InterruptedException", "OutOfMemoryError"]} answer={2}>
+<Explain>
+`InterruptedException` extends `Exception` directly, not `RuntimeException`, so it's checked. that's why `Thread.sleep(100)` won't compile without a `try`/`catch` or a `throws`. the other three are unchecked: two `RuntimeException`s and an `Error`.
+</Explain>
+</Quiz>
+
+## checked exceptions vs lambdas
+
+here's where checked exceptions get annoying. `Function.apply` doesn't declare any exceptions, so a lambda passed to `map` can't throw a checked one, even if the enclosing method declares it:
+
+```java title="Lambda.java"
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+public class Lambda {
+    static List<String> loadAll(List<Path> paths) throws java.io.IOException {
+        return paths.stream().map(p -> Files.readString(p)).toList();   // [!code error]
+    }
+}
+```
+
+```text
+Lambda.java:7: error: unreported exception IOException; must be caught or declared to be thrown
+        return paths.stream().map(p -> Files.readString(p)).toList();
+                                                       ^
+```
+
+the usual fix is to wrap it in the unchecked exception the JDK made for exactly this:
+
+```java
+paths.stream().map(p -> {
+    try {
+        return Files.readString(p);
+    } catch (IOException e) {
+        throw new UncheckedIOException(e);   // keeps the original as the cause
+    }
+}).toList();
+```
+
+or just write the `for` loop, which can throw anything its method declares. (this friction is a big part of why kotlin, scala and C# dropped checked exceptions altogether. java kept them, and the modern consensus is "use them sparingly".)
+
+## reading a stack trace
+
+when nobody catches an exception, the thread prints its class, message, stack trace and causes. here's a real one: `parse` catches a `NumberFormatException` and rethrows it wrapped in an `IllegalArgumentException`.
+
+<Figure wide caption={<>click any line. traces read top-down from the newest frame. the move that saves time: skip the JDK frames and find the <C k="hot">first frame from your own code</C>.</>}>
+<StackTraceAnatomy />
+</Figure>
+
+<Predict options={["an NPE with no message", "an NPE that names address() as the null", "it prints null"]} answer={1}>
+```java
+record Address(String city) {}
+record User(String name, Address address) {}
+
+void main() {
+    var u = new User("ada", null);
+    IO.println(u.address().city().length());
+}
+```
+<Explain>
+the exact message is `Cannot invoke "Main$Address.city()" because the return value of "Main$User.address()" is null`. since java 15, NPEs say exactly which reference was null ([JEP 358](https://openjdk.org/jeps/358), "helpful NullPointerExceptions"). before that you'd get a bare `NullPointerException` and a line number, and you'd have to guess which of the three calls on that line blew up. the `Main$` is there because records in a compact source file are nested in its implicit `Main` class.
+</Explain>
+</Predict>
+
+<Gotcha title="don't catch Error (or Throwable)">
+`catch (Throwable t)` also catches `OutOfMemoryError`, `StackOverflowError` and `LinkageError`. after those, the JVM may be in no state to continue: half-built objects, a class that failed to initialize and will now fail forever. catching `Error` belongs in exactly one place, the very top of a thread or request loop, to log it and shut down cleanly. the same goes for `catch (Exception e)` deep inside business code: it also catches every `RuntimeException`, which means it silently eats your bugs.
+</Gotcha>
+
+<Interview q="what's the difference between checked and unchecked exceptions?">
+checked exceptions (`Exception` and subclasses that aren't `RuntimeException`) must be caught or declared in `throws`, and javac enforces it. unchecked ones (`RuntimeException`, `Error` and their subclasses) don't have to be. the intent: checked for conditions a correct program can still hit and recover from (I/O, timeouts), unchecked for programming errors (bad arguments, wrong state, null). bonus: it's purely a compile-time rule. the JVM doesn't know the difference, which is how other JVM languages (and sneaky generic tricks) throw checked exceptions without declaring them.
+</Interview>
+
+<Keylines>
+- an exception is an object: class, message, cause, stack trace.
+- `Error`: the JVM or the build is broken. don't catch it.
+- checked: the compiler forces callers to catch or declare. for problems a correct program can still hit.
+- unchecked (`RuntimeException`): a broken contract. fix the code, don't catch it.
+- in a stack trace, read the headline, then find the first frame that's yours.
+</Keylines>

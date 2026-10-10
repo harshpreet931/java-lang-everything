@@ -1,0 +1,22 @@
+[
+  { "term": "lost update", "short": "two threads write results computed from the same old value, so one write erases the other.", "chapter": "race-conditions" },
+  { "term": "check-then-act", "short": "deciding on a value, then acting after it may already have changed. a race even when each call is thread-safe.", "chapter": "race-conditions" },
+  { "term": "reentrancy", "short": "a thread that owns a lock can acquire it again. a hold count tracks how deep it is.", "chapter": "synchronized", "aka": ["reentrant lock"] },
+  { "term": "spurious wakeup", "short": "wait() returning with no notify at all. the reason wait always goes in a while loop.", "chapter": "wait-and-notify" },
+  { "term": "java memory model", "short": "the rules (JLS 17.4) for when one thread's writes are guaranteed visible to another.", "chapter": "java-memory-model", "aka": ["JMM"] },
+  { "term": "store buffer", "short": "a per-core queue where writes wait before reaching the cache. why the impossible r1 = r2 = 0 happens.", "chapter": "java-memory-model" },
+  { "term": "safe publication", "short": "handing an object to another thread through a happens-before edge, so it sees it fully built.", "chapter": "java-memory-model" },
+  { "term": "ABA problem", "short": "a value goes A → B → A, and a CAS that only checks for A can't tell anything happened.", "chapter": "atomics-and-cas" },
+  { "term": "LongAdder", "short": "a counter that spreads contended updates over padded cells and adds them up in sum().", "chapter": "atomics-and-cas" },
+  { "term": "AQS", "short": "AbstractQueuedSynchronizer: a volatile int plus a queue of parked threads. most j.u.c locks are built on it.", "chapter": "locks-and-aqs", "aka": ["AbstractQueuedSynchronizer"] },
+  { "term": "rejection policy", "short": "what a saturated ThreadPoolExecutor does with a new task: throw, run it in the caller, or drop something.", "chapter": "executors", "aka": ["RejectedExecutionHandler"] },
+  { "term": "CompletableFuture", "short": "a future you attach stages to (thenApply, thenCompose, allOf) instead of blocking on it.", "chapter": "completablefuture" },
+  { "term": "work stealing", "short": "idle workers take tasks from the far end of busy workers' deques. how ForkJoinPool balances load.", "chapter": "fork-join" },
+  { "term": "common pool", "short": "the JVM-wide ForkJoinPool behind parallel streams and Async methods without an executor.", "chapter": "fork-join", "aka": ["ForkJoinPool.commonPool"] },
+  { "term": "copy-on-write", "short": "every write copies the whole backing array, so readers iterate a stable snapshot with no locking.", "chapter": "concurrent-collections", "aka": ["CopyOnWriteArrayList"] },
+  { "term": "semaphore", "short": "a counter of permits. acquire takes one or waits, release gives one back. limits concurrency.", "chapter": "synchronizers" },
+  { "term": "livelock", "short": "threads that keep reacting to each other and never make progress, while staying busy.", "chapter": "deadlocks-and-liveness" },
+  { "term": "structured concurrency", "short": "subtasks confined to a block: forked inside it, all finished when it ends, cancelled together.", "chapter": "structured-concurrency", "aka": ["StructuredTaskScope"] },
+  { "term": "scoped value", "short": "an immutable value bound for the duration of a call. the ThreadLocal replacement, final in java 25.", "chapter": "structured-concurrency", "aka": ["ScopedValue"] },
+  { "term": "jcstress", "short": "the OpenJDK harness that runs tiny concurrent programs billions of times and counts every outcome.", "chapter": "testing-concurrent-code" }
+]

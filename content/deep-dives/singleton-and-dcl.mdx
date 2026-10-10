@@ -1,0 +1,245 @@
+import { ReorderDcl } from "@/components/figures/deep-dives/ReorderDcl";
+
+<InShort>
+double-checked locking reads a shared field **without a lock** to skip the lock when the object already exists. if that field isn't `volatile`, another thread can see the reference **before** the constructor's writes, and use a **half-built object**. three ways to get it right: make the field `volatile`, use the **holder class** idiom (class initialization is lazy and thread-safe for free), or make the singleton an **enum**.
+</InShort>
+
+## the picture
+
+you want one instance of something expensive, created only when first needed, safe under threads. the obvious version puts `synchronized` on `get()`, and then every call pays for the lock forever, even though the lock only matters once. double-checked locking (DCL) tries to skip it: check without the lock, and only lock if it's still null.
+
+think of a shop sign. the owner hangs "open" on the door, then finishes stocking the shelves. a customer walks by, sees the sign, comes in to empty shelves. the sign (the reference) went up before the work (the constructor) was visible. the fix isn't more checks of the sign, it's a rule that the sign goes up *last*, and that anyone who sees the sign also sees the shelves.
+
+here's why the sign can go up early. `instance = new Config()` looks like one step. it's four bytecodes:
+
+```bash
+$ javap -c S       # if (instance == null) instance = new S();   inside synchronized
+  17: new           #8     // class S              allocate, all fields zero
+  20: dup
+  21: invokespecial #13    // Method "<init>":()V  run the constructor
+  24: putstatic     #7     // Field instance:LS;    publish the reference
+```
+
+the bytecode order is right. but the [java memory model](/learn/concurrency/java-memory-model) only promises that order to the thread doing it. another thread that reads `instance` without synchronization has no happens-before edge with the writer, so the JIT may reorder the stores, and on a weakly ordered CPU (arm, like the mac this site was measured on) the hardware may make them visible out of order too.
+
+## the broken version, step by step
+
+<Figure wide caption={<>step through it, then flip <strong>instance</strong> to volatile and step again. in the broken run the reference becomes visible <C k="dead">before</C> the constructor&apos;s writes, and B&apos;s unlocked check 1 walks straight into a zeroed object. with volatile, the publish is pinned to the end.</>}>
+<ReorderDcl />
+</Figure>
+
+notice that thread B never touches the lock. that's the entire point of DCL, and the entire problem: the lock's happens-before guarantee only applies to threads that take it. check 2 (inside the lock) is fine. check 1 (outside) is an unsynchronized read of a field someone else is writing, which the JMM calls a data race.
+
+## we caught it
+
+"theoretically broken" is easy to wave away. so we stress-tested the core of the bug on jdk 25 (temurin 25.0.4, apple M4 Pro, arm64): one thread keeps publishing fresh objects through a plain static field, another keeps reading it and checks for a zero field.
+
+| how the field is published | reads | saw a zero field |
+| --- | --- | --- |
+| plain field | 13.8 billion (6 runs) | **18 times** (4, 5, 0, 0, 1, 8 per run) |
+| `volatile` field | 9.6 billion (3 runs) | 0 |
+| plain field, but every field of the object `final` | 9.4 billion (3 runs) | 0 |
+
+<Deep title="the test program">
+```java title="Race.java"
+public class Race {
+    static final class Box {
+        int a, b, c, d;
+        Box(int v) { a = v; b = v; c = v; d = v; }
+    }
+    static Box shared;              // plain: no happens-before between the threads
+    static volatile boolean stop;
+
+    public static void main(String[] args) throws Exception {
+        Thread writer = new Thread(() -> {
+            int v = 1;
+            while (!stop) { shared = new Box(v); if (++v == 0) v = 1; }
+        });
+        long[] seen = new long[2];
+        Thread reader = new Thread(() -> {
+            long reads = 0, torn = 0;
+            while (!stop) {
+                Box h = shared;
+                if (h != null) {
+                    reads++;
+                    if (h.a == 0 || h.b == 0 || h.c == 0 || h.d == 0) torn++;
+                }
+            }
+            seen[0] = reads; seen[1] = torn;
+        });
+        writer.start(); reader.start();
+        Thread.sleep(Long.parseLong(args[0]) * 1000);
+        stop = true;
+        writer.join(); reader.join();
+        System.out.println("reads=" + seen[0] + " saw a zero field=" + seen[1]);
+    }
+}
+```
+
+```bash
+$ java Race 5
+reads=1583936490 saw a zero field=4
+$ java Race 10
+reads=3095930321 saw a zero field=8
+```
+
+the values are never 0 by construction (they start at 1 and skip 0), so a 0 can only be a field the reader saw before the constructor's write reached it. a version shaped exactly like DCL (fresh lazy holder per round) ran 5.4 billion `get()` calls without catching it once: the window is a few nanoseconds wide and the second thread usually loses the race to the lock. that's how this bug survives code review, testing and staging, then shows up once a week in prod. the proper tool for hunting it is jcstress, see [testing concurrent code](/learn/concurrency/testing-concurrent-code).
+</Deep>
+
+three readings of that table: the bug is real on modern hardware, it's rare, and both standard fixes held up.
+
+## fix 1: volatile
+
+declaring `instance` as `volatile` makes the write a *release* and every read an *acquire*. a thread whose read sees the reference is guaranteed to see everything the writer did before writing it, including the whole constructor. this works since java 5, when JSR-133 rewrote the memory model and gave `volatile` those ordering guarantees (before that, `volatile` DCL was broken too).
+
+```java title="Config.java"
+class Config {
+    private static volatile Config instance;
+
+    static Config get() {
+        Config r = instance;              // one volatile read on the fast path
+        if (r == null) {
+            synchronized (Config.class) {
+                r = instance;
+                if (r == null) instance = r = new Config();
+            }
+        }
+        return r;
+    }
+}
+```
+
+the local `r` is a small optimization worth knowing: it reads the volatile field once on the common path instead of twice (check, then return).
+
+<Effective item={83} title="use lazy initialization judiciously">
+the book's advice, paraphrased: most fields don't need lazy initialization at all. if a static field does, reach for the holder class idiom; if an instance field does, use double-checked locking with a `volatile` field and the single-read local variable trick above.
+</Effective>
+
+## fix 2: the holder class
+
+the JVM already has a lazy, thread-safe, run-exactly-once mechanism: [class initialization](/learn/jvm/class-loading). a class is initialized the first time it's actually used, and the JVM's initialization procedure takes a lock so that exactly one thread runs the static initializer while any others wait and then see its result. so hide the instance in a nested class that nothing touches until `get()`:
+
+<Predict options={["1.0, then Registry class initialized", "Registry class initialized, then 1.0", "Registry instance created, then 1.0"]} answer={1}>
+```java
+static class Registry {
+    static { System.out.println("Registry class initialized"); }
+    private Registry() { System.out.println("Registry instance created"); }
+    static String version() { return "1.0"; }
+    static Registry get() { return Holder.INSTANCE; }
+    private static class Holder { static final Registry INSTANCE = new Registry(); }
+}
+// main: System.out.println(Registry.version());
+```
+<Explain>
+calling a static method initializes `Registry` first (its static block runs), then `version()` returns. but the instance isn't created: that line lives in `Holder`, and `Holder` is only initialized when `get()` first reads `Holder.INSTANCE`. full run below.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="main starts\nRegistry class initialized\n1.0\nfirst get()\nRegistry instance created\nsecond get()\ntrue"
+public class Main {
+    static class Registry {
+        static { System.out.println("Registry class initialized"); }
+        private Registry() { System.out.println("Registry instance created"); }
+        static String version() { return "1.0"; }
+        static Registry get() { return Holder.INSTANCE; }
+
+        private static class Holder {
+            static final Registry INSTANCE = new Registry();
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("main starts");
+        System.out.println(Registry.version());
+        System.out.println("first get()");
+        Registry a = Registry.get();
+        System.out.println("second get()");
+        Registry b = Registry.get();
+        System.out.println(a == b);
+    }
+}
+```
+
+no `volatile`, no `synchronized` in your code, and after the first call `get()` is a plain static field read that the JIT can treat as a constant. honestly, the holder only beats a plain `static final INSTANCE` on the outer class when that class has *other* static members people use without wanting the instance. otherwise the outer class is already lazy enough.
+
+## fix 3: the enum
+
+<Compare>
+<Bad label="private constructor singleton">
+```java
+static class Lonely {
+    static final Lonely INSTANCE = new Lonely();
+    private Lonely() {}
+}
+// reflection walks right past "private":
+var k = Lonely.class.getDeclaredConstructor();
+k.setAccessible(true);
+k.newInstance();   // a second Lonely
+```
+</Bad>
+<Good label="enum singleton">
+```java
+enum Clock {
+    INSTANCE;
+    long now() { return System.nanoTime(); }
+}
+// the JDK refuses outright:
+// IllegalArgumentException:
+//   Cannot reflectively create enum objects
+```
+</Good>
+</Compare>
+
+```java title="Main.java" run output="a second Lonely: true\na second Clock?\nException in thread \"main\" java.lang.IllegalArgumentException: Cannot reflectively create enum objects"
+public class Main {
+    enum Clock { INSTANCE }
+
+    static class Lonely {
+        static final Lonely INSTANCE = new Lonely();
+        private Lonely() {}
+    }
+
+    public static void main(String[] args) throws Exception {
+        var k = Lonely.class.getDeclaredConstructor();
+        k.setAccessible(true);
+        System.out.println("a second Lonely: " + (k.newInstance() != Lonely.INSTANCE));
+
+        var c = Clock.class.getDeclaredConstructors()[0];
+        c.setAccessible(true);
+        System.out.println("a second Clock?");
+        c.newInstance("INSTANCE", 0);
+    }
+}
+```
+
+an enum constant is created during the enum's class initialization (so it's thread-safe like the holder), reflection can't make another one, and serialization writes it by name and resolves it back to the same constant (a regular singleton needs a `readResolve` method for that). the catch: it's eager, and it can't extend a class.
+
+<Effective item={3} title="enforce the singleton property with a private constructor or an enum type">
+paraphrased: a single-element enum is usually the best way to write a singleton, because it gets serialization and reflection safety for free. the exception is when the singleton has to extend a superclass other than `Enum`.
+</Effective>
+
+## which one
+
+| you need | use |
+| --- | --- |
+| a singleton, no special laziness | `static final INSTANCE` (class init is already lazy) or an enum |
+| lazy creation of a *static* singleton | the holder class |
+| lazy creation of an *instance* field | double-checked locking with `volatile` (lazy constants are on the way, see [what's in preview](/learn/modern/in-preview)) |
+| bulletproof against reflection and serialization | enum |
+| testable code | none of the above. pass the dependency in, let your framework hold one instance |
+
+<Deep title="final fields are the fourth fix, sort of">
+the third row of our table: when every field of the published object is `final`, the reader saw no zeros even through a racy plain reference. that's the JMM's final field guarantee: a thread that sees a reference to an object after its constructor finished sees the correct values of its `final` fields, even without synchronization (as long as `this` didn't escape during construction). so DCL "works" for a fully immutable object. but it's fragile (add one non-final field and it's broken again, silently) and the reference itself is still a race. use `volatile`.
+</Deep>
+
+<Interview q="why is double-checked locking broken without volatile?">
+because `instance = new Singleton()` is allocate, construct, publish, and without a happens-before edge another thread may see the publish before the constructor's writes. the JIT can reorder the stores, and weakly ordered CPUs like arm can make them visible out of order. the first check reads `instance` without the lock, so a thread can get a non-null reference to a half-initialized object and never synchronize. `volatile` fixes it (since the java 5 memory model): the write is a release, the read an acquire, so seeing the reference means seeing the whole constructor. better options for statics: the holder class idiom, which relies on the JVM's thread-safe lazy class initialization, or an enum.
+</Interview>
+
+<Keylines>
+- `new` is allocate, construct, publish. without synchronization, other threads may see them out of order.
+- DCL's first check is an unlocked read. without `volatile` it can return a half-built object.
+- we saw it happen on jdk 25 on arm: 18 zero fields in 13.8 billion racy reads, 0 with `volatile`.
+- `volatile` fixes DCL (java 5+). the holder idiom and enums avoid the problem by leaning on class initialization.
+- most singletons don't need to be lazy at all. `static final` is already lazy per class.
+</Keylines>

@@ -1,0 +1,243 @@
+import { PathAnatomy } from "@/components/figures/io/PathAnatomy";
+import { WalkOrder } from "@/components/figures/io/WalkOrder";
+
+<InShort>
+a **`Path`** is just a name: a root and a list of name elements. making one never touches the disk. **`Files`** is the toolbox of static methods that actually read, write, copy, walk and watch. together they replaced `java.io.File` <Since v={7} />, which mixed both jobs up and answered errors with `false`.
+</InShort>
+
+## the picture
+
+you know how `new File("data.txt")` "works" even when there's no such file? that's because it was never a file. it's an address on an envelope. you can write any address you like; whether a house is there is a separate question.
+
+`Path` makes that split explicit. the path is the address (pure text with structure). `Files` is the postman (the one who actually walks there, and comes back with an exception if nobody's home).
+
+<Figure caption={<>pick an operation. everything here is string surgery on the name: none of these paths exist. the <C k="meta">root</C> isn't a name element, <C k="dead">struck</C> segments are the ones normalize removes, faded segments are a shared prefix that relativize drops.</>}>
+<PathAnatomy />
+</Figure>
+
+```java title="Main.java" run output="exist.txt false\ntrue"
+import java.nio.file.*;
+
+void main() {
+    Path p = Path.of("does/not/exist.txt");    // fine. it's just a name
+    IO.println(p.getFileName() + " " + Files.exists(p));
+    IO.println(p.toAbsolutePath().startsWith(System.getProperty("user.dir")));
+}
+```
+
+<Predict options={["a/b/c", "/c", "an exception"]} answer={1}>
+```java
+IO.println(Path.of("a/b").resolve("/c"));
+```
+<Explain>
+`resolve` glues the argument onto the end, *unless* the argument is absolute, in which case it wins outright. that's the root of every path traversal bug: `uploads.resolve(userInput)` where the user typed `/etc/passwd` (or `../../etc/passwd`). if you resolve untrusted input, `normalize()` the result and check it still `startsWith(uploads)`.
+</Explain>
+</Predict>
+
+<Gotcha title="Path.startsWith is not String.startsWith">
+`Path.of("/homework").startsWith("/home")` is `false`, because path comparison works on whole name elements and `homework` isn't `home`. `"/homework".startsWith("/home")` is `true`. that difference is exactly why you check containment with the `Path` version.
+</Gotcha>
+
+## the Files toolbox
+
+every method is static, takes `Path`s, throws a specific `IOException` subclass when something goes wrong, and defaults to UTF-8 for text.
+
+```java title="Main.java" run output="false\n[buy milk, ship it, call mom] 26 bytes\n-1\n[todo.bak, todo.txt]"
+import java.nio.file.*;
+import java.util.List;
+
+void main() throws Exception {
+    Path dir = Files.createTempDirectory("demo");
+    Path todo = dir.resolve("todo.txt");
+
+    IO.println(Files.exists(todo));
+    Files.writeString(todo, "buy milk\nship it\n");
+    Files.writeString(todo, "call mom\n", StandardOpenOption.APPEND);
+
+    List<String> lines = Files.readAllLines(todo);
+    IO.println(lines + " " + Files.size(todo) + " bytes");
+
+    Path copy = Files.copy(todo, dir.resolve("todo.bak"));
+    IO.println(Files.mismatch(todo, copy));          // -1 means identical
+
+    try (var files = Files.list(dir)) {
+        IO.println(files.map(p -> p.getFileName().toString()).sorted().toList());
+    }
+    Files.delete(copy); Files.delete(todo); Files.delete(dir);
+}
+```
+
+| job | call |
+| --- | --- |
+| small text file in / out | `readString`, `writeString`, `readAllLines` |
+| big text file, line by line | `lines` (a lazy `Stream`, close it) or `newBufferedReader` |
+| bytes | `readAllBytes`, `write`, `newInputStream`, `newOutputStream` |
+| copy / move | `copy(a, b, REPLACE_EXISTING)`, `move(a, b, ATOMIC_MOVE)` |
+| make directories | `createDirectory` (parent must exist), `createDirectories` (makes the chain) |
+| delete | `delete` (throws if missing), `deleteIfExists` |
+| ask questions | `exists`, `isDirectory`, `isReadable`, `size`, `getLastModifiedTime` |
+| compare | `mismatch(a, b)` <Since v={12} />: index of the first different byte, or -1 |
+| scratch space | `createTempFile`, `createTempDirectory` |
+
+`StandardOpenOption` is how you say *how* to open: `CREATE`, `APPEND`, `TRUNCATE_EXISTING`, `CREATE_NEW` (fail if it's already there, the safe way to claim a file name). the defaults for `writeString` are `CREATE`, `TRUNCATE_EXISTING`, `WRITE`: it replaces the file.
+
+## why not java.io.File?
+
+`File` came with java 1.0 and has three problems you'll hit: most failures return `false` instead of telling you why, it can't do symlinks, permissions or atomic moves properly, and a few methods behave differently per OS. `Path` + `Files` arrived in java 7 (NIO.2, JSR 203) to fix all of it.
+
+```java title="Main.java" run output="File.delete: false\nFiles.delete: DirectoryNotEmptyException\nFiles.delete: NoSuchFileException"
+import java.io.File;
+import java.nio.file.*;
+
+void main() throws Exception {
+    Path dir = Files.createTempDirectory("full");
+    Files.writeString(dir.resolve("a.txt"), "hi");
+
+    IO.println("File.delete: " + new File(dir.toString()).delete());
+    try {
+        Files.delete(dir);
+    } catch (Exception e) {
+        IO.println("Files.delete: " + e.getClass().getSimpleName());
+    }
+    try {
+        Files.delete(dir.resolve("nope.txt"));
+    } catch (Exception e) {
+        IO.println("Files.delete: " + e.getClass().getSimpleName());
+    }
+    Files.delete(dir.resolve("a.txt"));
+    Files.delete(dir);
+}
+```
+
+`false`, why? you'll never know. `Files` names the actual problem. when old APIs hand you a `File`, convert at the edge: `file.toPath()` and `path.toFile()` go both ways.
+
+## walking a tree
+
+`Files.walk(root)` gives you a lazy `Stream<Path>` of everything under `root`, depth-first, starting with `root` itself. `Files.list(dir)` is the one-level version. `Files.find` is walk plus a filter that also sees each file's attributes.
+
+<Figure caption={<>step through a walk, then change <code>maxDepth</code>. a directory is entered the moment it's found, before its siblings: that's depth-first. the <C k="hot">current</C> path is the one the stream just handed out.</>}>
+<WalkOrder />
+</Figure>
+
+```java title="Main.java" run output="[]\n[build.gradle]\n[docs]\n[docs/readme.md]\n[src]\n[src/main]\n[src/main/App.java]\n[src/main/Util.java]\njava files: 2\ndeleted: true"
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.Comparator;
+import java.util.stream.Stream;
+
+void main() throws IOException {
+    Path root = Files.createTempDirectory("site");
+    Files.createDirectories(root.resolve("src/main"));
+    Files.createDirectories(root.resolve("docs"));
+    Files.writeString(root.resolve("src/main/App.java"), "class App {}");
+    Files.writeString(root.resolve("src/main/Util.java"), "class Util {}");
+    Files.writeString(root.resolve("docs/readme.md"), "# hi");
+    Files.writeString(root.resolve("build.gradle"), "");
+
+    try (Stream<Path> all = Files.walk(root)) {
+        all.map(root::relativize).map(Path::toString).sorted().forEach(p -> IO.println("[" + p + "]"));
+    }
+
+    try (Stream<Path> java = Files.find(root, 10, (p, attrs) -> p.toString().endsWith(".java"))) {
+        IO.println("java files: " + java.count());
+    }
+
+    // delete the whole tree: children before parents, so walk in reverse order
+    try (Stream<Path> all = Files.walk(root)) {
+        all.sorted(Comparator.reverseOrder()).forEach(p -> {
+            try { Files.delete(p); } catch (IOException e) { throw new RuntimeException(e); }
+        });
+    }
+    IO.println("deleted: " + !Files.exists(root));
+}
+```
+
+the empty `[]` at the top is `root` relativized against itself. and the reverse-sorted delete is the standard trick for `rm -rf`: a directory has to be empty before `Files.delete` accepts it, and reverse lexical order puts every child before its parent.
+
+<Gotcha title="close your streams, they hold the directory open">
+`Files.walk`, `Files.list`, `Files.find` and `Files.lines` keep an OS handle open (a directory stream or a file descriptor) until the stream is closed. a terminal operation like `toList()` does **not** close it. in a long-running server that's a slow file-descriptor leak ending in `Too many open files`. always try-with-resources.
+</Gotcha>
+
+for more control (skip a subtree, handle errors per file, act on the way out of a directory), use `Files.walkFileTree` with a `FileVisitor`. it's the callback version of the same depth-first walk.
+
+## watching a directory
+
+a `WatchService` tells you when entries in a directory are created, modified or deleted, so you can react to a dropped file instead of polling yourself.
+
+<Figure caption="hover a stage. one WatchKey per registered directory. it collects events until you drain it, and stops reporting until you reset() it.">
+<Flow
+  stages={[
+    { label: "register", sub: "dir.register(watcher, kinds)", note: "pick the kinds you care about: ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY. you get a WatchKey back, one per directory." },
+    { label: "take / poll", sub: "blocks", note: "take() waits forever, poll(timeout) waits a bit. both return the next WatchKey that has events. usually on its own thread." },
+    { label: "pollEvents", sub: "drain the key", note: "a list of WatchEvents: the kind, and the context, which is a relative Path (just the file name, resolve it against the dir)." },
+    { label: "reset", sub: "re-arm", note: "forget this and the key never signals again. it returns false if the directory is gone and the key is dead." },
+  ]}
+/>
+</Figure>
+
+```java title="Main.java" run output="ENTRY_CREATE order-42.json\nstill valid: true"
+import java.nio.file.*;
+import java.util.concurrent.TimeUnit;
+import static java.nio.file.StandardWatchEventKinds.*;
+
+void main() throws Exception {
+    Path dir = Files.createTempDirectory("inbox");
+    try (WatchService watcher = FileSystems.getDefault().newWatchService()) {
+        dir.register(watcher, ENTRY_CREATE, ENTRY_DELETE);
+
+        Files.createFile(dir.resolve("order-42.json"));
+
+        WatchKey key = watcher.poll(10, TimeUnit.SECONDS);
+        for (WatchEvent<?> e : key.pollEvents()) {
+            IO.println(e.kind() + " " + e.context());
+        }
+        IO.println("still valid: " + key.reset());
+    }
+    Files.delete(dir.resolve("order-42.json"));
+    Files.delete(dir);
+}
+```
+
+<Gotcha title="a WatchService is not a file-sync engine">
+it watches **one directory, not the tree below it**: register every subdirectory yourself (and new ones as they appear). events can be coalesced or dropped under load (you get an `OVERFLOW` event when that happens). and how fast it reacts depends on the OS: linux uses inotify and windows its native change notifications, but on macOS the JDK falls back to **polling every 2 seconds** (`PollingWatchService`). that run above took about 2.4 s on a mac for exactly that reason.
+</Gotcha>
+
+<Deep title="a zip file is a filesystem too">
+`Path` isn't tied to your disk. it belongs to a `FileSystem`, and the JDK ships a provider that treats a zip (or jar) as one. same `Files` calls, different world:
+
+```java title="Main.java" run output="ship the io chapters\njar"
+import java.nio.file.*;
+import java.util.Map;
+
+void main() throws Exception {
+    Path zip = Files.createTempDirectory("z").resolve("notes.zip");
+
+    try (FileSystem fs = FileSystems.newFileSystem(zip, Map.of("create", "true"))) {
+        Path inside = fs.getPath("/2026/october.txt");
+        Files.createDirectories(inside.getParent());
+        Files.writeString(inside, "ship the io chapters");
+    }
+
+    try (FileSystem fs = FileSystems.newFileSystem(zip)) {
+        Path inside = fs.getPath("/2026/october.txt");
+        IO.println(Files.readString(inside));
+        IO.println(inside.getFileSystem().provider().getScheme());
+    }
+}
+```
+
+that's also how the JDK reads its own class library: `jrt:/java.base/java/lang/String.class` is a path in the `jrt` filesystem, backed by the `lib/modules` image.
+</Deep>
+
+<Interview q="what's the difference between java.io.File and java.nio.file.Path?">
+`File` is the java 1.0 API: one class that's both the name and the operations, with failures reported as `false` and weak support for links, permissions and atomic operations. `Path` (java 7, NIO.2) is only the name, immutable and tied to a `FileSystem` (so it works for zips and other providers), and the operations live in `Files`, which throws specific exceptions like `NoSuchFileException` or `DirectoryNotEmptyException`. bonus point: `Files.walk`/`lines` return streams that must be closed, and `resolve` with an absolute argument discards the base, which matters for path traversal.
+</Interview>
+
+<Keylines>
+- a `Path` is a name. creating one never touches the disk.
+- `Files` does the work, and throws an exception that says what went wrong.
+- `resolve` glues paths, unless the other one is absolute. `normalize` is textual. `relativize` is the inverse.
+- relative paths resolve against the working directory, not your code's location.
+- `walk`, `list`, `find`, `lines`: lazy streams holding OS handles. try-with-resources.
+- `WatchService`: one directory, not recursive, polls every 2 s on macOS.
+</Keylines>

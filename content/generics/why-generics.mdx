@@ -1,0 +1,151 @@
+import { FailEarly } from "@/components/figures/generics/FailEarly";
+
+<InShort>
+before java 5, every collection held `Object`. you cast on the way out, and a wrong element blew up at the **read**, far away from the line that put it there. **generics** let you write `List<String>`, so the compiler checks every add and writes every cast for you.
+
+same bug, found at **compile time** instead of at 3am. that's the whole reason they exist.
+</InShort>
+
+## the picture
+
+you know how a `ClassCastException` stack trace always points at a line that looks perfectly fine? that's because the line that crashed isn't the line that's wrong. something else, somewhere else, put the wrong thing in the box. the crash is just where someone finally opened it.
+
+think of a warehouse with unlabelled crates (a raw `List` holds `Object`). anyone can put anything in any crate, and you only find out a crate of shoes is in the fruit aisle when somebody opens it to make a smoothie. generics are the label on the crate, checked at the loading dock (javac). the wrong delivery gets turned away at the door, with the driver still standing there.
+
+<Figure wide caption={<>flip the list between raw and <code>List&lt;String&gt;</code>. same program, same bug on line 4. watch <em>where</em> it gets caught: <C k="hot">the real bug</C> versus <C k="dead">where java complains</C>, and whether that happens before or after the program runs. all output is real jdk 25.</>}>
+<FailEarly />
+</Figure>
+
+that distance is the whole problem. with a raw list, the error shows up where the list is *read*. with a generic one, it shows up where the list is *written*, which is where the bug actually is.
+
+## life before java 5
+
+java 1.0 shipped in 1996 with `Vector` and `Hashtable`, and java 1.2 added the collections framework. all of it was built on one idea: everything is an `Object`, so a collection of `Object` can hold anything. true, and kind of useless, because you never want "anything". you want strings, or orders, or a map from names to lists of scores.
+
+<Compare>
+<Bad label="2003: casts all the way down">
+```java
+Map scores = new HashMap();
+List list = new ArrayList();
+list.add(Integer.valueOf(91));
+scores.put("ada", list);
+
+int first = ((Integer) ((List) scores
+    .get("ada")).get(0)).intValue();
+```
+</Bad>
+<Good label="2004 onwards: the types do the work">
+```java
+Map<String, List<Integer>> scores =
+    new HashMap<>();
+scores.computeIfAbsent("ada",
+    k -> new ArrayList<>()).add(91);
+
+int first = scores.get("ada").get(0);
+```
+</Good>
+</Compare>
+
+the left side has two casts and an `intValue()`, and nothing on that page tells you a `scores` value is a `List` of `Integer`s. that knowledge lived in comments, in variable names, and in people's heads. generics moved it into the type, where javac can check it.
+
+```java title="Main.java" run output="91\n78\nfirst: 91"
+void main() {
+    Map<String, List<Integer>> scores = new HashMap<>();
+    scores.computeIfAbsent("ada", k -> new ArrayList<>()).add(91);
+    scores.computeIfAbsent("ada", k -> new ArrayList<>()).add(78);
+
+    int first = scores.get("ada").get(0);          // no casts, two levels deep
+    for (int s : scores.get("ada")) IO.println(s);
+    IO.println("first: " + first);
+}
+```
+
+<Figure caption={<>how java got here. generics, autoboxing and the for-each loop all arrived together in java 5, which is why the right-hand code above looks so different.</>}>
+<Flow stages={[
+  { label: "java 1.2", sub: "1998", note: "the collections framework: List, Map, Set. every element is an Object, every read is a cast." },
+  { label: "GJ", sub: "1998", note: "\"generic java\", a research compiler by Bracha, Odersky, Stoutamire and Wadler. it compiled generics away, so the JVM didn't need to change." },
+  { label: "java 5", sub: "2004", note: "generics ship (JSR 14), built on GJ's design: type checks at compile time, erased at run time." },
+  { label: "java 7", sub: "2011", note: "the diamond: new HashMap<>() instead of repeating the type arguments." },
+  { label: "java 10", sub: "2018", note: "var: let the compiler infer the whole declared type." },
+]} />
+</Figure>
+
+## what the compiler does for you
+
+two jobs, and that's all generics are:
+
+1. **check every write.** `names.add(42)` on a `List<String>` doesn't compile.
+2. **write every cast.** `String s = names.get(0)` compiles to a call that returns `Object`, followed by a cast to `String` that javac inserted. you never type it, and as long as nobody goes around job 1, it can never fail.
+
+notice what's missing: the list itself didn't change. an `ArrayList<String>` and an `ArrayList<Integer>` are the same class at run time, both backed by a plain `Object[]`. the type argument lives in the compiler's head, not in the object.
+
+<Figure caption={<>one list, two variables pointing at it: <code>names</code> is declared <code>List&lt;String&gt;</code>, <code>raw</code> is a raw <code>List</code>. the object has no idea which one you used. its array is an <code>Object[]</code>, and the <C k="dead">Integer</C> got in through the raw door.</>}>
+<Memory
+  frames={[{ name: "main", locals: { names: { ref: "l" }, raw: { ref: "l" } } }]}
+  heap={{
+    l: { type: "ArrayList", fields: { elementData: { ref: "a" }, size: 2 } },
+    a: { type: "Object[]", items: [{ ref: "s" }, { ref: "i" }] },
+    s: { type: "String", value: '"ada"' },
+    i: { type: "Integer", value: "42", state: "dead", tag: "not a String" },
+  }}
+/>
+</Figure>
+
+that's why you can sneak a wrong element in: the checks are a compile-time contract, and raw types let you step outside it. and when nobody needs the element to be a `String`, nothing even notices.
+
+<Predict options={["1, then ClassCastException", "1, then 42, then ClassCastException", "compile error on line 4"]} answer={1}>
+```java
+List<String> names = new ArrayList<>();
+List raw = names;
+raw.add(42);                       // a warning, not an error
+IO.println(names.size());
+IO.println(names.get(0));
+String s = names.get(0);
+```
+<Explain>
+`raw.add(42)` compiles with a warning, and the list happily stores an `Integer` (it's an `Object[]` inside). `IO.println` takes an `Object`, so javac doesn't bother inserting a cast to `String` there, and `42` prints. only the last line needs a real `String`, so that's where the hidden cast lives, and that's where it throws. checked on jdk 25: `1`, `42`, then `ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String`. the crash is two lines away from the bug, and it could have been two files away.
+</Explain>
+</Predict>
+
+## why not something else?
+
+**why not keep `Object` and be careful?** people did, for eight years. "be careful" doesn't scale past one person and one file. the whole point of a type system is that the computer is careful for you.
+
+**why not arrays? `String[]` is already typed.** it is, and arrays do check every store, but at **run time**, with an `ArrayStoreException`. that's earlier than a cast failing on the way out, still later than a compile error. and arrays have their own holes ([arrays, varargs and other limits](/learn/generics/generics-limitations)).
+
+**why not a class per element type, `StringList`, `OrderList`?** that's roughly what C++ templates do: the compiler stamps out a separate copy of the code for every type argument. java chose the opposite. one `ArrayList` class, shared by every type argument, with the types checked by javac and then thrown away. it meant the JVM didn't have to change at all, and old class files kept working next to new ones. the price of that choice is [type erasure](/learn/generics/type-erasure), and most of the weird corners in this part come from it.
+
+## raw types still compile
+
+for compatibility, every generic type still has a **raw** form: `List` with no angle brackets. it exists so code from 2003 compiles today. it also switches the checks off, and javac only mutters about it. by default you get two `Note:` lines. ask for everything and you see what it's actually worried about (first line of each warning, from javac 25, for the raw program in the figure):
+
+```bash
+$ javac -Xlint:all Main.java
+Main.java:1: warning: [rawtypes] found raw type: List
+Main.java:2: warning: [rawtypes] found raw type: List
+Main.java:2: warning: [rawtypes] found raw type: ArrayList
+Main.java:3: warning: [unchecked] unchecked call to add(E) as a member of the raw type List
+Main.java:4: warning: [unchecked] unchecked call to add(E) as a member of the raw type List
+Main.java:9: warning: [rawtypes] found raw type: List
+6 warnings
+```
+
+<Gotcha title="an unchecked warning is a ClassCastException with a delay">
+`unchecked` means "i can't check this, so the cast i'm inserting somewhere else might fail". every one of those is a place where the compile-time promise has a hole in it. if you mean "a list of anything", write `List<Object>` (holds anything, checked) or `List<?>` (a list of *some* type, read-only-ish, see [wildcards](/learn/generics/wildcards-and-pecs)). never a bare `List`.
+</Gotcha>
+
+<Effective item={26} title="don't use raw types">
+raw types throw away everything generics give you and exist only for code written before 2004. the two places a raw name is still correct are class literals (`List.class`, since `List<String>.class` isn't a thing) and `instanceof`, though `o instanceof List<?>` reads better. the full set of generics items is in [effective java: generics](/learn/effective-java/generics).
+</Effective>
+
+<Interview q="what problem do generics solve?">
+they let you say what a container holds, so the compiler can check every insertion and insert every cast for you. without them, collections hold `Object`, every read needs a manual cast, and a wrong element fails with a `ClassCastException` wherever it happens to be read, which is usually far from the bug. bonus points: java implements generics by erasure, so the checks happen only at compile time. at run time an `ArrayList<String>` is a plain `ArrayList`, which is why raw types can still smuggle the wrong thing in.
+</Interview>
+
+<Keylines>
+- before java 5, collections held `Object` and every read was a cast you wrote by hand.
+- a raw collection fails where it's read. a generic one fails where it's written, which is where the bug is.
+- generics do two jobs: check every write, insert every cast.
+- the object doesn't know its type argument. the compiler does.
+- raw types still compile for compatibility. treat their warnings as bugs.
+</Keylines>

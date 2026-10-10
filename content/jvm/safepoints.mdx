@@ -1,0 +1,138 @@
+import { SafepointTimeline } from "@/components/figures/jvm/SafepointTimeline";
+
+<InShort>
+some JVM work needs every java thread stopped at a place where the JVM knows exactly what's on its stack: a **safepoint**. most GC pauses, thread dumps and big deoptimizations work this way. the JVM can't freeze a thread mid-instruction, so it raises a flag and waits for each thread to reach its next **poll** (a method return, a loop back-edge).
+
+that wait is **time to safepoint**. it's usually microseconds. one thread in a loop with no poll can make it seconds, and it won't show up in your GC log.
+</InShort>
+
+## the picture
+
+you know those latency spikes where the GC log swears the pause was 3 ms, but the request took a second? this is very often why.
+
+think of a teacher saying "pencils down". nobody drops their pencil mid-letter: everyone finishes the word they're writing and then stops. most students are done in a blink. but one student in the middle of a sentence with no full stop in sight keeps writing, and the whole class sits there waiting for them. the teacher (the JVM) can't collect papers (run the GC) until every pencil is down.
+
+<Figure wide caption={<>press play, then switch the loop polls off and play again. the shape is a sketch; the two numbers in the log line are from real runs of the program below on jdk 25. notice that with polls off, three of the four threads are already parked and doing nothing: the cost isn't paid by the slow thread, it's paid by everyone.</>}>
+<SafepointTimeline />
+</Figure>
+
+## the experiment
+
+a worker thread runs a hot, C2-compiled counted `int` loop with no calls in it. after half a second, `main` asks for a full GC, which needs a safepoint:
+
+```java title="Ttsp.java"
+public class Ttsp {
+    static volatile long sink;
+
+    static long spin(int n) {
+        long sum = 0;
+        for (int i = 0; i < n; i++) {        // a counted int loop, no calls inside
+            sum += i ^ (sum >>> 3);
+        }
+        return sum;
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int k = 0; k < 20; k++) sink += spin(1_000_000);   // get spin() compiled by C2
+        Thread worker = new Thread(() -> {
+            for (int r = 0; r < 3; r++) sink += spin(Integer.MAX_VALUE);
+        });
+        worker.start();
+        Thread.sleep(500);
+        long t0 = System.nanoTime();
+        System.gc();
+        long t1 = System.nanoTime();
+        System.out.printf("System.gc() returned after %.1f ms%n", (t1 - t0) / 1e6);
+        worker.join();
+    }
+}
+```
+
+```text title="java -Xlog:safepoint Ttsp  (jdk 25, default flags)"
+[0.539s][info][safepoint] Safepoint "G1CollectFull", Time since last: 527126125 ns, Reaching safepoint: 34542 ns, At safepoint: 1954958 ns, Leaving safepoint: 2958 ns, Total: 1992458 ns, Threads: 1 runnable, 11 total
+System.gc() returned after 2.1 ms
+```
+
+```text title="java -XX:-UseCountedLoopSafepoints -Xlog:safepoint Ttsp"
+[1.611s][info][safepoint] Safepoint "G1CollectFull", Time since last: 528128083 ns, Reaching safepoint: 1072004292 ns, At safepoint: 1893916 ns, Leaving safepoint: 4250 ns, Total: 1073902458 ns, Threads: 1 runnable, 11 total
+System.gc() returned after 1074.0 ms
+```
+
+how to read those lines:
+
+<Defs>
+<dt>`"G1CollectFull"`</dt><dd>the operation that needed the safepoint. here, `System.gc()` with G1.</dd>
+<dt>`Reaching safepoint`</dt><dd>time to safepoint: from "everyone stop" until the last thread arrived. 35 µs vs 1.07 s.</dd>
+<dt>`At safepoint`</dt><dd>the operation itself. about 2 ms of GC either way.</dd>
+<dt>`Threads: 1 runnable`</dt><dd>how many threads were running java code when the request went out, so had to be waited for. the other 10 were already blocked or in native code.</dd>
+</Defs>
+
+the GC did the same 2 ms of work both times. the difference is 1,070 ms of every thread standing around waiting for one loop to finish.
+
+## where the polls are
+
+a poll is a tiny check compiled into the code: load a word from the thread's own polling page, and if the JVM has armed it, stop. the JVM puts polls where it's cheap and where it can describe the stack exactly:
+
+- **the interpreter** checks between bytecodes, effectively everywhere.
+- **compiled code** polls on method return and on loop back-edges.
+- **counted loops** (an `int` index going from a to b) are the exception C2 wanted: polls inside them cost a few percent in the tightest loops. since java 10, C2 compromises with **loop strip mining**: the loop is split into an outer loop with a poll and an inner loop of at most 1,000 iterations without one (`LoopStripMiningIter=1000`, on by default with G1, ZGC and Shenandoah). that's why the default run reached the safepoint in 35 µs.
+- **threads in native code or blocked** don't need to reach a poll at all. they're already safe: the JVM doesn't need to look at what C is doing, and they'll block on their way back into java.
+
+`-XX:-UseCountedLoopSafepoints` turns back the clock to before strip mining, which is how C2 behaved for years. the classic victims were `int`-indexed loops over big arrays, and the folk workaround was to make the index a `long`, which C2 back then didn't treat as a counted loop, so the poll stayed in.
+
+<Quiz question="the JVM wants a safepoint. which of these threads does it NOT have to wait for?" options={["a thread in a C2-compiled loop", "a thread being interpreted", "a thread blocked reading from a socket", "a thread calling small methods in a loop"]} answer={2}>
+<Explain>
+the blocked one. a thread in native code (a socket read ends up in one) or blocked on a lock can't touch the java heap or its own java frames until it comes back, and on the way back it checks the safepoint flag and blocks. so it counts as already safe. that's the `Threads: 1 runnable, 11 total` in the log: only one of eleven threads actually had to be waited for.
+</Explain>
+</Quiz>
+
+## what stops the world
+
+everything that needs a consistent view of all stacks or the whole heap. here's what showed up in `-Xlog:safepoint` for a small allocating program over 4 seconds, plus one `jcmd <pid> Thread.print` while it ran:
+
+<Figure caption="safepoint operations seen in one real run (jdk 25, G1, 256 MB heap). most of them are the GC. the thread dump cost two.">
+<Tree>{`
+safepoints in 4 seconds
+    G1CollectForAllocation      // 1,793 young collections
+    G1PauseRemark               // 466, end of concurrent marking
+    G1PauseCleanup              // 466
+    PrintThreads #hot           // jcmd Thread.print
+    FindDeadlocks #hot          // also jcmd Thread.print
+`}</Tree>
+</Figure>
+
+other operations that can need one: deoptimizing many methods at once (after loading a class that breaks C2's assumptions), class redefinition by agents and debuggers, heap dumps, and some JFR and JVMTI work.
+
+## handshakes: stopping just one thread
+
+a lot of work only needs *one* thread to stop: grabbing its stack trace, deoptimizing its frames, revoking something it owns. stopping the whole JVM for that is wasteful, so java 10 added **thread-local handshakes** ([JEP 312](https://openjdk.org/jeps/312)): the JVM arms only the target thread's poll, and that thread runs the operation (or lets the VM run it) at its next poll, while everyone else keeps going.
+
+```text title="java -Xlog:handshake*=debug Hs  (calling busyThread.getStackTrace())"
+[0.118s][debug][handshake,task] Operation: GetStackTraceClosure for thread 0x0000007c511a1800, is_vm_thread: false, completed in 5083 ns
+[0.118s][info ][handshake     ] Handshake "GetStackTraceClosure", Targeted threads: 1, Executed by requesting thread: 0, Total completion time: 56208 ns
+```
+
+one thread, 56 µs, nobody else noticed. every release moves more operations from global safepoints to handshakes, and concurrent collectors like ZGC lean on them heavily ([JEP 376](https://openjdk.org/jeps/376) moved ZGC's thread-stack scanning out of safepoints in java 16).
+
+<Gotcha title="the GC log doesn't include time to safepoint">
+here's the same no-poll run with GC logging on too:
+
+```text title="java -XX:-UseCountedLoopSafepoints -Xlog:gc,safepoint Ttsp"
+[1.695s][info][gc] GC(0) Pause Full (System.gc()) 3M->1M(28M) 3.264ms
+[1.695s][info][safepoint] Safepoint "G1CollectFull", ... Reaching safepoint: 1154507375 ns, At safepoint: 3292458 ns, ... Total: 1157805958 ns
+```
+
+the GC log reports a 3.3 ms pause. the application was actually stopped (or waiting to be) for 1.16 seconds. if your p99 latency has spikes that the GC log can't explain, turn on `-Xlog:safepoint` and look at `Reaching safepoint`. it's cheap enough to leave on in production. and since profilers that sample at safepoints can only see threads *at* polls, they'll never point at the loop that caused this (that's "safepoint bias", see [profiling](/learn/performance/profiling-and-flame-graphs)).
+</Gotcha>
+
+<Interview q="what is a safepoint, and why does the JVM need them?">
+a point in a thread's execution where the JVM knows precisely what the thread's stack and registers mean: which slots hold references, where every object pointer is. the GC needs that to find and update every reference when it moves objects, and the JIT needs it to replace compiled frames with interpreter frames. compiled code only keeps that information at specific places, so the JVM arms a poll and waits for each thread to reach one. the important follow-up is time to safepoint: the pause the user sees is time to reach the safepoint plus the operation, and a thread that takes a long time to reach a poll delays everyone.
+</Interview>
+
+<Keylines>
+- a safepoint is where the JVM knows exactly what's on a thread's stack. global ones stop every java thread.
+- threads stop at polls: method returns and loop back-edges. native and blocked threads are already safe.
+- time to safepoint is usually microseconds. one loop without polls made it 1.07 seconds here.
+- since java 10, loop strip mining keeps polls in counted loops every 1,000 iterations.
+- the GC log doesn't count time to safepoint. -Xlog:safepoint does.
+</Keylines>

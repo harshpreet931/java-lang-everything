@@ -1,0 +1,163 @@
+import { MutableKey } from "@/components/figures/deep-dives/MutableKey";
+
+<InShort>
+a hash collection files every object under its `hashCode()` at the moment it went in, and finds it again by **recomputing** the hash and then asking `equals`. so a key whose hash changes while it's inside is **lost**: still there, never found, never removed.
+
+the rest of the traps are about what "equal" means: `getClass()` vs `instanceof`, records comparing `double`s by their bits and arrays by identity, `Long` keys that never match an `int`. each one compiles, runs, and gives the wrong answer quietly.
+</InShort>
+
+## the picture
+
+you know the rule "if you override `equals`, override `hashCode`"? that's the famous half. the half that bites in production is quieter: **a key's hash must not change while it's in a hash collection**. the contracts themselves are covered in [the object methods](/learn/oop/object-methods) and [effective java's items 10 and 11](/learn/effective-java/methods-common-to-all-objects). this chapter is about the ways code that follows them still goes wrong.
+
+think of a library that shelves books by the first letter of the title. you shelve "Atlas" under A. then someone renames it "Zebra" with a marker, right there on the shelf. ask for "Zebra" and the librarian checks Z: nothing. ask for "Atlas" and she checks A, finds a book, reads the cover, and it says Zebra, so that's not it either. the book is in the library, and nobody will ever find it.
+
+## a key that changes
+
+<Figure wide caption={<>step through it. the set's entry keeps the hash it was filed under; the object behind it changes. every lookup lands in the <C k="hot">bucket</C> the <em>current</em> hash points to, and comes back <C k="dead">false</C>. bucket numbers are what jdk 25's HashMap really computes.</>}>
+<MutableKey />
+</Figure>
+
+here's the real thing:
+
+```java title="Main.java" run output="false false 1 [(7, 2)]\n2 [(7, 2), (7, 2)]"
+class Point {
+    int x, y;                                  // mutable, and used by hashCode
+    Point(int x, int y) { this.x = x; this.y = y; }
+    @Override public boolean equals(Object o) { return o instanceof Point p && x == p.x && y == p.y; }
+    @Override public int hashCode() { return Objects.hash(x, y); }
+    @Override public String toString() { return "(" + x + ", " + y + ")"; }
+}
+
+void main() {
+    Set<Point> set = new HashSet<>();
+    Point p = new Point(1, 2);
+    set.add(p);
+    p.x = 7;                                   // mutate while inside the set
+    IO.println(set.contains(p) + " " + set.remove(p) + " " + set.size() + " " + set);
+    set.add(p);
+    IO.println(set.size() + " " + set);
+}
+```
+
+`contains` false, `remove` false, `size` 1, and after one more `add`, a set holding the same object twice. nothing threw. this is also a slow memory leak: entries like that can never be removed, only cleared with the whole collection (more in [memory leaks](/learn/gc/memory-leaks)).
+
+the fix is to make it impossible: keys with `final` fields (or records of immutable values), or at least a `hashCode` that only uses fields that never change.
+
+<Gotcha title="the entity whose id arrives on save">
+the classic production version: a JPA entity whose `equals` and `hashCode` use a database-generated `id`. you put a new entity in a `HashSet` (its `id` is `null`, so it hashes one way), save it, the database assigns `id = 42`, and now it hashes another way. it vanishes from the set it's sitting in, exactly like the figure. ORM-friendly entities either hash on a natural key that never changes, or return a constant from `hashCode` and accept slower sets.
+</Gotcha>
+
+## getClass or instanceof
+
+there are two ways to write the type check in `equals`, and each one breaks something.
+
+with `instanceof`, a subclass that adds a field can't be equal both ways: `point.equals(colorPoint)` is true but `colorPoint.equals(point)` isn't (that's the `ColorPoint` problem, drawn out in [the object methods](/learn/oop/object-methods)). so people switch to `getClass()`, which only accepts the exact same class. that fixes symmetry and breaks something else: any subclass at all, even one that adds nothing, is never equal.
+
+```java title="Main.java" run output="false false"
+class Strict {
+    final int x, y;
+    Strict(int x, int y) { this.x = x; this.y = y; }
+    @Override public boolean equals(Object o) {
+        if (o == null || getClass() != o.getClass()) return false;   // the getClass() style
+        Strict s = (Strict) o;
+        return x == s.x && y == s.y;
+    }
+    @Override public int hashCode() { return 31 * x + y; }
+}
+
+void main() {
+    Strict a = new Strict(1, 2);
+    Strict b = new Strict(1, 2) { };            // an anonymous subclass that adds nothing
+    IO.println(a.equals(b) + " " + b.equals(a));
+}
+```
+
+an empty anonymous subclass is contrived, but the same thing happens for real with proxies: Hibernate's lazy-loading proxies, Mockito spies, and anything that generates a subclass of your class at runtime. a `getClass()`-based `equals` says the proxy isn't equal to the entity it stands for.
+
+| | `instanceof` | `getClass()` |
+| --- | --- | --- |
+| subclass that adds state | breaks symmetry | correct |
+| subclass that adds nothing, proxies, mocks | correct | never equal |
+| the way out | make the class (or its `equals`) `final` | don't let subclasses exist either |
+
+so both roads end in the same place: equality and inheritance don't mix. make value classes `final` and use `instanceof` (or a pattern: `o instanceof Point p`), or use a record, which is final by definition.
+
+## records, and their two surprises
+
+a record generates `equals` and `hashCode` from its components, consistently, and it's final, so most of this chapter doesn't apply. but the generated `equals` compares each component in a specific way, and two of them surprise people:
+
+- `float` and `double` components are compared like `Double.compare` does, by value bits, not with `==`.
+- array components are compared with the array's own `equals`, which is identity.
+
+```java title="Main.java" run output="true false\nfalse true\nfalse"
+record Temp(double celsius) {}
+record Key(byte[] bytes) {}
+
+void main() {
+    IO.println((0.0 == -0.0) + " " + new Temp(0.0).equals(new Temp(-0.0)));
+    IO.println((Double.NaN == Double.NaN) + " " + new Temp(Double.NaN).equals(new Temp(Double.NaN)));
+    IO.println(new Key(new byte[] {1, 2}).equals(new Key(new byte[] {1, 2})));
+}
+```
+
+`0.0 == -0.0` is true, but they're different bit patterns, so the records aren't equal. `NaN == NaN` is false, but the bits match, so the records are. the `Double.compare` way is the right one for a hash collection (it's reflexive, and equal values get equal hashes), it's just not what `==` taught you. here are the two zeros, bit by bit:
+
+<Figure caption={<><code>0.0</code> and <code>-0.0</code> as the 64 bits a <code>double</code> really is. only the sign bit differs. <code>==</code> says they're equal; <code>Double.compare</code>, and so a record, says they aren't.</>}>
+<Bits type="double" value="0.0" label="double 0.0" />
+<Bits type="double" value="-0.0" label="double -0.0" />
+</Figure>
+
+and the `Key` record with a `byte[]` inside is equal only to itself. a record holding a `List` compares contents (because `List.equals` does), but then its hash changes if someone mutates that list, which is the first section all over again. give records immutable components: `List.copyOf(list)` in the constructor, and no arrays.
+
+## arrays use Object's equals
+
+an array is an object that never overrode `equals` or `hashCode`. both are identity: two arrays with the same contents are two different keys.
+
+<Figure caption={<>two arrays, same contents, two <C k="ref">references</C>. <code>a.equals(b)</code> asks whether the arrows point at the same object, and they don't.</>}>
+<Memory frames={[{ name: "main", locals: { a: { ref: "a1" }, b: { ref: "a2" } } }]} heap={{ a1: { type: "int[]", value: "{1, 2, 3}" }, a2: { type: "int[]", value: "{1, 2, 3}" } }} />
+</Figure>
+
+```java title="Main.java" run output="false true false true\n2 false\nfalse true"
+void main() {
+    int[] a = {1, 2, 3};
+    int[] b = {1, 2, 3};
+    IO.println(a.equals(b) + " " + Arrays.equals(a, b) + " " + (a.hashCode() == b.hashCode()) + " " + (Arrays.hashCode(a) == Arrays.hashCode(b)));
+    Set<int[]> set = new HashSet<>(List.of(a, b));
+    IO.println(set.size() + " " + set.contains(new int[] {1, 2, 3}));
+    int[][] m = {{1}, {2}};
+    int[][] n = {{1}, {2}};
+    IO.println(Arrays.equals(m, n) + " " + Arrays.deepEquals(m, n));
+}
+```
+
+`Arrays.equals` and `Arrays.hashCode` compare contents, one level deep. for arrays of arrays you need `Arrays.deepEquals` and `deepHashCode`, because one level down the elements are arrays again, compared by identity. and a `Set<int[]>` or a `Map<byte[], ...>` is almost always a bug: wrap the array in a record with hand-written `equals`/`hashCode`, or use a `List<Integer>`, or a `String` if it's bytes of text.
+
+## the key that's the wrong type
+
+<Predict options={["ada", "null", "compile error", "ClassCastException"]} answer={1}>
+```java
+Map<Long, String> names = new HashMap<>();
+names.put(1L, "ada");
+IO.println(names.get(1));
+```
+<Explain>
+`null`. `Map.get` takes an `Object`, not a `Long`, so `get(1)` compiles: the `1` is boxed to an `Integer`. an `Integer` and a `Long` are never `equals`, even with the same value (each class only accepts its own type), so the lookup finds nothing. `containsKey(1)` says false too. on jdk 25 this prints `null`, while `names.get(1L)` prints `ada`. IntelliJ warns about it ("suspicious call"), javac doesn't.
+</Explain>
+</Predict>
+
+<Deep title="URL.equals goes to the network">
+`java.net.URL.equals` and `hashCode` consider two URLs equal if their hosts resolve to the same IP address, so they can do a DNS lookup, block, and give different answers when DNS changes or you're offline. a `HashSet<URL>` can make network calls. use `java.net.URI` for anything you compare or store: its `equals` is purely textual. (`URL`'s constructors have been deprecated since java 20, in favour of `URI.toURL()`.)
+</Deep>
+
+<Interview q="why must an object's hashCode not change while it's a key in a HashMap?">
+because the map stores each entry in the bucket chosen by the key's hash at insertion time, and caches that hash in the entry. every lookup recomputes the key's current hash to pick a bucket. if the hash changed, the lookup goes to a different bucket and never finds the entry; `remove` can't remove it either, so it stays in the map forever (and a second `put` adds a duplicate). and if you search with an object equal to the old state, you reach the right bucket, but `equals` against the mutated key fails. keys should be immutable, or at least only hash on fields that never change.
+</Interview>
+
+<Keylines>
+- a hash collection files a key under its hash at insertion. mutate the key and it's lost.
+- `instanceof` breaks symmetry with subclasses that add state; `getClass()` breaks with proxies and mocks. make value classes `final`.
+- records compare `double`s by bits (`0.0` ≠ `-0.0`, `NaN` = `NaN`) and arrays by identity.
+- arrays never override `equals`. use `Arrays.equals`, `deepEquals`, or don't use arrays as keys.
+- `Map<Long, ?>.get(1)` compiles and returns `null`. an `Integer` is never equal to a `Long`.
+</Keylines>

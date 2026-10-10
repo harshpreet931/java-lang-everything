@@ -1,0 +1,160 @@
+import { JvmMap } from "@/components/figures/jvm/JvmMap";
+import { MeasuredBars } from "@/components/figures/jvm/MeasuredBars";
+
+<InShort>
+the JVM is a C++ program with three jobs: **load** classes (the class loader subsystem), **hold** everything in memory (the runtime data areas: heap, metaspace, one stack per thread), and **run** bytecode (the execution engine: an interpreter, two JIT compilers and a garbage collector).
+
+every chapter in this part zooms into one box of that map. this one is the map.
+</InShort>
+
+## the picture
+
+you know how everyone says "the JVM" like it's one thing that runs your code? it's more like a tiny operating system that happens to speak bytecode. it has a loader, a memory manager, a scheduler of sorts, two compilers and a cleaner, all inside one process.
+
+think of a restaurant kitchen. deliveries arrive at the back door and get checked before anything goes on a shelf (the class loader). the recipe binder holds every dish the kitchen knows (metaspace). there's one shared pantry where all the ingredients live (the heap). every cook has their own notepad and a finger on the line of the recipe they're on (a stack and a pc register per thread). a new cook reads each recipe line by line (the interpreter). a cook who has made the same dish ten thousand times does it from muscle memory (JIT-compiled machine code). and someone keeps clearing plates nobody is eating from (the GC).
+
+<Figure wide caption={<>click any block. the <C k="hot">measured</C> numbers come from a real JVM: jdk 25 on an M4 Pro mac with 24 GB, running a tiny program, read off <code>jcmd</code>, <code>-Xlog:class+load</code> and native memory tracking.</>}>
+<JvmMap />
+</Figure>
+
+the boxes the spec actually requires are the class loading pipeline, the heap, a method area, per-thread stacks and pc registers, and something that executes bytecode. everything about *how* (which GC, whether there's a JIT at all, how an object is laid out in memory) is left to the implementation. on this site that implementation is HotSpot, the JVM inside every OpenJDK build (Temurin, Oracle, Corretto, Zulu, all of them).
+
+## follow `java Hello` through it
+
+here's the smallest program that touches most of the map:
+
+```java title="Hello.java"
+public class Hello {
+    public static void main(String[] args) {
+        System.out.println("hello");
+    }
+}
+```
+
+and here's all of `main` after javac, as `javap -c` prints it. four instructions:
+
+```text title="javap -c Hello"
+public static void main(java.lang.String[]);
+  Code:
+     0: getstatic     #7    // Field java/lang/System.out:Ljava/io/PrintStream;
+     3: ldc           #13   // String hello
+     5: invokevirtual #15   // Method java/io/PrintStream.println:(Ljava/lang/String;)V
+     8: return
+```
+
+press step and watch which parts of the JVM each moment touches.
+
+<Figure wide caption={<>a <C k="hot">lit</C> block is the one doing the work at that moment. notice how much happens before the first instruction of main runs (steps 1 to 5), and that the GC never wakes up.</>}>
+<JvmMap tour />
+</Figure>
+
+the numbers are real: `-Xlog:class+load` printed 415 lines for that run, and `Hello` was line 402. everything before it was the JDK booting itself, almost all of it mapped straight out of the CDS archive (a pre-parsed snapshot of JDK classes that ships with the JDK, more in [AOT and Leyden](/learn/jvm/aot-and-leyden)).
+
+```text title="java -Xlog:class+load Hello"
+[0.008s][info][class,load] java.lang.Object source: shared objects file
+[0.008s][info][class,load] java.io.Serializable source: shared objects file
+[0.008s][info][class,load] java.lang.Comparable source: shared objects file
+...
+[0.021s][info][class,load] Hello source: file:/.../jvm-lab/arch/
+...
+[0.022s][info][class,load] java.lang.Shutdown$Lock source: shared objects file
+```
+
+## what's actually inside the process
+
+your program is one thread. the JVM brings its own crew. this is `jcmd <pid> Thread.print` against a program whose `main` just sleeps:
+
+<Figure caption={<>18 threads, one of them yours. click the groups to fold them. the <C k="meta">purple</C> ones are the JIT and the GC, the machinery the rest of this part is about.</>}>
+<Tree>{`
+idle JVM (jdk 25, G1)                // 18 threads
+    java threads                     // have a java.lang.Thread object
+        main #hot                    // your code
+        Reference Handler            // hands cleared references to their queues
+        Finalizer                    // runs finalize(), deprecated but still here
+        Signal Dispatcher            // ctrl-c, kill -3
+        Common-Cleaner               // java.lang.ref.Cleaner actions
+        Notification Thread          // JMX notifications
+        Service Thread               // housekeeping, hidden from java
+        Monitor Deflation Thread #meta // shrinks idle lock monitors, hidden
+        C2 CompilerThread0 #meta     // the optimizing JIT, hidden
+        C1 CompilerThread0 #meta     // the fast JIT, hidden
+        Attach Listener              // only exists because jcmd attached
+    vm-internal threads              // pure C++, no Thread object
+        VM Thread #meta              // runs stop-the-world operations
+        VM Periodic Task Thread      // the JVM's own timer
+        GC Thread#0 #meta            // G1 pause work
+        G1 Main Marker #meta         // concurrent marking
+        G1 Conc#0 #meta
+        G1 Refine#0 #meta            // remembered set refinement
+        G1 Service #meta
+`}</Tree>
+</Figure>
+
+java can only see a handful of those. the compiler threads are real java threads, but HotSpot hides them from your code:
+
+```java title="Main.java" run output="Common-Cleaner (daemon)\nFinalizer (daemon)\nNotification Thread (daemon)\nReference Handler (daemon)\nSignal Dispatcher (daemon)\nmain"
+void main() {
+    Thread.getAllStackTraces().keySet().stream()
+        .map(t -> t.getName() + (t.isDaemon() ? " (daemon)" : ""))
+        .sorted()
+        .forEach(IO::println);
+}
+```
+
+and here's where that idle process's memory went, from `-XX:NativeMemoryTracking=summary` and `jcmd <pid> VM.native_memory summary`. this is *committed* memory (actually backed by RAM), not the much bigger reserved address space:
+
+<Figure caption="committed memory of an idle JVM on jdk 25, 24 GB mac, default flags. the heap is the biggest slice, but it isn't the only one.">
+<MeasuredBars unit="MB" log data={[
+  { label: "java heap", value: 388 },
+  { label: "GC data structures", value: 62.9 },
+  { label: "CDS archive (shared classes)", value: 13.6 },
+  { label: "code cache", value: 7.5 },
+  { label: "JVM internal", value: 1.2 },
+  { label: "symbols", value: 1.1 },
+  { label: "metaspace", value: 0.45 },
+  { label: "thread stacks (touched)", value: 0.16 },
+]} />
+</Figure>
+
+<Gotcha title="-Xmx is not your process size">
+`-Xmx` caps the heap. it says nothing about metaspace, the code cache, GC bookkeeping (G1 alone was 63 MB above), thread stacks (up to 2 MB each here, times every thread you start) or direct buffers. a container with a 1 GB limit and `-Xmx1g` gets OOM-killed. give the heap roughly 75% of the limit (that's what `-XX:MaxRAMPercentage=75` does) and leave the rest for everything on this chart. more in [native memory](/learn/gc/native-memory) and [the JVM in containers](/learn/performance/jvm-in-containers).
+</Gotcha>
+
+<Quiz question="which of these does every thread get its own copy of?" options={["the heap", "metaspace", "the pc register", "the code cache"]} answer={2}>
+<Explain>
+the pc register (and the JVM stack, and the native stack) are per thread: each thread is at its own place in its own call chain. the heap, metaspace and the code cache are shared, which is exactly why one thread's objects can be seen by another (and why [part 09](/learn/concurrency/race-conditions) exists).
+</Explain>
+</Quiz>
+
+## the spec vs HotSpot
+
+the JVM is two things: a specification (the JVMS, a long PDF) and implementations of it. the spec is deliberately vague about anything that would tie an implementation's hands.
+
+| the spec says | HotSpot does |
+| --- | --- |
+| a class file format, and what each bytecode means | follows it exactly. that's the contract |
+| a heap, reclaimed by "an automatic storage management system" | G1 by default, or Parallel, Serial, ZGC, Shenandoah |
+| a "method area" for per-class data | metaspace, in native memory (until java 7 it was permgen, a slice of the heap) |
+| one stack per thread, with frames | frames live on the native OS thread stack, interleaved with C frames |
+| execute bytecode | interpret first, then compile hot methods with C1 and C2 |
+| nothing at all about object layout | a 12-byte header today, 8 with compact headers ([object layout](/learn/jvm/object-layout)) |
+
+other JVMs exist and make different choices: Eclipse OpenJ9 (its own GC and JIT, a smaller footprint), and GraalVM (HotSpot with the Graal compiler, plus native image, see [AOT and Leyden](/learn/jvm/aot-and-leyden)). your bytecode runs on all of them, which is the whole point of the spec.
+
+<Deep title="why there are two compilers">
+compiling well is slow. compiling fast gives you mediocre code. and the most useful information for optimizing (which branch is taken, which class actually shows up at a call site) only exists once the code has run for a while.
+
+so HotSpot does both. everything starts in the interpreter, which counts calls and loop iterations. warm methods go to C1, which compiles in milliseconds and keeps counting (now with a detailed profile). hot methods go to C2, which spends real time and uses that profile to make bets: "this call always hits `ArrayList`, so inline `ArrayList.get` and check the class with one compare". if a bet ever loses, the code is thrown away and the method drops back to the interpreter. that whole dance is [the interpreter and the JIT](/learn/jvm/interpreter-and-jit).
+</Deep>
+
+<Interview q="what's the difference between the method area, permgen and metaspace?">
+the method area is the spec's name for where per-class data lives (bytecode, the runtime constant pool, field and method info). permgen was HotSpot's implementation of it until java 7: a fixed-size part of the heap that famously ran out (`OutOfMemoryError: PermGen space`) in apps that loaded lots of classes. java 8 replaced it with metaspace, which lives in native memory and grows as needed (cap it with `-XX:MaxMetaspaceSize`). static fields and interned strings had already moved to the regular heap in java 7.
+</Interview>
+
+<Keylines>
+- the JVM loads classes, holds memory, and runs bytecode. three subsystems, one process.
+- heap, metaspace and code cache are shared. stack, pc register and native stack are per thread.
+- java Hello loads 415 classes before main runs. an idle JVM has 18 threads, and one of them is yours.
+- the spec fixes the class file and bytecode. HotSpot chooses the GC, the JIT and the object layout.
+- -Xmx limits the heap, not the process.
+</Keylines>

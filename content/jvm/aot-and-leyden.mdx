@@ -1,0 +1,112 @@
+import { AotLayers } from "@/components/figures/jvm/AotLayers";
+import { MeasuredBars } from "@/components/figures/jvm/MeasuredBars";
+
+<InShort>
+a JVM starts slow because every run redoes the same work: find, parse, verify and link the same classes, then warm up the same methods. **CDS** saves the parsed classes to a file and maps them in. java 24's **AOT cache** ([Project Leyden](https://openjdk.org/projects/leyden/)) goes further: classes already loaded and linked, and since 25, **method profiles** from a **training run** too.
+
+one extra command, no code changes, and on the app in this chapter startup went from 67 ms to 43 ms. a **native image** goes all the way (no JVM at startup at all), at the price of a closed world.
+</InShort>
+
+## the picture
+
+you know how every `java -jar` seems to spend its first moments doing nothing useful? it's not nothing: it's loading and linking the same thousand-odd classes as last time, and the time before that.
+
+think of a restaurant that preps its kitchen from scratch every single morning: unpacking the same deliveries, chopping the same onions, laying out the same stations, before the first order. CDS is keeping the pantry stocked overnight (the classes are already unpacked). the AOT cache is coming in to a kitchen where the stations are already set up, because someone did a practice service last night and wrote down exactly what was used (the training run). a native image is a food truck that only sells what was cooked this morning: open instantly, but nothing off-menu.
+
+## what the cache can hold
+
+each java release adds a layer. pick a version and click a layer.
+
+<Figure wide caption={<>the layers a startup archive can hold, by java release. <C k="live">green</C> means available in the version you picked. JEP numbers and releases from openjdk.org; 28 is still in development, so JEP 544 is "targeted", not final.</>}>
+<AotLayers />
+</Figure>
+
+## try it on jdk 25
+
+no special build step, no code changes. here's a small report app (parses some CSV, groups with streams, pattern-matches over a sealed interface, formats dates, builds an HTTP request) packaged as `app.jar`. it loads 1,238 classes on startup.
+
+```bash title="training run + cache, one command (JEP 514)"
+$ java -XX:AOTCacheOutput=app.aot -jar app.jar
+report for 1 Sep 2025: 6 sales, {east=301.8, north=126.0, south=79.5}, grand total 568.68 (POST example.com)
+Launching child process .../bin/java to assemble AOT cache app.aot using configuration app.aot.config
+Picked up JAVA_TOOL_OPTIONS: -Djava.class.path=app.jar -XX:AOTCacheOutput=app.aot -XX:AOTConfiguration=app.aot.config -XX:AOTMode=create
+Reading AOTConfiguration app.aot.config and writing AOTCache app.aot
+AOTCache creation is complete: app.aot 14254080 bytes
+```
+
+```bash title="every run after that"
+$ java -XX:AOTCache=app.aot -jar app.jar
+```
+
+that's it. the training run is a normal run of your app that also records what it loaded and linked (and its method profiles); then a child JVM writes the 14 MB cache. ask `-Xlog:class+load` how many classes still had to be loaded the slow way:
+
+| run | classes not from an archive |
+| --- | --- |
+| default (only the JDK's CDS archive) | 137 of 1,238 |
+| with `-XX:AOTCache=app.aot` | 2 of 1,238 |
+
+and the wall time, start to exit:
+
+<Figure caption={<>median of 61 runs each, jdk 25 (temurin 25.0.4.1), M4 Pro, 14 cores, measured while the machine was busy with other work (load average ~7.6), so the absolute numbers are a little high. the ratios held across repeat runs.</>}>
+<MeasuredBars unit="ms" data={[
+  { label: "report · -Xshare:off (no CDS)", value: 104.0, tone: "dead" },
+  { label: "report · default CDS (jdk classes)", value: 67.1 },
+  { label: "report · dynamic AppCDS", value: 57.1 },
+  { label: "report · AOT cache", value: 43.4, tone: "live" },
+  { label: "hello world · -Xshare:off", value: 49.3, tone: "dead" },
+  { label: "hello world · default CDS", value: 29.7 },
+  { label: "hello world · AOT cache", value: 29.6 },
+]} />
+</Figure>
+
+notice hello world doesn't improve with an AOT cache: its 415 classes are almost all in the JDK's default CDS archive already, which is on by default and already saves 40% (49 → 30 ms). the AOT cache pays off as the app's class graph grows: 35% faster for this tiny app. [JEP 483](https://openjdk.org/jeps/483) reports Spring PetClinic (about 21,000 classes) starting in 2.6 s instead of 4.5 s with a 130 MB cache, 42% faster.
+
+<Quiz question="what does the training run actually need to do?" options={["run the app's test suite", "run the app the way production does, at least through startup", "nothing, the cache is built from the jar", "run with -Xint so nothing is compiled"]} answer={1}>
+<Explain>
+run the app like production, at least far enough to exercise startup (and ideally the hot paths, so JEP 515's profiles are useful). the cache only contains what the training run actually loaded and linked. a training run that skips half your startup produces a cache that helps with half your startup. the cache is also tied to the JDK release, the OS and CPU architecture, and the classpath (jar files only, no directories): rebuild it when any of them changes.
+</Explain>
+</Quiz>
+
+<Gotcha title="a cache that doesn't fit is worse than none">
+the cache is checked at startup against the JDK, the classpath and some heap settings. a mismatch prints errors and falls back, and on jdk 25 "falls back" can mean losing the JDK's CDS archive too. the real thing, with the cache from above:
+
+```bash
+$ java -XX:+UseZGC -XX:AOTCache=app.aot -jar app.jar
+[0.006s][error  ][aot] An error has occurred while processing the AOT cache. Run with -Xlog:aot for details.
+[0.006s][error  ][aot] Loading static archive failed.
+[0.006s][error  ][aot] Unable to map shared spaces
+report for 1 Sep 2025: ...
+```
+
+the cache was built with the default G1, and JEP 483 says plainly that ZGC isn't supported yet. under ZGC all ~1,240 classes were loaded from scratch, and startup went from 74 ms (ZGC, no cache flag) to 103 ms (ZGC, with the unusable cache). [JEP 516](https://openjdk.org/jeps/516) fixes the any-GC part in java 26. until then: build the cache with the same GC and flags as production, and use `-XX:AOTMode=on` in CI, which refuses to start if the cache can't be used instead of quietly running slow.
+</Gotcha>
+
+## native images
+
+GraalVM's `native-image` takes the idea to its end. it compiles your app and the parts of the JDK it uses into a single native executable *at build time*, under a **closed-world assumption**: everything that can ever run must be known when you build. no class loading at runtime, no bytecode, no JIT warmup. startup is typically milliseconds and memory use drops a lot.
+
+the price is the closed world. reflection, dynamic proxies, resources and `Class.forName` need configuration (or a framework that generates it), builds take minutes, and without profile-guided optimization peak performance usually trails a warmed-up C2. frameworks like Quarkus, Micronaut and Spring Boot have invested heavily in making that configuration automatic.
+
+<Note title="where GraalVM stands, as of 2026">
+in September 2025 Oracle announced it was [detaching GraalVM from the Java SE release train](https://blogs.oracle.com/java/post/detaching-graalvm-from-the-java-ecosystem-train): GraalVM for JDK 24 was the last version licensed and supported as part of Oracle's Java SE products, Native Image as an early-adopter feature for Java SE customers was discontinued, and Oracle JDK 24 was the last release to ship the experimental Graal JIT. GraalVM itself carries on as a separate project (GraalVM 25 shipped alongside JDK 25), with Oracle's focus shifting toward GraalPy and GraalJS, and the startup and footprint work for java itself moving to OpenJDK's Project Leyden. native image is still available from GraalVM and its community distributions.
+</Note>
+
+| | CDS / AOT cache | native image |
+| --- | --- | --- |
+| startup | faster (43 vs 67 ms here) | much faster (no JVM boot) |
+| peak performance | full C2, same as always | AOT-compiled, usually lower without PGO |
+| dynamic java (reflection, class loading, agents) | everything works | needs build-time configuration |
+| build step | one training run | a full native compile |
+| standard JDK | yes, java 24+ | no, GraalVM toolchain |
+
+<Interview q="how would you improve a java service's startup time without rewriting it?">
+start with measurements (`-Xlog:class+load` count, `-Xlog:startuptime`, or just wall time), then work up the cheap ladder. make sure CDS isn't disabled (it's on by default since java 12). on java 24+, add an AOT cache from a training run: `-XX:AOTCacheOutput` once, `-XX:AOTCache` in production, built with the same JDK, classpath and GC. on 25 it also carries method profiles, which shortens warmup. trim what loads at startup (lazy initialization, fewer eager beans). and only if you need instant startup and tiny memory (serverless, CLIs) and can live with a closed world, consider a native image.
+</Interview>
+
+<Keylines>
+- every JVM start reloads and relinks the same classes. archives skip that work.
+- CDS stores parsed classes and is on by default. the AOT cache (java 24) stores loaded and linked ones.
+- java 25: one command to train and build (JEP 514), plus method profiles (JEP 515).
+- here: 67 ms → 43 ms. 137 classes loaded the slow way → 2.
+- a mismatched cache can make startup slower. build it like production, check with -XX:AOTMode=on.
+</Keylines>

@@ -1,0 +1,230 @@
+import { HashSpread } from "@/components/figures/deep-dives/HashSpread";
+import { SizeFor } from "@/components/figures/deep-dives/SizeFor";
+import { ResizeSplit } from "@/components/figures/deep-dives/ResizeSplit";
+import { BinLadder } from "@/components/figures/deep-dives/BinLadder";
+
+<InShort>
+a `HashMap` is a `Node[]` whose length is always a power of two. a key's bin is `(n - 1) & hash`, where `hash = h ^ (h >>> 16)` folds the **high bits** of `hashCode()` into the low ones. when it gets 75% full the array doubles, and every chain **splits by one bit**. a bin that collects 9 nodes becomes a **red-black tree**, but only once the table has at least 64 bins.
+
+every number in this chapter is a constant in `java/util/HashMap.java` (jdk 25), or something we ran.
+</InShort>
+
+## the picture
+
+the [HashMap chapter](/learn/collections/hashmap) has the friendly version: buckets, collisions, a load factor. this one reads the source. if you've ever been asked "why is the capacity a power of two?" in an interview, everything you need is in about 40 lines of it.
+
+think of a coat check with numbered hooks (the table). your ticket number decides the hook (the hash picks the bin). two coats on one hook get stacked (a chain). when the room gets busy, the staff build a second row of hooks and move each coat at most once, to a hook they can work out from the ticket alone (resize).
+
+<Figure caption={<>three entries, two of them colliding in bin 1. keys and values are references too; they're drawn inline to keep the picture small. the <C k="ref">blue</C> <code>next</code> arrow is the whole collision strategy.</>}>
+<Memory
+  frames={[{ name: "main", locals: { map: { ref: "m" } } }]}
+  heap={{
+    m: { type: "HashMap", fields: { table: { ref: "t" }, size: 3, threshold: 12, loadFactor: "0.75f", modCount: 3 } },
+    t: { type: "Node[16]", items: [null, { ref: "n1" }, { ref: "n2" }, null, null, null, null, null, null, null, null, null, null, null, null, null] },
+    n1: { type: "HashMap$Node", fields: { hash: 97, key: '"a"', value: 1, next: { ref: "n3" } } },
+    n3: { type: "HashMap$Node", fields: { hash: 113, key: '"q"', value: 3, next: null } },
+    n2: { type: "HashMap$Node", fields: { hash: 98, key: '"b"', value: 2, next: null } },
+  }}
+/>
+</Figure>
+
+<Defs>
+<dt>table</dt><dd>`Node<K,V>[]`. null until the first `put` (it's allocated lazily, inside `resize()`). length is always a power of two, default 16.</dd>
+<dt>Node</dt><dd>four fields: `final int hash`, `final K key`, `V value`, `Node next`. 32 bytes each on jdk 25 with default flags (we measured it with a class histogram).</dd>
+<dt>threshold</dt><dd>`capacity × loadFactor`. default 16 × 0.75 = 12. the put that makes `size` exceed it triggers a resize.</dd>
+<dt>modCount</dt><dd>bumped on every structural change. iterators compare it to fail fast (see [fail-fast](/learn/collections/iterators-and-fail-fast)).</dd>
+</Defs>
+
+notice the node keeps its `hash`. it's computed once, on the way in, and never again. that detail pays off twice later: lookups compare the cached int before ever calling `equals`, and resizing never calls `hashCode()`.
+
+## hash(): folding the top half down
+
+the whole method is one line:
+
+```java title="HashMap.java (jdk 25)" nolines
+return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+```
+
+why bother? because of how the bin is picked. a 16-bin table looks at the low 4 bits of the hash and nothing else. if your keys only differ above bit 4 (and plenty do: whole-number `Float` keys, ids that are multiples of 65,536, a lazy `hashCode()`), they all land in the same bin. `h >>> 16` slides the top half down, and XOR mixes it into the bits the mask will actually read.
+
+<Figure caption={<>pick a key and a table size, then flip <strong>spread</strong> off. the <C k="hot">amber</C> bits are the ones that decide the bin. the strip at the bottom is sixteen <code>Integer</code> keys that only differ above bit 16: without spreading they all pile into bin 0.</>}>
+<HashSpread />
+</Figure>
+
+same thing, in code you can run:
+
+```java run output="0: bin 0 without spreading, bin 0 with\n65536: bin 0 without spreading, bin 1 with\n131072: bin 0 without spreading, bin 2 with\n196608: bin 0 without spreading, bin 3 with"
+void main() {
+    for (int i = 0; i < 4; i++) {
+        int h = Integer.valueOf(i << 16).hashCode();
+        int spread = h ^ (h >>> 16);
+        IO.println(h + ": bin " + (h & 15) + " without spreading, bin " + (spread & 15) + " with");
+    }
+}
+```
+
+the comment above `hash()` is honest about the tradeoff: it's the cheapest mix that fixes the common systematic cases, and anything nastier is left for the trees (below) to absorb. one shift, one XOR. it runs on every `get` and `put`, so cheap wins.
+
+<Gotcha title="spreading can't fix equal hashCodes">
+`"Aa".hashCode()` and `"BB".hashCode()` are both `2112`. no amount of bit mixing separates two identical ints. spreading helps hashes that are *different but only up high*. truly equal hashes always collide, which is what the tree bins are for.
+</Gotcha>
+
+## (n - 1) & hash, and why the length is a power of two
+
+when `n` is a power of two, `n - 1` is a run of ones: 16 → `1111`, 64 → `111111`. so `hash & (n - 1)` keeps exactly the low bits, which is the same as `hash % n` for a non-negative hash, without a division. and unlike `%`, it never goes negative (`-7 % 16` is `-7`; `-7 & 15` is `9`), so there's no `Math.abs` bug waiting to happen.
+
+that's the deal: a power-of-two length makes indexing a single AND, and (we'll see in a second) it makes resizing almost free. the price is that only the low bits matter, which is why `hash()` exists.
+
+so what if you ask for a capacity that isn't a power of two? `tableSizeFor` rounds up, with a bit trick instead of a loop:
+
+<Figure caption={<>drag <strong>n</strong>. <code>-1 &gt;&gt;&gt; numberOfLeadingZeros(cap - 1)</code> is all ones up to the highest bit of <code>cap - 1</code>; adding one carries into the next power of two. the cards below show what that means for 100 entries.</>}>
+<SizeFor />
+</Figure>
+
+<Predict options={["Node[100]", "Node[128]", "Node[256]"]} answer={2}>
+```java
+var map = new HashMap<Integer, Integer>(100);
+for (int i = 0; i < 100; i++) map.put(i, i);
+// how long is map's table now?
+```
+<Explain>
+`new HashMap<>(100)` gets a 128-bin table, but the threshold is 128 × 0.75 = 96. the 97th put resizes to 256. the argument is a capacity, not "how many entries i'll store". if you mean the second thing, use `HashMap.newHashMap(100)` <Since v={19} />, which divides by 0.75 first and starts at 256. we checked both with reflection on jdk 25.
+</Explain>
+</Predict>
+
+## put, one branch at a time
+
+`putVal` is about 40 lines and every one of them shows up in an interview somewhere. here's the path a key takes:
+
+<Figure caption="hover a stage. the order of the checks in walk bin matters: comparing two ints is nearly free, equals() might not be.">
+<Flow
+  stages={[
+    { label: "hash", sub: "h ^ (h >>> 16)", note: "null keys skip hashCode() entirely and get hash 0, so a null key always lives in bin 0." },
+    { label: "allocate", sub: "first put only", note: "the table is allocated by resize() on the first put, not in the constructor. an empty HashMap is one small object." },
+    { label: "pick bin", sub: "(n - 1) & hash", note: "empty bin? drop a new Node in and skip straight to the size check." },
+    { label: "walk bin", sub: "hash, ==, equals", note: "for each node: same cached hash? same reference? only then equals(). a match replaces the value and returns the old one." },
+    { label: "append", sub: "at the tail", note: "a list that already had 8 nodes calls treeifyBin after this append. a TreeNode bin calls putTreeVal instead." },
+    { label: "size check", sub: "> threshold?", note: "the size check runs after the insert. so the 13th entry goes in first, then the table doubles." },
+  ]}
+/>
+</Figure>
+
+null keys are allowed, and they really do go to bin 0 (unlike [ConcurrentHashMap](/learn/deep-dives/concurrenthashmap-internals), which bans them):
+
+```java run output="{null=2} 2 1\n2112 2112"
+void main() {
+    var m = new HashMap<String, Integer>();
+    m.put(null, 1);
+    m.put(null, 2);
+    IO.println(m + " " + m.get(null) + " " + m.size());
+    IO.println("Aa".hashCode() + " " + "BB".hashCode());
+}
+```
+
+## resize: every chain splits by one bit
+
+here's the payoff of power-of-two lengths. going from 16 to 32 bins, the mask grows by exactly one bit, bit 4 (value 16, the old capacity). a node's new index is its old index plus either 0 or 16, depending on that one bit. so `resize()` doesn't rehash anything. it walks each old chain once and deals the nodes into two lists: `(e.hash & oldCap) == 0` stays at `j` (lo), the rest go to `j + oldCap` (hi).
+
+<Figure wide caption={<>step through a real resize: these 13 keys, in this order, in a default HashMap. nodes in the bin being split are <C k="hot">amber</C>. watch the columns: a node either stays in its column on the top row or drops straight down to the bottom one.</>}>
+<ResizeSplit />
+</Figure>
+
+<Quiz question="a node sits in bin 5 of a 32-bin table. the table doubles to 64. where can the node end up?" options={["bin 5 or bin 37", "bin 5 or bin 10", "anywhere, it gets rehashed"]} answer={0}>
+<Explain>
+the new mask adds bit 5 (value 32, the old capacity). if the node's cached hash has that bit clear it stays at 5, otherwise it moves to 5 + 32 = 37. nothing else is possible, and `hashCode()` isn't called.
+</Explain>
+</Quiz>
+
+this is also why `HashMap` iteration order is "whatever the bins say", and why it changes when the map grows:
+
+<Predict options={["[1, 17] then [1, 17]", "[17, 1] then [1, 17]", "[17, 1] then [17, 1]"]} answer={1}>
+```java
+var m = new HashMap<Integer, String>();
+m.put(17, "a");
+m.put(1, "b");
+IO.println(m.keySet());
+for (int i = 100; i < 111; i++) m.put(i, "x"); // 13 entries: resize to 32
+m.keySet().removeIf(k -> k >= 100);
+IO.println(m.keySet());
+```
+<Explain>
+in a 16-bin table, 17 and 1 both land in bin 1 (17 & 15 = 1), so they're one chain in insertion order: `[17, 1]`. after the resize, 17 has bit 4 set and moves to bin 17, while 1 stays in bin 1. iteration walks bins in index order, so now it's `[1, 17]`. removing entries never shrinks the table, so the order stays that way. never depend on `HashMap` order; use [LinkedHashMap](/learn/collections/linkedhashmap-and-lru) if you need one.
+</Explain>
+</Predict>
+
+<Deep title="the java 7 resize loop, and why it's gone">
+java 7's `resize` moved each node to the *head* of its new chain, which reversed the chain. if two threads resized the same map at once, one could see the other's half-reversed links and stitch `a.next = b, b.next = a`. the next `get` on that bin spun forever at 100% CPU. java 8's lo/hi lists keep the original order (the source literally says "preserve order"), so that particular cycle can't form. a `HashMap` shared between threads is still broken: lost puts, a size that lies, entries that vanish. the fix isn't a better `HashMap`, it's [ConcurrentHashMap](/learn/deep-dives/concurrenthashmap-internals).
+</Deep>
+
+## treeification: when a chain turns into a tree
+
+three constants control it, all in the source:
+
+| constant | value | what it does |
+| --- | --- | --- |
+| `TREEIFY_THRESHOLD` | 8 | appending to a bin that already has 8 nodes calls `treeifyBin` |
+| `MIN_TREEIFY_CAPACITY` | 64 | `treeifyBin` on a table smaller than this resizes instead |
+| `UNTREEIFY_THRESHOLD` | 6 | when a resize splits a tree bin, a half with 6 or fewer nodes goes back to a list |
+
+the middle one is the bit people miss. a crowded bin in a small table is more likely a "the table is too small" problem than a "these keys really collide" problem, so `HashMap` tries growing first. drag through it with keys that all return the same `hashCode()`:
+
+<Figure caption={<>drag the slider. at 9 and 10 the bin doesn&apos;t treeify, the table <C k="hot">grows</C> instead. at 11 the table is finally 64 wide and the list becomes a real red-black tree (these are the actual shapes jdk 25 built). the <C k="ref">blue</C> links are <code>next</code>, then <code>left</code>/<code>right</code> pointers.</>}>
+<BinLadder />
+</Figure>
+
+we didn't make those numbers up. reflection into a live map (this needs `--add-opens`, so it's a terminal run rather than a run button):
+
+```java title="Treeify.java"
+import java.lang.reflect.Field;
+import java.util.HashMap;
+
+public class Treeify {
+    record Key(int id) implements Comparable<Key> {
+        public int hashCode() { return 42; } // every key collides
+        public int compareTo(Key o) { return Integer.compare(id, o.id); }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Field table = HashMap.class.getDeclaredField("table");
+        table.setAccessible(true);
+        var map = new HashMap<Key, Integer>();
+        for (int i = 1; i <= 11; i++) {
+            map.put(new Key(i), i);
+            Object[] t = (Object[]) table.get(map);
+            Object bin = t[42 & (t.length - 1)];
+            System.out.println(i + " keys: Node[" + t.length + "], bin is a " + bin.getClass().getSimpleName());
+        }
+    }
+}
+```
+
+```bash
+$ java --add-opens java.base/java.util=ALL-UNNAMED Treeify.java
+1 keys: Node[16], bin is a Node
+...
+8 keys: Node[16], bin is a Node
+9 keys: Node[32], bin is a Node
+10 keys: Node[64], bin is a Node
+11 keys: Node[64], bin is a TreeNode
+```
+
+a `TreeNode` is 56 bytes against a `Node`'s 32 (it extends `LinkedHashMap.Entry` and adds `parent`, `left`, `right`, `prev` and a `red` flag). that's why trees are the fallback, not the default. the comment in `HashMap.java` works out the odds: with random hashes and the default load factor, bin sizes follow a Poisson distribution with a mean of about 0.5, and the chance of a bin reaching 8 is about 6 in 100 million. if you see tree bins in a heap dump, some `hashCode()` is broken or someone is attacking you on purpose (hash flooding, where an attacker sends keys chosen to collide). the trees arrived in java 8 ([JEP 180](https://openjdk.org/jeps/180)) so that a pile of colliding keys degrades to O(log n) instead of a list walk.
+
+<Gotcha title="a tree bin is only fast if it can order the keys">
+inside a tree bin, nodes are ordered by hash first. on equal hashes, `HashMap` uses `compareTo`, but only if both keys are the same `class C implements Comparable<C>` (it checks the generic signature with reflection). if they aren't comparable, inserts fall back to a tie-break on class name and `identityHashCode`, which is useless for lookups: `find()` has to search both subtrees. same-hash keys that aren't `Comparable` get no speedup from the tree at all. that's one more reason `String` keys (comparable, decent hashes) are the happy path.
+</Gotcha>
+
+why 8 to treeify but 6 to untreeify? hysteresis. if both were 8, a bin hovering around 8 entries would flip between list and tree on every other operation. the gap of 2 means it has to shrink for real before converting back. (removing from a tree bin uses a shape check instead of a count: when the root has no left or right child, or the left child has no left child, the bin goes back to a list. that's somewhere between 2 and 6 nodes.)
+
+<Interview q="why is a HashMap's capacity always a power of two?">
+so the bin index is `(n - 1) & hash`, one AND instead of a division, and never negative. and so resizing is a split instead of a rehash: doubling adds one bit to the mask, so each node either stays at `j` or moves to `j + oldCap`, decided by one bit of the hash it already cached. the cost is that only the low bits pick the bin, which is why `hash()` XORs the top 16 bits down first. bonus: treeification needs 8+ nodes in a bin *and* a table of at least 64, otherwise it resizes; trees go back to lists at 6 when a resize splits them.
+</Interview>
+
+<Keylines>
+- `hash = h ^ (h >>> 16)`. the mask only reads low bits, so the high bits get folded into them.
+- the bin is `(n - 1) & hash`. powers of two make that one AND, never negative.
+- `new HashMap<>(n)` is a capacity. for "n entries without resizing" use `HashMap.newHashMap(n)`.
+- resize deals every chain into two: stay at `j` or move to `j + oldCap`. one bit decides, no rehash.
+- a 9th node in a bin treeifies only if the table has 64+ bins. otherwise the table doubles.
+- tree bins (56-byte nodes) are an emergency exit for bad hashes, not something healthy maps use.
+</Keylines>

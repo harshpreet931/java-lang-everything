@@ -1,0 +1,199 @@
+import { StaticCounter } from "@/components/figures/oop/StaticCounter";
+
+export const tickets = {
+  file: "Main.java",
+  source: `public class Main {
+    static class Ticket {
+        static int issued = 0;
+        final int id;
+
+        Ticket() {
+            issued++;
+            id = issued;
+        }
+    }
+
+    public static void main(String[] args) {
+        Ticket a = new Ticket();
+        Ticket b = new Ticket();
+        Ticket c = new Ticket();
+        System.out.println(a.id + " " + b.id + " " + c.id);
+        System.out.println(Ticket.issued);
+    }
+}`,
+  steps: [
+    { line: 13, frames: [{ name: "main", locals: {} }], heap: {}, note: "main is about to touch Ticket for the first time." },
+    { line: 3, frames: [{ name: "main", locals: {} }, { name: "static init: Ticket", locals: {} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 0}, "tag": "static fields"} }, note: "first use, so the class gets initialized. its static field gets one box, owned by the class, not by any object." },
+    { line: 6, frames: [{ name: "main", locals: {} }, { name: "Ticket()", locals: {"this": {"ref": "o1"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 0}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 0}, "state": "new"} }, note: "new Ticket(): a fresh object with its own id, zeroed. there's no issued inside it. that lives in the class's box." },
+    { line: 8, frames: [{ name: "main", locals: {} }, { name: "Ticket()", locals: {"this": {"ref": "o1"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 1}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 0}} }, note: "issued++ bumped the shared box: 0 → 1." },
+    { line: 9, frames: [{ name: "main", locals: {} }, { name: "Ticket()", locals: {"this": {"ref": "o1"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 1}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}} }, note: "id = issued copies the 1 into this object's own field." },
+    { line: 14, frames: [{ name: "main", locals: {"a": {"ref": "o1"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 1}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}} }, note: "a holds ticket #1." },
+    { line: 8, frames: [{ name: "main", locals: {"a": {"ref": "o1"}} }, { name: "Ticket()", locals: {"this": {"ref": "o2"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 2}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}},  o2: {"type": "Ticket", "fields": {"id": 0}} }, note: "second ticket. same constructor, same shared box: 1 → 2." },
+    { line: 9, frames: [{ name: "main", locals: {"a": {"ref": "o1"}} }, { name: "Ticket()", locals: {"this": {"ref": "o2"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 2}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}},  o2: {"type": "Ticket", "fields": {"id": 2}} }, note: "its own id gets the 2. a's id is still 1, untouched." },
+    { line: 8, frames: [{ name: "main", locals: {"a": {"ref": "o1"}, "b": {"ref": "o2"}} }, { name: "Ticket()", locals: {"this": {"ref": "o3"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 3}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}},  o2: {"type": "Ticket", "fields": {"id": 2}},  o3: {"type": "Ticket", "fields": {"id": 0}} }, note: "third ticket: the shared box goes to 3." },
+    { line: 16, frames: [{ name: "main", locals: {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "c": {"ref": "o3"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 3}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}},  o2: {"type": "Ticket", "fields": {"id": 2}},  o3: {"type": "Ticket", "fields": {"id": 3}} }, note: "three objects, three ids, one issued." },
+    { line: 17, frames: [{ name: "main", locals: {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "c": {"ref": "o3"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 3}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}},  o2: {"type": "Ticket", "fields": {"id": 2}},  o3: {"type": "Ticket", "fields": {"id": 3}} }, stdout: "1 2 3\n", note: "1 2 3." },
+    { line: 18, frames: [{ name: "main", locals: {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "c": {"ref": "o3"}} }], heap: { cls: {"type": "class Ticket", "fields": {"issued": 3}, "tag": "static fields"},  o1: {"type": "Ticket", "fields": {"id": 1}},  o2: {"type": "Ticket", "fields": {"id": 2}},  o3: {"type": "Ticket", "fields": {"id": 3}} }, stdout: "1 2 3\n3\n", note: "Ticket.issued reads the class's box directly. no object needed." },
+  ],
+};
+
+export const zero = {
+  file: "Main.java",
+  source: `public class Main {
+    static class Config {
+        static final Config INSTANCE = new Config();
+        static int defaultPort = 8080;
+
+        final int port;
+
+        Config() {
+            port = defaultPort;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(Config.INSTANCE.port);
+        System.out.println(Config.defaultPort);
+    }
+}`,
+  steps: [
+    { line: 14, frames: [{ name: "main", locals: {} }], heap: {}, note: "first use of Config. before anything else, the class gets initialized." },
+    { line: 3, frames: [{ name: "main", locals: {} }, { name: "static init: Config", locals: {} }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: null, defaultPort: 0 } } }, note: "every static starts zeroed. static init runs the initializers in source order, so line 3 goes first." },
+    { line: 9, frames: [{ name: "main", locals: {} }, { name: "static init: Config", locals: {} }, { name: "Config()", locals: { this: { ref: "c1" } } }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: null, defaultPort: 0 } }, c1: { type: "Config", fields: { port: 0 }, state: "new" } }, note: "line 3 says new Config(), so the constructor runs in the middle of static init. defaultPort hasn't been assigned yet." },
+    { line: 10, frames: [{ name: "main", locals: {} }, { name: "static init: Config", locals: {} }, { name: "Config()", locals: { this: { ref: "c1" } } }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: null, defaultPort: 0 } }, c1: { type: "Config", fields: { port: 0 } } }, note: "port = defaultPort copies a 0. not a bug in the JVM, just the order you wrote." },
+    { line: 4, frames: [{ name: "main", locals: {} }, { name: "static init: Config", locals: {} }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: { ref: "c1" }, defaultPort: 0 } }, c1: { type: "Config", fields: { port: 0 } } }, note: "INSTANCE now points at the object. only now does static init reach line 4." },
+    { line: 14, frames: [{ name: "main", locals: {} }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: { ref: "c1" }, defaultPort: 8080 } }, c1: { type: "Config", fields: { port: 0 } } }, note: "defaultPort is 8080 now. too late: the only Config already copied the 0." },
+    { line: 15, frames: [{ name: "main", locals: {} }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: { ref: "c1" }, defaultPort: 8080 } }, c1: { type: "Config", fields: { port: 0 } } }, stdout: "0\n", note: "INSTANCE.port is 0." },
+    { line: 16, frames: [{ name: "main", locals: {} }], heap: { cls: { type: "class Config", tag: "static fields", fields: { INSTANCE: { ref: "c1" }, defaultPort: 8080 } }, c1: { type: "Config", fields: { port: 0 } } }, stdout: "0\n8080\n", note: "and defaultPort, read afterwards, is 8080. same program, two answers." },
+  ],
+};
+
+<InShort>
+a **static** field has one copy, owned by the class. an instance field has one copy per object. a **static method** runs without any object, so there's no `this` inside it.
+
+static = "belongs to the class". that's the whole keyword.
+</InShort>
+
+## the picture
+
+think of an office. every employee has their own desk (instance fields: one per object). there's one coffee machine in the kitchen (a static field: one per class). anyone can use it, and if someone drinks the last cup, everyone notices.
+
+<Figure caption={<>press <code>new Ticket()</code> a few times, then flip to <C k="dead">forgot static</C>. with <code>static</code>, every constructor bumps the one counter in the <C k="meta">class's box</C>. without it, each object gets its own counter, bumps it once, and every ticket comes out as #1.</>}>
+<StaticCounter />
+</Figure>
+
+that "forgot static" bug compiles fine and looks right in review. it's one keyword.
+
+```java title="Main.java" run output="1 1 1"
+public class Main {
+    static class Ticket {
+        int issued = 0;   // oops: one per ticket
+        final int id;
+
+        Ticket() {
+            issued++;
+            id = issued;
+        }
+    }
+
+    public static void main(String[] args) {
+        Ticket a = new Ticket(), b = new Ticket(), c = new Ticket();
+        System.out.println(a.id + " " + b.id + " " + c.id);
+    }
+}
+```
+
+## walk through it
+
+the real program, traced on a real JVM. the box tagged `static fields` belongs to the class, and it appears the moment the class is first used, before any `Ticket` exists.
+
+<Figure wide caption={<>watch <code>issued</code> in the class's box tick 1, 2, 3 while each object's <code>id</code> is set once and never moves. note that no stack slot points at the class's box: static fields are reached through the class, not through a reference.</>}>
+<MemoryStepper trace={tickets} />
+</Figure>
+
+where does that box really live? in HotSpot, static fields sit inside the class's `java.lang.Class` object, on the heap. the class's metadata (its methods, the constant pool) lives in metaspace. more in [the JVM's memory map](/learn/gc/runtime-data-areas).
+
+## static methods have no this
+
+an instance method is called *on* an object, and that object arrives as `this`. a static method is called on the class, so there's no object, so there's no `this`. which means no instance fields and no instance methods, unless you hand it an object explicitly.
+
+```java title="Main.java"
+public class Main {
+    int count = 0;
+
+    void greet() {
+        System.out.println("hi");
+    }
+
+    public static void main(String[] args) {
+        count++;  // [!code error]
+        greet();  // [!code error]
+    }
+}
+```
+
+```text nolines
+error: non-static variable count cannot be referenced from a static context
+error: non-static method greet() cannot be referenced from a static context
+```
+
+the classic first-week error, because `main` is static. the fix is to make an object (`new Main().greet()`), or make the thing static if it really doesn't need an object. (java 25's [instance main methods](/learn/modern/simpler-programs) dodge this for small programs: `void main()` isn't static, so the launcher makes the object for you.)
+
+<Predict options={["parent parent", "child child", "child, then a NullPointerException", "parent, then a NullPointerException"]} answer={0}>
+```java
+class Parent {
+    static String who() { return "parent"; }
+}
+
+class Child extends Parent {
+    static String who() { return "child"; }
+}
+
+void main() {
+    Parent p = new Child();
+    IO.println(p.who());
+    Parent nobody = null;
+    IO.println(nobody.who());
+}
+```
+<Explain>
+static methods don't look at the object at all. `p.who()` is compiled as `Parent.who()`, picked from the *declared* type of `p`. the object (or the lack of one) never gets involved, which is why even `nobody.who()` works. `Child.who()` doesn't override `Parent.who()`, it **hides** it. javac with `-Xlint` warns: `static method should be qualified by type name`. take the hint.
+</Explain>
+</Predict>
+
+## static init order can bite
+
+static fields are initialized once, in source order, the first time the class is used. if a static initializer creates an instance of the same class, that constructor runs *halfway through* static init, and sees whatever hasn't been initialized yet as zero.
+
+<Figure wide caption={<>step 3 is the whole bug: the constructor runs while <code>defaultPort</code> is still <code>0</code>. the class's box fills in top to bottom, and the object copied the value before it got there.</>}>
+<MemoryStepper trace={zero} />
+</Figure>
+
+two fixes: move `INSTANCE` below the fields it depends on, or make `defaultPort` a `static final` compile-time constant. constants are special: javac inlines `8080` straight into the constructor's bytecode, so nobody reads the field at runtime and the order stops mattering. same program with `static final int defaultPort = 8080;` prints `8080` twice.
+
+<Gotcha title="mutable statics are global variables">
+a `static` collection or counter is shared by every object, every thread and every test in the JVM. that's how you get flaky tests (state leaks between them), race conditions (two threads, one `issued++`, see [race conditions](/learn/concurrency/race-conditions)) and memory leaks (a `static List` that only ever grows is reachable forever, see [memory leaks](/learn/gc/memory-leaks)). `static final` constants are great. `static` mutable state should make you nervous.
+</Gotcha>
+
+## what static is actually for
+
+| use | example |
+| --- | --- |
+| constants | `static final int MAX_RETRIES = 3;` |
+| utility methods that need no state | `Math.max(a, b)`, `List.of(...)` |
+| factory methods | `Integer.valueOf(42)`, `Path.of("a.txt")` |
+| a nested class that doesn't need an outer object | `static class Node` (see [nested classes](/learn/oop/nested-classes)) |
+| `main` (classic form) | the launcher calls it before any object exists |
+| per-class bookkeeping | counters, caches. carefully, and thread-safely |
+
+<Interview q="can you override a static method?">
+no. static methods are bound at compile time from the declared type, so a subclass method with the same signature *hides* the parent's, it doesn't override it. calling through a reference picks the version from the reference's declared type, never the object's class. that's also why you can call a static method through a `null` reference without a NullPointerException. overriding is a runtime thing, see [polymorphism](/learn/oop/polymorphism).
+</Interview>
+
+<Keylines>
+- static field: one copy, owned by the class. instance field: one per object.
+- static methods have no `this`, so they can't touch instance members directly.
+- statics initialize once, in source order, on first use of the class.
+- static methods hide, they don't override. the declared type picks.
+- `static final` constants: great. mutable static state: global variables with extra steps.
+</Keylines>

@@ -1,0 +1,17 @@
+[
+  { "term": "constructor", "short": "the code new runs on a freshly zeroed object. same name as the class, no return type, never inherited.", "chapter": "constructors-and-init-order" },
+  { "term": "instance initializer", "short": "a bare { } block in a class body. javac pastes it into every constructor that calls super(...).", "chapter": "constructors-and-init-order", "aka": ["init block", "initializer block"] },
+  { "term": "static initializer", "short": "a static { } block. runs once, when the class is initialized, collected with static field initializers into <clinit>.", "chapter": "static", "aka": ["static block", "clinit"] },
+  { "term": "package-private", "short": "the access you get with no modifier: visible to the same package, nobody else.", "chapter": "access-control", "aka": ["default access"] },
+  { "term": "protected", "short": "package-private plus subclasses in other packages, which may only use it through their own type.", "chapter": "access-control" },
+  { "term": "fully qualified name", "short": "a class's real name, package included: java.util.ArrayList. imports are just shorthand for it.", "chapter": "packages-and-imports", "aka": ["fqn"] },
+  { "term": "method overriding", "short": "a subclass replacing an inherited method with the same signature. the object's class picks which runs, at runtime.", "chapter": "polymorphism", "aka": ["override"] },
+  { "term": "field hiding", "short": "a subclass field with the same name as a parent's. both exist in the object; the variable's declared type picks one.", "chapter": "inheritance" },
+  { "term": "default method", "short": "an interface method with a body. implementers get it unless they override it. java 8.", "chapter": "abstract-classes-and-interfaces" },
+  { "term": "diamond problem", "short": "inheriting the same method from two places. java's rules: class wins, then the more specific interface, else you must override.", "chapter": "abstract-classes-and-interfaces" },
+  { "term": "enum", "short": "a final class with a fixed set of singleton instances, one per constant, created at class init.", "chapter": "enums", "aka": ["enumeration"] },
+  { "term": "this$0", "short": "the hidden field an inner class uses to reach the outer object that created it. a classic memory leak.", "chapter": "nested-classes", "aka": ["enclosing instance", "inner class"] },
+  { "term": "defensive copy", "short": "copying a mutable argument or return value so callers can't change your object's state behind its back.", "chapter": "immutability" },
+  { "term": "fragile base class", "short": "a subclass breaking when its superclass changes, because overriding couples it to the parent's implementation.", "chapter": "composition-over-inheritance" },
+  { "term": "composition", "short": "holding an object in a field and forwarding calls to it, instead of extending its class.", "chapter": "composition-over-inheritance", "aka": ["forwarding", "wrapper class", "delegation"] }
+]

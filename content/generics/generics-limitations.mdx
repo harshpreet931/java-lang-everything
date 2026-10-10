@@ -1,0 +1,190 @@
+import { LimitsBoard } from "@/components/figures/generics/LimitsBoard";
+
+<InShort>
+erasure leaves generic code knowing nothing about `T` at run time, so a few things are simply impossible: **no `new T()`**, **no `new T[n]`**, no `instanceof T`, no `T.class`, no generic exceptions. and type arguments must be references, so **no `List<int>`**.
+
+the sharp edge is arrays. arrays are **covariant** and check their element type at run time, generics are invariant and erased. mix them (generic varargs do, secretly) and you get **heap pollution**: a `List<String>` holding something that isn't a string, and a `ClassCastException` somewhere else, later.
+</InShort>
+
+## the picture
+
+you know how java will happily let you write `T` everywhere in a class, and then refuses `new T()`? it feels arbitrary until you remember what's left of `T` at run time: nothing. a type that doesn't exist can't be constructed, can't be tested with `instanceof`, can't make an array of itself.
+
+think of a recipe that says "bake it at the temperature on the packet", and then the packet has been thrown away (erasure). you can still follow every step that doesn't need the number. the moment a step needs the actual temperature, you're stuck, unless someone hands it to you. most of the workarounds below are exactly that: the caller hands over the thing the code can't recover, a `Class<T>`, a `Supplier<T>`, an `IntFunction<T[]>`.
+
+<Figure wide caption={<>pick a limitation. the <C k="dead">red</C> line is what you&apos;d like to write and javac 25&apos;s real error for it. the box below is the usual workaround, which compiles.</>}>
+<LimitsBoard />
+</Figure>
+
+all of them in one runnable place:
+
+```java title="Main.java" run output="2 3 String[]\nObject[] String[]"
+static <T> List<T> fill(int n, Supplier<T> make) {     // instead of new T()
+    List<T> out = new ArrayList<>();
+    for (int i = 0; i < n; i++) out.add(make.get());
+    return out;
+}
+
+static <T> T[] newArray(IntFunction<T[]> make, int n) {   // instead of new T[n]
+    return make.apply(n);
+}
+
+void main() {
+    List<StringBuilder> bufs = fill(2, StringBuilder::new);
+    String[] slots = newArray(String[]::new, 3);
+    IO.println(bufs.size() + " " + slots.length + " " + slots.getClass().getSimpleName());
+
+    List<String> names = List.of("ada", "bob");
+    Object[] a = names.toArray();
+    String[] b = names.toArray(String[]::new);
+    IO.println(a.getClass().getSimpleName() + " " + b.getClass().getSimpleName());
+}
+```
+
+that last line is the whole problem in miniature. a `List<String>` can't hand you a `String[]` by itself, because it doesn't know it holds strings. plain `toArray()` returns an `Object[]`. to get a real `String[]`, you pass in something that knows how to make one.
+
+## arrays play by different rules
+
+arrays came first (java 1.0) and made two choices generics later reversed:
+
+| | arrays | generics |
+| --- | --- | --- |
+| subtyping | **covariant**: a `String[]` is an `Object[]` | **invariant**: a `List<String>` is not a `List<Object>` |
+| type info at run time | **reified**: the array knows it's a `String[]` | **erased**: the list is just a `List` |
+| a wrong element fails | at the store, `ArrayStoreException` | at compile time |
+
+covariance means you can hold a `String[]` through an `Object[]` variable and try to store an `Integer`. the compiler can't stop that, so the array checks every single store at run time:
+
+```java title="Main.java" run output="String[]\nException in thread \"main\" java.lang.ArrayStoreException: java.lang.Integer"
+void main() {
+    String[] words = {"a", "b"};
+    Object[] things = words;       // fine: String[] is an Object[]
+    IO.println(things.getClass().getSimpleName());
+    things[0] = 42;                // compiles. the array knows better.
+}
+```
+
+<Figure caption={<>two variables, one array. the <C k="ref">arrows</C> don&apos;t care that one variable says <code>Object[]</code>: the object itself is a <code>String[]</code>, and it says so in its header. that&apos;s what lets it reject the <C k="dead">Integer</C> at the door.</>}>
+<Memory
+  frames={[{ name: "main", locals: { words: { ref: "arr" }, things: { ref: "arr" } } }]}
+  heap={{
+    arr: { type: "String[]", items: [{ ref: "a" }, { ref: "b" }], tag: "knows it holds Strings" },
+    a: { type: "String", value: '"a"' },
+    b: { type: "String", value: '"b"' },
+    i: { type: "Integer", value: "42", state: "dead", tag: "rejected" },
+  }}
+/>
+</Figure>
+
+now combine the two. an array of a generic type would be covariant like an array, but erased like a generic. its store check would only see `List`, never `List<String>`. step through what would happen:
+
+<Figure caption="step through it. this is why new List<String>[n] is illegal, and it's exactly what generic varargs do behind your back.">
+<Slides>
+<Slide note={<><code>List&lt;String&gt;[] lists = new List&lt;String&gt;[1];</code> pretend java allowed it. at run time the array is only a <code>List[]</code>: erasure took the <code>String</code> away.</>}>
+<Memory
+  frames={[{ name: "main", locals: { lists: { ref: "arr" } } }]}
+  heap={{
+    arr: { type: "List[]", items: [{ ref: "l1" }] },
+    l1: { type: "List", items: [{ ref: "s" }] },
+    s: { type: "String", value: '"ada"' },
+  }}
+/>
+</Slide>
+<Slide note={<><code>Object[] objs = lists;</code> arrays are covariant, so this compiles without a word.</>}>
+<Memory
+  frames={[{ name: "main", locals: { lists: { ref: "arr" }, objs: { ref: "arr" } } }]}
+  heap={{
+    arr: { type: "List[]", items: [{ ref: "l1" }] },
+    l1: { type: "List", items: [{ ref: "s" }] },
+    s: { type: "String", value: '"ada"' },
+  }}
+/>
+</Slide>
+<Slide note={<><code>objs[0] = List.of(42);</code> the array checks the store: is it a <code>List</code>? yes. it can&apos;t see type arguments, so a list of Integers gets in.</>}>
+<Memory
+  frames={[{ name: "main", locals: { lists: { ref: "arr" }, objs: { ref: "arr" } } }]}
+  heap={{
+    arr: { type: "List[]", items: [{ ref: "l2" }] },
+    l2: { type: "List", items: [{ ref: "i" }], state: "new" },
+    i: { type: "Integer", value: "42" },
+  }}
+/>
+</Slide>
+<Slide note={<><code>String s = lists[0].get(0);</code> javac inserted a cast to <code>String</code> here, because <code>lists</code> says <code>List&lt;String&gt;</code>. it fails with a <C k="dead">ClassCastException</C>, in code with no cast in it.</>}>
+<Memory
+  frames={[{ name: "main", locals: { lists: { ref: "arr" }, objs: { ref: "arr" } } }]}
+  heap={{
+    arr: { type: "List[]", items: [{ ref: "l2" }] },
+    l2: { type: "List", items: [{ ref: "i" }] },
+    i: { type: "Integer", value: "42", state: "dead", tag: "not a String" },
+  }}
+/>
+</Slide>
+</Slides>
+</Figure>
+
+a variable of type `List<String>` pointing at something that isn't one is called **heap pollution**. the language bans generic array creation so you can't do this by accident. but there's one place java creates generic arrays for you anyway.
+
+## varargs and heap pollution
+
+a varargs parameter `T... xs` is an array. call it with `List<String>` arguments and javac has to create a `List<String>[]` to pass them, the very thing you're not allowed to write. it does it anyway, and warns twice (with `-Xlint:unchecked`; without it you only get a `Note:`):
+
+```bash
+$ javac -Xlint:unchecked Va.java
+Va.java:3: warning: [unchecked] Possible heap pollution from parameterized vararg type List<String>
+    static void dangerous(List<String>... lists) {
+Va.java:16: warning: [unchecked] unchecked generic array creation for varargs parameter of type List<String>[]
+        dangerous(List.of("a"));
+```
+
+the first warning is for whoever writes the method, the second for every caller. if the method is actually safe, its author can say so with **`@SafeVarargs`**, and both warnings go away. it's a promise, though, not a check. here's what happens when the promise is a lie:
+
+```java title="Main.java" run output="List[]\nException in thread \"main\" java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"
+@SafeVarargs // a promise javac takes on faith
+static void firstUpper(List<String>... lists) {
+    Object[] array = lists;          // arrays are covariant, so this compiles
+    array[0] = List.of(42);          // a List is a List, so no ArrayStoreException
+    IO.println(array.getClass().getSimpleName());
+    String s = lists[0].get(0);      // the hidden cast to String fails here
+    IO.println(s.toUpperCase());
+}
+
+void main() {
+    firstUpper(List.of("ada"), List.of("bob"));
+}
+```
+
+a generic varargs method is safe if it does two things: it **never stores** anything into the array, and it **never lets the array escape** (returning it, or passing it to code that might store into it). reading the elements is fine. that's what `List.of(E...)`, `Arrays.asList(T...)` and `EnumSet.of` do, and they're all marked `@SafeVarargs` in the JDK source.
+
+<Quiz question="where is @SafeVarargs allowed?" options={["on any varargs method", "on static methods only", "where it can't be overridden"]} answer={2}>
+<Explain>
+only on methods that can't be overridden, because an override could break the promise: static methods, final instance methods, constructors, and (since java 9) private instance methods. put it on a plain instance method and javac 25 says `error: Invalid SafeVarargs annotation. Instance method <T>inst(T...) is neither final nor private.`
+</Explain>
+</Quiz>
+
+<Gotcha title="the (T[]) new Object[n] trick only works if the array stays inside">
+inside a generic class, `(T[]) new Object[n]` with one `@SuppressWarnings("unchecked")` is the standard way to get a `T[]` (that's how a hand-written stack or ring buffer stores its elements). it's safe because the array is really an `Object[]` and nobody outside ever sees it as anything else. return it from a public `T[] toArray()` and a caller who writes `String[] s = box.toArray()` gets this:
+
+```text
+ClassCastException: class [Ljava.lang.Object; cannot be cast to class [Ljava.lang.String;
+```
+
+that's why `ArrayList.toArray()` returns `Object[]`, and why the typed version needs you to pass an array or a generator.
+</Gotcha>
+
+<Effective item={28} title="prefer lists to arrays">
+arrays and generics have opposite rules (covariant and reified versus invariant and erased), so they don't mix. when a compile error or an unchecked warning shows up where the two meet, the fix is usually to replace the array with a `List`. item 32 is the varargs half of this chapter: `@SafeVarargs` only on methods you've proved safe, or take a `List<T>` instead of `T...`. both are in [effective java: generics](/learn/effective-java/generics).
+</Effective>
+
+<Interview q="why can't you create a generic array in java?">
+because arrays are reified and covariant, and generics are erased and invariant. a `new List<String>[10]` would really be a `List[]` at run time, so its store check couldn't reject a `List<Integer>`, and through an `Object[]` view you could put one in without any warning. then reading it as a `List<String>` fails with a `ClassCastException` at a cast javac inserted. that's heap pollution, and banning generic array creation prevents it. bonus points: varargs of a generic type create such arrays anyway, which is what the "possible heap pollution" warning and `@SafeVarargs` are about.
+</Interview>
+
+<Keylines>
+- no `new T()`, no `new T[n]`, no `instanceof T`, no `T.class`: there's no T at run time.
+- the workaround is always the same: have the caller pass a `Supplier`, an `IntFunction<T[]>` or a `Class<T>`.
+- no primitives as type arguments. `List<Integer>` boxes.
+- arrays are covariant and checked at run time. generics are invariant and checked at compile time.
+- generic varargs create generic arrays. safe only if you never store into them or leak them.
+- `@SafeVarargs` is a promise, not a check.
+</Keylines>

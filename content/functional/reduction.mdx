@@ -1,0 +1,142 @@
+import { FoldTree } from "@/components/figures/functional/FoldTree";
+
+<InShort>
+`reduce` folds a stream into one value by repeatedly combining two things into one: `reduce(0, Integer::sum)`.
+
+it takes an **identity** (the starting value, which must change nothing: `x + 0 == x`), an **accumulator**, and for parallel streams a **combiner**. all of them must be **associative**, because a parallel stream will regroup the work. and `reduce` is for immutable values: to build up a list or a map, use `collect`.
+</InShort>
+
+## the picture
+
+you know the classic loop: `int total = 0; for (int x : xs) total += x;`. that's a reduction. `reduce` is the same loop, except the stream decides how to run it, and in parallel it splits the loop into pieces, runs them separately, and stitches the answers together.
+
+think of counting votes in an election. one person can go through every ballot in order (sequential). or each polling station counts its own pile and head office adds up the totals (parallel). both work, as long as every station starts its tally at zero. if every station starts at 10 "as a buffer", the national total is off by 10 times the number of stations.
+
+<Figure wide caption={<>switch between <em>sequential</em> and <em>parallel</em>, then change the identity or the operation. the parallel tree is the real split jdk 25 does for 8 elements on a 14-core mac. in parallel, the identity is used once <em>per chunk</em>, which is why a fake one gives a <C k="dead">different answer</C> than sequential.</>}>
+<FoldTree />
+</Figure>
+
+## the three forms
+
+```java title="Main.java" run output="36\nOptional[36]\nOptional.empty\n0\n11"
+import java.util.*;
+import java.util.stream.*;
+
+void main() {
+    List<Integer> nums = List.of(1, 2, 3, 4, 5, 6, 7, 8);
+
+    // 1. identity + accumulator: always has an answer
+    IO.println(nums.stream().reduce(0, Integer::sum));
+
+    // 2. no identity: an empty stream has no answer, so you get an Optional
+    IO.println(nums.stream().reduce(Integer::sum));
+    IO.println(Stream.<Integer>empty().reduce(Integer::sum));
+    // for an empty stream, the identity IS the answer
+    IO.println(Stream.<Integer>empty().reduce(0, Integer::sum));
+
+    // 3. identity + accumulator + combiner:
+    //    for when the result type differs from the element type
+    List<String> words = List.of("fig", "kiwi", "plum");
+    IO.println(words.stream().reduce(0,
+            (total, w) -> total + w.length(),   // (Integer, String) -> Integer
+            Integer::sum));                     // (Integer, Integer) -> Integer
+}
+```
+
+the third form looks odd until you picture the parallel tree: each chunk turns strings into a running `int` with the accumulator, then the chunks' `int`s get merged with the combiner. two different jobs, two different functions. (honestly, `words.stream().mapToInt(String::length).sum()` says the same thing more clearly. see [primitive streams](/learn/functional/primitive-streams).)
+
+## the rules, and what happens when you break them
+
+`reduce` makes three promises to itself, and it's your job to keep them:
+
+<Defs>
+<dt>identity</dt><dd>`op(identity, x) == x` for every `x`. 0 for `+`, 1 for `*`, `""` for string concatenation, `Integer.MIN_VALUE` for `max`.</dd>
+<dt>associative</dt><dd>`op(op(a, b), c) == op(a, op(b, c))`. grouping doesn't matter. `+`, `*`, `max`, `min`, string concat: yes. `-`, `/`, averaging: no.</dd>
+<dt>stateless</dt><dd>the functions don't read or write anything outside their arguments.</dd>
+</Defs>
+
+the nasty part: on a sequential stream you can break the first two and get away with it. `reduce(10, Integer::sum)` gives 46, which is at least predictable. it only goes wrong when someone adds `.parallel()` later:
+
+```java title="Main.java" run output="sequential 46\nparallel   116\nsequential -36\nparallel   0"
+import java.util.*;
+
+void main() {
+    List<Integer> nums = List.of(1, 2, 3, 4, 5, 6, 7, 8);
+    IO.println("sequential " + nums.stream().reduce(10, Integer::sum));
+    IO.println("parallel   " + nums.parallelStream().reduce(10, Integer::sum));
+    IO.println("sequential " + nums.stream().reduce(0, (a, b) -> a - b));
+    IO.println("parallel   " + nums.parallelStream().reduce(0, (a, b) -> a - b));
+}
+```
+
+<Gotcha title="the wrong answer depends on the machine">
+116 is what this prints on a 14-core mac, where the common pool has 13 workers and the stream splits down to single elements: 8 chunks, 8 extra 10s. run it with `-Djava.util.concurrent.ForkJoinPool.common.parallelism=1` (like a small container) and the stream stops splitting at chunks of two: 4 chunks, and the "same" code prints 76. a test that passed on your laptop can fail in CI. the fix is never "pick the right identity for this machine", it's "use a real identity".
+</Gotcha>
+
+<Predict options={["Optional[9]", "Optional[1]", "Optional.empty"]} answer={0}>
+```java
+IO.println(Stream.of(3, 9, 1).reduce(Math::max));
+```
+<Explain>
+`Math::max` fits `BinaryOperator<Integer>` (with unboxing), it's associative, and with no identity you get an `Optional`. on an empty stream it would be `Optional.empty`, which is exactly why this form returns one: there's no sensible "max of nothing". the shortcut is `max(Comparator.naturalOrder())`.
+</Explain>
+</Predict>
+
+## reduce vs collect
+
+`reduce` is built for values that don't change: numbers, strings, records. every step makes a new value from two old ones. if you try to use it to fill a mutable container, you'll share that container between every chunk:
+
+<Compare>
+<Bad label="reduce into one shared list">
+```java
+// one list, the identity of every chunk
+var out = Stream.of(1, 2, 3, 4).parallel()
+    .reduce(new ArrayList<Integer>(),
+        (l, x) -> { l.add(x); return l; },
+        (a, b) -> { a.addAll(b); return a; });
+```
+</Bad>
+<Good label="collect: a fresh container per chunk">
+```java
+// a supplier: a new list per chunk
+var out = Stream.of(1, 2, 3, 4).parallel()
+    .collect(ArrayList::new,
+        ArrayList::add,
+        ArrayList::addAll);
+```
+</Good>
+</Compare>
+
+the bad version passes every sequential test (it prints `[1, 2, 3, 4]`). in parallel, four threads add to the same unsynchronized `ArrayList`, and then the combiner does `a.addAll(b)` where `a` and `b` are the same list, doubling it. here's what 1000 parallel runs of it gave on jdk 25:
+
+<Figure caption={<>4 elements in. how big the list came back, across 1000 runs. the <C k="live">right answer</C> showed up once. a second batch of 1000 had a different spread, which is the point. (with 1000 elements instead of 4, the doubling ran the heap out: <code>OutOfMemoryError</code>.)</>}>
+<Bars
+  log
+  data={[
+    { label: "size 4", value: 1, tone: "live" },
+    { label: "size 8", value: 5, tone: "dead" },
+    { label: "size 12", value: 23, tone: "dead" },
+    { label: "size 16", value: 37, tone: "dead" },
+    { label: "size 18", value: 3, tone: "dead" },
+    { label: "size 20", value: 91, tone: "dead" },
+    { label: "size 24", value: 762, tone: "dead" },
+    { label: "size 28", value: 68, tone: "dead" },
+    { label: "size 32", value: 9, tone: "dead" },
+    { label: "AIOOBE", value: 1, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+`collect` exists for exactly this. its first argument is a `Supplier`, so every chunk gets its own fresh container, mutates it freely (nobody else can see it), and the combiner merges two *different* containers at the end. people call it a **mutable reduction**. it's what every `Collector` does under the hood ([previous chapter](/learn/functional/collectors)).
+
+<Interview q="when do you use reduce and when do you use collect?">
+`reduce` for combining immutable values into one value: sums, products, max, string concatenation of a few items. `collect` whenever the result is a mutable container (a list, a map, a `StringBuilder`), because it gives each parallel chunk its own container instead of sharing one. bonus points: `reduce`'s identity must be a true identity and its operation associative, or parallel results go wrong silently, and for numbers `mapToInt(...).sum()` beats both.
+</Interview>
+
+<Keylines>
+- `reduce(identity, op)`: start at the identity, fold every element in with `op`.
+- the identity must change nothing. in parallel it's used once per chunk, not once.
+- the operation must be associative. `-` and `/` aren't, so they break in parallel.
+- no identity → `Optional`, because an empty stream has no answer.
+- building a list or map? that's `collect`, not `reduce`.
+</Keylines>

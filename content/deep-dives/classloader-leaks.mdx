@@ -1,0 +1,134 @@
+import { LoaderLeak } from "@/components/figures/deep-dives/LoaderLeak";
+
+<InShort>
+a class can only be unloaded together with its **class loader**, and a loader can only be collected when **nothing** reaches it: none of its classes, and none of the objects of any of its classes. so one stray reference from something long-lived (a static map in the server, a `ThreadLocal` on a pool thread, a thread the app never stopped, a JDBC driver in `DriverManager`) keeps the **entire old copy of the app** alive.
+
+redeploy enough times and the copies pile up until `OutOfMemoryError: Metaspace`. measured here: 301 classes and about 0.75 MB of metaspace per redeploy, dead at deploy 42 with a 32 MB cap.
+</InShort>
+
+## the picture
+
+you know how app servers (and some frameworks' dev modes) can reload your app without restarting the JVM? they do it with class loaders: each deploy gets a fresh loader that loads your classes, and undeploying means dropping that loader so the GC can throw the old version away. [class loaders](/learn/jvm/classloaders) has how loaders work; this chapter is about the dropping part, which goes wrong a lot.
+
+think of a hotel. a guest (your app) checks out, and housekeeping is supposed to clear the whole room. but the guest left a coat in the lobby cloakroom, and the room key is in its pocket. as long as the cloakroom (owned by the hotel, not the guest) holds that coat, the room counts as occupied. nobody can clean it, and the next guest gets a new room. check in and out enough times and the hotel is full of empty, occupied rooms.
+
+## why one reference holds everything
+
+the references point in a direction that makes this inevitable: every object knows its class, every class knows its loader, and every loader keeps a list of every class it defined. so from any single object of your app, the GC can reach the loader, and from the loader, everything else.
+
+<Figure caption={<>what one leaked <code>App</code> object keeps alive. the <C k="ref">root</C> belongs to the server, so it never dies. everything below it belongs to the old deploy: <C k="meta">class metadata</C> in metaspace, static fields on the heap.</>}>
+<Tree>{`
+Server.REGISTRY              // a static field: a GC root for as long as the server runs
+    HashMap
+        App (an object from webapp-v1)
+            App.class #meta
+                webapp-v1 class loader #meta
+                    Page0 ... Page299 #meta  // 300 more classes, in metaspace
+                    App.CACHE                // its static fields: 1.5 MB of heap
+`}</Tree>
+</Figure>
+
+the important direction: a reference from the app *into* the server is fine (the app dies, the reference dies with it). a reference from the server *into* the app is the leak, because the server outlives every deploy.
+
+<Quiz question="which of these does NOT keep an undeployed app's class loader alive?" options={["an App in a server's static map", "a ThreadLocal on a server thread", "an app class's own static field", "its JDBC driver in DriverManager"]} answer={2}>
+<Explain>
+the app's own static field. it lives in an app class, which lives in the app's loader, so it's *inside* the graph that gets collected: once nothing outside points in, the whole thing (loader, classes, statics, the huge map) goes at once. the other three all start from something that outlives the app: a server class's static field, a server thread (a live thread is a GC root), and `java.sql.DriverManager`, a JDK class loaded by the platform loader that never goes away.
+</Explain>
+</Quiz>
+
+## redeploy, ten times
+
+a tiny "app server" that deploys a 301-class webapp in a fresh `URLClassLoader`, undeploys it (closes the loader, drops every reference it knows about), runs a GC, and repeats. the webapp is innocent except for one line, which depends on the mode:
+
+<Figure wide caption={<>pick a leak, then press <strong>redeploy</strong> a few times. undeployed copies either get <C k="dead">leaked</C> or collected; the counters are measured. all four leaks behave the same, because they all end at the same loader.</>}>
+<LoaderLeak />
+</Figure>
+
+the heart of the server (trimmed to the registry case):
+
+```java title="Server.java"
+static WeakReference<ClassLoader> deployAndUndeploy(int n, String mode, URL webapp) throws Exception {
+    URLClassLoader loader = new URLClassLoader("webapp-v" + n, new URL[] { webapp }, Server.class.getClassLoader());
+    Runnable app = (Runnable) loader.loadClass("App").getConstructor().newInstance();
+    app.run();                                                    // deploy: loads 300 Page classes
+    if (mode.equals("registry")) REGISTRY.put("listener-" + n, app);   // the one bad line
+    loader.close();                                               // undeploy
+    return new WeakReference<>(loader);                           // so we can ask: did it die?
+}
+```
+
+and what it printed, with and without the bad line (jdk 25, G1):
+
+```text nolines
+no leak:   deploy  10: old loaders alive   0, classes loaded  1035, metaspace   1.0 MB
+registry:  deploy  10: old loaders alive  10, classes loaded  4045, metaspace   8.3 MB
+```
+
+<Figure caption={<>metaspace after 10 deploys and undeploys, one bar per leak root, measured with the <code>Metaspace</code> memory pool MXBean. every leak costs the same, about 0.75 MB of class metadata and 1.5 MB of heap per redeploy.</>}>
+<Bars
+  unit="MB"
+  data={[
+    { label: "no leak", value: 1.0, tone: "live" },
+    { label: "static registry", value: 8.3, tone: "dead" },
+    { label: "ThreadLocal on a pool thread", value: 8.4, tone: "dead" },
+    { label: "a thread the app started", value: 8.4, tone: "dead" },
+    { label: "JDBC driver in DriverManager", value: 8.4, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+a real app is thousands of classes, not 301, so each leaked redeploy is tens of megabytes. and metaspace has no limit by default, so instead of an error you get a process that grows by that much every deploy. cap it, and you get the error instead:
+
+```bash
+$ java -XX:MaxMetaspaceSize=32m Server registry webapp/ 500
+...
+deploy  41: old loaders alive  41, classes loaded 13377, metaspace  31.0 MB
+Exception in thread "main" java.lang.OutOfMemoryError: Metaspace
+	...
+	at webapp-v42//App.run(App.java:12)
+```
+
+note the `webapp-v42//` in the stack trace: since java 9, a frame names the loader its class came from, if the loader has a name. naming your loaders is free and makes this kind of bug much easier to read.
+
+## finding it
+
+the JVM will tell you how many loaders it has, by name, while it runs:
+
+```text title="jcmd <pid> VM.classloaders" nolines
++-- <bootstrap>
+      +-- "platform", jdk.internal.loader.ClassLoaders$PlatformClassLoader
+            +-- "app", jdk.internal.loader.ClassLoaders$AppClassLoader
+                  +-- "webapp-v1", java.net.URLClassLoader
+                  +-- "webapp-v2", java.net.URLClassLoader
+                  +-- "webapp-v3", java.net.URLClassLoader
+```
+
+three copies of the webapp, after three deploys and three undeploys. that's the smoking gun. `jcmd <pid> VM.classloader_stats` adds the class count and metaspace per loader (301 classes and about 0.75 MB each, here). to find *who* holds an old one, take a [heap dump](/learn/gc/memory-leaks), find the old loader object (Eclipse MAT has a "duplicate classes" report that lists classes loaded by more than one loader), and ask for its path to the GC roots. the first object on that path that doesn't belong to the app is the thing to fix.
+
+the usual fixes, matching the usual roots:
+
+- **registrations**: anything the app registers with something outside itself (listeners, MBeans, shutdown hooks, `DriverManager`, a logging framework's appenders) gets unregistered on undeploy.
+- **threads and executors**: every thread the app starts, it stops. every executor it creates, it shuts down.
+- **ThreadLocals**: `remove()` in a `finally`, every time, especially on threads the app doesn't own (see [ThreadLocal internals](/learn/deep-dives/threadlocal-internals)).
+- **libraries in the right place**: drivers and libraries that keep global state belong in the server's classpath, not inside each app.
+
+<Gotcha title="the leak that isn't your code">
+plenty of these roots are set up by libraries on your behalf: a JDBC driver registering itself the moment its class loads, a logging library starting a background thread, a cache library keeping a static registry of caches. app servers know: Tomcat, for one, checks for the common cases when an app stops and logs a warning for each thread, `ThreadLocal` or driver it finds still pointing into the app. read those warnings. each one is a leaked copy of your app per redeploy.
+</Gotcha>
+
+<Deep title="why permgen made this famous">
+before java 8, class metadata lived in the permanent generation, a fixed slice of the heap sized by `-XX:MaxPermSize`, with a small default. so a class loader leak in an app server took only a handful of redeploys to end in `OutOfMemoryError: PermGen space`, which is why every java developer of a certain age knows the error by heart. java 8 replaced permgen with metaspace in native memory (JEP 122), with no default limit. the leak didn't go away, it just stopped crashing quickly. now it grows the process instead, which can be worse: you find out from the container's memory limit (see [native memory](/learn/gc/native-memory)), not from a clear error.
+</Deep>
+
+<Interview q="how can redeploying a web application cause a memory leak, and how would you find it?">
+each deploy loads the app's classes in a new class loader, and undeploying relies on the old loader becoming unreachable so the GC can unload all of its classes. but the loader stays reachable if anything outside the app holds any object of any of the app's classes: a static field in a shared library, a `ThreadLocal` value on a pooled server thread, a thread the app started and never stopped, a JDBC driver registered with `DriverManager`. then the whole previous version stays in memory, classes in metaspace and statics on the heap, and each redeploy adds another copy until `OutOfMemoryError: Metaspace`. to find it: `jcmd VM.classloaders` shows several loaders for the same app; a heap dump shows the old loader's path to a GC root, and the first non-app object on that path is the leak.
+</Interview>
+
+<Keylines>
+- a class is unloaded only with its loader, and a loader only dies when none of its objects or classes are reachable.
+- every object knows its class, every class its loader: one reference pins the whole old app.
+- references from the server into the app leak. references from the app into the server don't.
+- usual roots: server-side statics, ThreadLocals on pool threads, threads the app started, DriverManager.
+- measured: 301 classes and ~0.75 MB of metaspace per leaked redeploy. dead at deploy 42 with a 32 MB cap.
+- `jcmd VM.classloaders` shows the copies; a heap dump's path to GC roots shows who holds them.
+</Keylines>

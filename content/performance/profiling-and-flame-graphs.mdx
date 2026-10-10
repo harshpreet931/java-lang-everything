@@ -1,0 +1,92 @@
+import { FlameGraph } from "@/components/figures/performance/FlameGraph";
+import { SafepointBias } from "@/components/figures/performance/SafepointBias";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+a sampling **profiler** interrupts your threads every few milliseconds and records their stack traces. thousands of samples later, the methods that show up most are where the time goes. a **flame graph** draws all of those stacks at once: width is share of samples, height is call depth, and the wide boxes are your problem.
+
+the catch is *when* a profiler is allowed to take a sample. one that waits for a **safepoint** sees your code only at certain spots, and blames the wrong methods. that's **safepoint bias**, and it's why JFR and async-profiler work the way they do.
+</InShort>
+
+## the picture
+
+you want to know where your day goes. you could log every single thing you do (that's tracing: precise, exhausting, and it changes how you behave). or someone could text you at random moments asking "what are you doing right now?" and you'd reply honestly. after a month, if 30% of the replies say "in a meeting", you spend about 30% of your time in meetings. that's sampling: cheap, statistical, and surprisingly accurate, as long as the texts really arrive at random moments.
+
+a sampling profiler texts your threads about a hundred times a second. the reply is a stack trace.
+
+## from samples to a flame graph
+
+i recorded ten seconds of the little order-processing app from the [flight recorder](/learn/performance/jfr-and-jmc) chapter: three threads that parse CSV lines, sort orders, format a report and checksum it. JFR took 2,352 `jdk.ExecutionSample` stack traces. first, the obvious report, `jfr view hot-methods`, which counts the method at the *top* of each stack (where the CPU actually was):
+
+<Figure caption={<>"self time": the frame on top of the stack when the sample was taken. every one of the top six is a JDK internal. not one method of the app makes the list.</>}>
+<Bench
+  unit="% of samples"
+  digits={2}
+  data={[
+    { label: "AbstractStringBuilder.append(char)", value: 8.08 },
+    { label: "DoubleToDecimal.toChars1(...)", value: 6.38 },
+    { label: "TimSort.mergeHi(...)", value: 5.65 },
+    { label: "Formatter$FormatSpecifier.precision(...)", value: 5.57 },
+    { label: "String.split(char, int, boolean)", value: 5.02 },
+    { label: "Formatter$FormatSpecifierParser.parseWidth()", value: 4.68 },
+  ]}
+/>
+</Figure>
+
+true, and useless: you can't fix `TimSort`. what you need is *who called it*. a flame graph keeps the whole stack. every sample is a column of frames, from `Thread.run` at the bottom to the running method at the top; merge identical prefixes, and make each box as wide as the number of samples that passed through it:
+
+<Figure wide caption={<>the real profile. hover a box for its numbers, click to zoom into it, and switch off the highlight to see how much of this is JDK code. <C k="hot">amber</C> boxes are the app's own methods. read it bottom-up: <code>formatReport</code> is more than half the width.</>}>
+<FlameGraph />
+</Figure>
+
+how to read one:
+
+- **width is everything.** a box's width is the share of samples with that frame somewhere on the stack: its *total* time, including everything it called.
+- **the x axis is not time.** siblings are sorted by size (some tools sort them alphabetically). left-to-right means nothing.
+- **look for wide boxes, then look up.** `Shop.formatReport` takes 54% of the samples, and almost all of that is `String.format` (52%). `Shop.sortByTotal` and `Shop.parseCsv` are about 16% each, and inside `parseCsv`, `Double.parseDouble` is 6%.
+- **flat tops are self time.** a box with nothing on top of it is where the CPU actually was. those are the methods from the chart above.
+
+so the fix here is obvious once you see it: `String.format` for every row of a report is expensive (it parses the format string on every call). i checked with [JMH](/learn/performance/jmh): one row took 599 ns with `String.format` and 91 ns with a `StringBuilder` and hand-written padding, 6.6 times faster, for the method that's half the profile. the flame graph also shows something you'd never find by reading the code: under `Shop.makeLines` there's `String$$StringConcat.concat`, a class that doesn't exist in any source file. that's the hidden class `StringConcatFactory` generated for a string `+` ([invokedynamic](/learn/meta/invokedynamic)).
+
+<Quiz question="in a flame graph, box A sits directly on top of box B and is exactly as wide. what does that tell you?" options={["A and B took the same time, one after the other", "B spends essentially all of its time inside calls to A", "A is called more often than B", "nothing, the layout is arbitrary"]} answer={1}>
+<Explain>
+B spends essentially all of its time in A. every sample that had B on the stack also had A on top of it, so B has no self time and calls nothing else worth drawing. that's `Shop.formatReport` (54%) under `String.format` (52%): optimizing `formatReport`'s own loop would gain almost nothing; the time is in what it calls. "called more often" is the classic misreading: a flame graph has no call counts at all, only samples.
+</Explain>
+</Quiz>
+
+## safepoint bias
+
+the old, easy way to sample a JVM is to ask it for every thread's stack: `Thread.getAllStackTraces()`, or JVMTI's `GetAllStackTraces` that many older profilers were built on. both need a [safepoint](/learn/jvm/safepoints): the JVM can only describe a thread's java stack precisely when the thread is parked at a safepoint poll. so the sample isn't taken when the timer fires. it's taken when the thread next reaches a poll.
+
+and polls aren't everywhere. compiled code has them at method returns and on loop back-edges, but C2 strips them out of counted loops (or runs them only every thousand iterations), and intrinsic stubs (array copies, CRC, crypto) have none at all.
+
+<Figure caption={<>a model, not a measurement. the <C k="hot">amber</C> ticks are when the sampler fires. switch the sampler: a safepoint-biased one moves each sample (<C k="dead">red</C> arc) to the next poll, and a loop without polls disappears from the profile.</>}>
+<SafepointBias />
+</Figure>
+
+the result isn't just noise, it's systematically wrong: time spent in long poll-free loops gets credited to whatever code runs after the next poll. you optimize `format()` and nothing changes.
+
+how the current tools avoid it:
+
+- **async-profiler** (open source, linux and macOS) interrupts threads with a signal from the OS timer (or perf_events on linux), and walks the stack from wherever the thread actually is, using HotSpot's internal `AsyncGetCallTrace` plus its own stack walker. no safepoint involved. it profiles CPU, wall-clock time, allocations and lock contention, and writes HTML flame graphs or JFR files directly. add `-XX:+UnlockDiagnosticVMOptions -XX:+DebugNonSafepoints` to the JVM so inlined frames get attributed to the right line.
+- **JFR** never used `GetAllStackTraces`: its sampler suspends the thread and records the stack from the interrupted state. that was accurate but fragile (walking a stack at an arbitrary instruction can crash), so jdk 25's cooperative sampling ([JEP 518](https://openjdk.org/jeps/518)) records just the program counter at the interrupt, lets the thread run to its next safepoint, reconstructs the stack there, and corrects for the bias using the saved PC.
+
+<Gotcha title="wall-clock vs CPU profiles">
+a CPU profile shows where threads were *running*. a thread blocked on a lock, a socket or a database call isn't running, so it doesn't appear at all: a service that's slow because it waits 200 ms on a remote call can look idle in a CPU flame graph. for latency problems, profile wall-clock time (async-profiler's `-e wall`, which samples threads in every state) or look at JFR's wait events. and an allocation flame graph (`-e alloc`, or JFR's `ObjectAllocationSample`) answers a third question, "who makes the garbage", which is often the real CPU problem in disguise.
+</Gotcha>
+
+<Deep title="making one yourself">
+from a JFR file, the JDK alone gets you most of the way: `jfr print --json --events jdk.ExecutionSample rec.jfr` dumps every sample with its stack (this one was 33 MB for 2,352 samples), and a short script that walks each stack from the bottom, building a tree of counts, is the whole flame graph algorithm. that's literally how the figure above was made. Brendan Gregg's original `flamegraph.pl` takes "folded" stacks (one line per unique stack, frames separated by `;`, then a count) and renders an SVG. async-profiler writes interactive HTML directly (`asprof -d 30 -f profile.html <pid>`), and JDK Mission Control has a flame view built in.
+</Deep>
+
+<Interview q="what is safepoint bias, and how do modern java profilers avoid it?">
+a profiler that gets stacks through the JVM's "give me every thread's stack" APIs can only sample threads when they reach a safepoint poll. polls are at method returns and loop back-edges, but not inside counted loops that C2 compiled without them, or inside intrinsics, so time spent there gets attributed to the code after the next poll. the profile is systematically wrong, not just noisy. async-profiler avoids it by interrupting threads with an OS signal and walking the stack from the real instruction, using AsyncGetCallTrace plus its own walker. JFR samples asynchronously too, and since jdk 25 it records the program counter at the interrupt and reconstructs the stack at the next safepoint, correcting for the bias.
+</Interview>
+
+<Keylines>
+- a sampling profiler takes a stack trace every few ms. counts of stacks are your profile.
+- "hot methods" is self time; it usually lists JDK internals. you need the callers.
+- flame graph: width is samples, the x axis isn't time, wide boxes are the problem.
+- a sampler that waits for safepoints misattributes poll-free code. use async-profiler or JFR.
+- CPU profiles hide waiting. profile wall-clock time, or look at wait events, for latency.
+</Keylines>

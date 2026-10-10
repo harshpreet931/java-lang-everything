@@ -1,0 +1,122 @@
+import { LockStates } from "@/components/figures/jvm/LockStates";
+
+<InShort>
+every java object can be a lock, and almost none of them ever are. so HotSpot makes the common case nearly free: an uncontended `synchronized` is **lightweight locking**, one CAS that flips two bits in the mark word, plus a push onto the thread's **lock stack**. only when threads actually fight over a lock (or someone calls `wait()`) does it **inflate** into a full **ObjectMonitor** with queues.
+
+**biased locking**, the old trick that made single-thread locking even cheaper, was disabled in java 15 and deleted in 18.
+</InShort>
+
+## the picture
+
+you know how `synchronized` has a reputation for being slow, and then you measure it and it's a few nanoseconds? both are true. it depends entirely on whether anyone else wanted the lock.
+
+think of a meeting room. if nobody else is around, you flip the sign on the door to "occupied" and walk in: that's lightweight locking, one flip of a sign. if someone shows up while you're inside, flipping signs isn't enough anymore: now you need a receptionist with a waiting list and a way to tap the next person on the shoulder when the room frees up. that's the monitor. the receptionist is expensive, so they only get hired when there's actually a queue, and they go home again when the room has been quiet for a while.
+
+## the lock bits
+
+the last two bits of every object's [mark word](/learn/jvm/object-layout) say how it's locked. on jdk 25:
+
+| bits | state | what the rest of the mark word holds |
+| --- | --- | --- |
+| `01` | unlocked | hash and age, as usual |
+| `00` | lightweight locked | hash and age, untouched. the owner is on its thread's lock stack |
+| `10` | inflated | a pointer to the `ObjectMonitor`. hash and age moved into it |
+| `11` | marked | used by the GC, never seen by your code |
+
+these aren't from a diagram, they're read off a live object with `Unsafe.getLong(lock, 0)`:
+
+```text title="the last 8 bits of the mark word, jdk 25"
+unlocked:            ...00000001  (lock bits 01)
+synchronized:        ...00000000  (lock bits 00)
+nested synchronized: ...00000000  (lock bits 00)
+released:            ...00000001  (lock bits 01)
+other thread waits:  ...00000010  (lock bits 10)  mark=0x78a10c6a02
+after notify+join:   ...00000010  (lock bits 10)
+1.5 s later:         ...00000010  (lock bits 10)
+```
+
+## one lock, two threads
+
+step through every state a lock goes through on jdk 25, in order.
+
+<Figure wide caption={<>step through it. watch the mark word: lightweight locking only ever touches the last two bits, inflation replaces the whole word with a pointer to an <C k="meta">ObjectMonitor</C>. the monitor address is the real one from the run above, where a <code>wait()</code> caused the inflation.</>}>
+<LockStates />
+</Figure>
+
+two details from that walk-through worth keeping. first, inflation is sticky: once a lock has a monitor, it keeps using it until the **Monitor Deflation Thread** (one of the [18 threads in an idle JVM](/learn/jvm/jvm-architecture)) decides it's idle. the real object above was still inflated 1.5 seconds after everyone was done with it. second, `wait()` inflates on its own, contention or not, because only monitors have a wait set:
+
+```text title="java -Xlog:monitorinflation=trace (excerpt)"
+inflate: object=0x...7018409410, mark=0x...c687aa02, type='java.io.PrintStream' cause=Monitor Enter
+inflate: object=0x...7018422c50, mark=0x...c687aca2, type='java.lang.Object' cause=Monitor Wait
+inflate: object=0x...7018479730, mark=0x...c687ad82, type='java.lang.Thread' cause=Monitor Wait
+```
+
+that last one is `t.join()`, which is implemented with `wait()` on the `Thread` object. and since monitors are what `wait`/`notify` use, calling them without owning the lock fails fast:
+
+```java title="Main.java" run output="holds lock? false\nholds lock? true\njava.lang.IllegalMonitorStateException: current thread is not owner"
+void main() throws InterruptedException {
+    Object lock = new Object();
+    IO.println("holds lock? " + Thread.holdsLock(lock));
+    synchronized (lock) {
+        IO.println("holds lock? " + Thread.holdsLock(lock));
+        lock.wait(10);   // fine: we own the monitor
+    }
+    try {
+        lock.wait(10);   // not inside synchronized (lock)
+    } catch (IllegalMonitorStateException e) {
+        IO.println(e);
+    }
+}
+```
+
+## how we got here
+
+HotSpot has rewritten its locking three times. the history explains a lot of advice you'll still find online.
+
+<Flow stages={[
+  { label: "stack locking", sub: "the old fast path", note: "an uncontended lock copied the mark word onto the owner's stack and replaced it with a pointer to that copy. cheap, but the header no longer said anything useful about the object." },
+  { label: "biased locking", sub: "java 6 → 14 default", note: "the first thread to lock an object 'biased' it toward itself, so re-locking was nearly free. but handing the object to another thread needed a safepoint to revoke the bias. great for old single-threaded collections like Vector and Hashtable, bad for modern concurrent code." },
+  { label: "JEP 374", sub: "java 15", note: "biased locking disabled by default and deprecated. the code was removed in java 18. on jdk 25, -XX:+UseBiasedLocking is an unrecognized option and the JVM refuses to start." },
+  { label: "lightweight locking", sub: "java 21, default in 23", note: "a new fast path (JDK-8291555, java 21) that keeps the mark word intact and tracks owners on a per-thread lock stack. it became the default in java 23 (JDK-8319251). the LockingMode flag that chose between the two was deprecated in 24." },
+]} />
+
+you can check both ends of that story on jdk 25 yourself:
+
+```bash
+$ java -XX:+UseBiasedLocking -version
+Unrecognized VM option 'UseBiasedLocking'
+Error: Could not create the Java Virtual Machine.
+
+$ java -XX:LockingMode=1 -version
+OpenJDK 64-Bit Server VM warning: Option LockingMode was deprecated in version 24.0 and will likely be removed in a future release.
+```
+
+and `java -XX:+PrintFlagsFinal -version` shows `LockingMode = 2`: lightweight.
+
+<Quiz question="a lock is only ever taken by one thread, millions of times. on jdk 25, what does each acquisition cost?" options={["a safepoint to check the bias", "one CAS on the mark word and a lock-stack push", "allocating an ObjectMonitor", "an OS mutex call"]} answer={1}>
+<Explain>
+a CAS (compare-and-swap) that flips the lock bits from 01 to 00, and pushing the object on the thread's lock stack. no monitor, no OS involvement. biased locking would have skipped even the CAS, but it's gone, and the reason is that the CAS is cheap on modern CPUs while revoking biases (which needed safepoints) wasn't. in hot code, C2 may also remove the lock entirely if escape analysis proves the object never leaves the thread, or merge adjacent `synchronized` blocks on the same object.
+</Explain>
+</Quiz>
+
+<Gotcha title="virtual threads and synchronized">
+before java 24, a virtual thread that blocked inside `synchronized` stayed *pinned* to its carrier thread, because the monitor recorded the carrier as the owner. with enough of them, every carrier was stuck and the app stalled. [JEP 491](https://openjdk.org/jeps/491) (java 24) reworked monitors so virtual threads can unmount while holding or waiting for one. on jdk 25, `synchronized` with virtual threads is fine. the old advice "replace synchronized with ReentrantLock for virtual threads" is about java 21 to 23. see [virtual threads](/learn/concurrency/virtual-threads).
+</Gotcha>
+
+<Deep title="what a lightweight lock actually does">
+locking: read the mark word; if the low bits are 01, CAS it to the same value with 00; on success, push the object on the current thread's lock stack (a small fixed-size array inside the thread). nested locking of the same object is detected by looking at the top of the lock stack, and just pushes again. unlocking pops, and if this was the last entry for the object, CASes the bits back to 01.
+
+if the CAS fails (someone else holds it), or the lock stack is full, or the code needs `wait()`, the lock inflates: an `ObjectMonitor` is allocated (or, with compact headers, looked up in a side table), the original mark word is saved in it, and the header points at the monitor. contended acquisition then spins briefly (adaptive spinning: many locks are released within microseconds, so a short spin beats parking) before parking the thread in the monitor's entry queue.
+</Deep>
+
+<Interview q="what happened to biased locking, and why?">
+it was disabled by default in java 15 (JEP 374), deprecated at the same time, and removed in java 18. biased locking made re-locking by the same thread almost free, which mattered when everything used synchronized collections like `Vector` and `Hashtable`. but revoking a bias when a second thread showed up required a safepoint, which hurt latency in modern, highly concurrent code, and the implementation was complicated enough to slow down other HotSpot work. today's lightweight locking costs one CAS for the uncontended case, which modern CPUs make cheap, and keeps the mark word readable.
+</Interview>
+
+<Keylines>
+- uncontended synchronized = one CAS on the lock bits (01 → 00) and a push on the thread's lock stack.
+- contention or wait() inflates to an ObjectMonitor: lock bits 10, the header points at the monitor.
+- monitors deflate later, in the background, not when the lock is released.
+- biased locking: off in 15, gone in 18. lightweight locking: added in 21, default in 23.
+- on jdk 25, synchronized is fine for virtual threads too (JEP 491, java 24).
+</Keylines>

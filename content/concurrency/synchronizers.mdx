@@ -1,0 +1,200 @@
+import { Gates } from "@/components/figures/concurrency/Gates";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const gun = [
+  { mem: { start: 1, done: 3 }, note: "two latches. start (count 1) is the starting gun. done (count 3) is the finish line." },
+  { ops: ["start 3 threads", { t: "await", wait: true }, { t: "await", wait: true }, { t: "await", wait: true }], note: "each worker starts, then immediately parks in start.await(). none of them has done any work yet." },
+  { ops: [{ t: "fire!", k: "hot" }, null, null, null], mem: { start: { v: 0, k: "live" } }, note: "main fires the gun: start.countDown() drops it to 0..." },
+  { ops: [{ t: "await", wait: true }, "work", "work", "work"], note: "...and all three are released in the same instant, as close to simultaneous as java gets. main now waits in done.await()." },
+  { ops: [{ t: "WAITING", wait: true }, "done", "work", "done"], mem: { done: 1 }, note: "each worker calls done.countDown() when it finishes." },
+  { ops: [{ t: "WAITING", wait: true }, null, "done", null], mem: { done: { v: 0, k: "live" } } },
+  { ops: [{ t: "all 3 done", k: "live" }, null, null, null], note: "the finish line hits 0, main wakes up, and everything the workers wrote before counting down is visible to it." },
+];
+
+export const swap = [
+  { mem: { "filler holds": "buffer A: [ ]", "drainer holds": "buffer B: [ ]" }, note: "two threads, two buffers. one fills, one drains, and they trade when both are ready." },
+  { ops: ["fill A: x, y, z", null], mem: { "filler holds": "buffer A: [x y z]" } },
+  { ops: [{ t: "exchange(A)", wait: true }, null], note: "the filler is done and offers A. nobody's there to trade with yet, so it waits." },
+  { ops: [{ t: "WAITING", wait: true }, { t: "exchange(B)", k: "hot" }], note: "the drainer arrives with its empty buffer..." },
+  { ops: [{ t: "gets B", k: "live" }, { t: "gets A", k: "live" }], mem: { "filler holds": "buffer B: [ ]", "drainer holds": "buffer A: [x y z]" }, note: "...and they swap. no copying, no queue, no allocation: two references change hands." },
+];
+
+<InShort>
+**synchronizers** are the ready-made coordination objects in `java.util.concurrent`. a **`CountDownLatch`** lets threads wait until a count reaches zero (one-shot). a **`CyclicBarrier`** makes a fixed group wait for each other, then resets. a **`Semaphore`** limits how many threads do something at once. a **`Phaser`** is a reusable barrier whose party count can change. all of them are the [AQS](/learn/concurrency/locks-and-aqs) state-plus-queue idea with a different rule for "may I pass?".
+</InShort>
+
+## the picture
+
+four kinds of gate:
+
+- **a latch** is a door that opens once a counter hits zero and then stays open. the people waiting behind it aren't the ones counting down.
+- **a barrier** is a meeting point: nobody leaves until the whole group is there, then everyone leaves together and the meeting point resets for next time.
+- **a semaphore** is a parking lot with N spaces: take a ticket to get in, hand it back on the way out, wait at the barrier arm when it's full.
+- **a phaser** is a barrier for a group whose size changes: people can join or drop out between rounds.
+
+<Figure wide caption={<>pick a synchronizer and play the threads. watch who waits (<span className="text-faint">dashed</span>), what number the <C k="meta">gate</C> is counting, and when it <C k="live">opens</C>. try calling await() on the latch after it opened, and releasing a semaphore permit while someone's in line.</>}>
+<Gates />
+</Figure>
+
+## `CountDownLatch`: wait for N things
+
+the count only goes down, and `await()` returns once it's zero. the threads counting down don't block; only the waiters do.
+
+```java title="Main.java" run output="60"
+import java.util.concurrent.CountDownLatch;
+
+void main() throws InterruptedException {
+    int[] results = new int[3];
+    CountDownLatch done = new CountDownLatch(3);
+    for (int i = 0; i < 3; i++) {
+        int id = i;
+        Thread.ofPlatform().start(() -> {
+            results[id] = (id + 1) * 10;   // each worker fills its own slot
+            done.countDown();              // "I'm finished"
+        });
+    }
+    done.await();                          // main waits for all three
+    IO.println(results[0] + results[1] + results[2]);
+}
+```
+
+`results` is a plain array, and main still sees all three writes: everything a thread does before `countDown()` happens-before another thread returns from `await()`. same guarantee as [join](/learn/concurrency/threads), without needing the `Thread` objects.
+
+the other classic use is backwards: one count, many waiters. a starting gun.
+
+<Figure wide caption={<>a latch of 1 holds every worker at the line until main fires, so they all start at once. a second latch of 3 collects them at the end. this pair is the backbone of most hand-written <a href="/learn/concurrency/testing-concurrent-code">concurrency tests</a>.</>}>
+<Lanes threads={["main", "W1", "W2", "W3"]} cells={["start", "done"]} steps={gun} />
+</Figure>
+
+## `CyclicBarrier`: wait for each other, then go again
+
+a fixed number of parties call `await()`. the last one to arrive runs the optional barrier action, then everyone is released, and the barrier is ready for the next round. perfect for iterative algorithms where each step needs everyone's previous step (simulations, parallel matrix work):
+
+```java title="Main.java" run output="round 1 done\nround 2 done"
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.atomic.AtomicInteger;
+
+void main() throws InterruptedException {
+    AtomicInteger round = new AtomicInteger();
+    CyclicBarrier barrier = new CyclicBarrier(3,
+            () -> IO.println("round " + round.incrementAndGet() + " done"));  // runs once per round
+    Runnable worker = () -> {
+        try {
+            for (int r = 0; r < 2; r++) {
+                // ... compute this thread's chunk of round r ...
+                barrier.await();                      // wait for the other two
+            }
+        } catch (InterruptedException | BrokenBarrierException e) {
+            Thread.currentThread().interrupt();
+        }
+    };
+    Thread a = Thread.ofPlatform().start(worker);
+    Thread b = Thread.ofPlatform().start(worker);
+    Thread c = Thread.ofPlatform().start(worker);
+    a.join();
+    b.join();
+    c.join();
+}
+```
+
+<Gotcha title="one failure breaks the barrier for everyone">
+if a waiting thread is interrupted or times out, the barrier is **broken**: every other thread waiting on it, and every thread that arrives later, gets `BrokenBarrierException`. that's on purpose (the group can never be complete now), but it means one bad worker takes the whole group down. `reset()` puts it back, ideally after you've figured out what went wrong.
+</Gotcha>
+
+## `Semaphore`: at most N at a time
+
+a semaphore holds permits. `acquire()` takes one (waiting if there are none), `release()` puts one back. the classic job is limiting concurrency against something fragile:
+
+```java title="Main.java" run output="never more than 3 at once: true"
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
+
+void main() throws InterruptedException {
+    Semaphore permits = new Semaphore(3);          // at most 3 at a time
+    AtomicInteger inside = new AtomicInteger();
+    AtomicInteger most = new AtomicInteger();
+    Thread[] threads = new Thread[10];
+    for (int i = 0; i < 10; i++) {
+        threads[i] = Thread.ofPlatform().start(() -> {
+            try {
+                permits.acquire();
+                try {
+                    most.accumulateAndGet(inside.incrementAndGet(), Math::max);
+                    Thread.sleep(20);              // the "slow database call"
+                    inside.decrementAndGet();
+                } finally {
+                    permits.release();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+    for (Thread t : threads) t.join();
+    IO.println("never more than 3 at once: " + (most.get() <= 3));
+}
+```
+
+with [virtual threads](/learn/concurrency/virtual-threads) this becomes the main way to limit concurrency: you don't pool virtual threads, you start one per task and put a semaphore in front of the scarce thing.
+
+<Gotcha title="permits aren't owned">
+unlike a lock, a semaphore doesn't track who holds a permit. any thread can `release()`, even one that never acquired, and the count just goes up, past the limit you set. always pair `acquire` with `release` in `try`/`finally`, and never release in a path that didn't acquire.
+</Gotcha>
+
+## `Phaser`: a barrier for a changing group
+
+`Phaser` generalizes both: parties `register()` and `arriveAndDeregister()` at any time, and each phase completes when every currently-registered party has arrived. `arriveAndAwaitAdvance()` is a barrier wait; plain `arrive()` says "I'm done with this phase" without waiting, latch-style. it's the one to reach for when tasks spawn subtasks that should join the next round, or when workers finish at different times and should stop being waited for.
+
+```java title="Phases.java"
+Phaser phaser = new Phaser(1);                 // the coordinator counts as one party
+for (Task t : tasks) {
+    phaser.register();                         // one more party for this phase
+    Thread.ofVirtual().start(() -> {
+        t.stepOne();
+        phaser.arriveAndAwaitAdvance();        // everyone finishes step one...
+        t.stepTwo();                           // ...before anyone starts step two
+        phaser.arriveAndDeregister();          // done for good, stop waiting for me
+    });
+}
+phaser.arriveAndDeregister();                  // the coordinator steps out
+```
+
+## and an Exchanger
+
+the odd one out: two threads meet and swap one object each. the classic use is double buffering, where one thread fills a buffer while the other drains the previous one, then they trade:
+
+<Figure wide caption={<>the first thread to call <code>exchange</code> waits for a partner, then each walks away with the other's object.</>}>
+<Lanes threads={["filler", "drainer"]} cells={["filler holds", "drainer holds"]} steps={swap} />
+</Figure>
+
+## which one
+
+| you want to | use |
+| --- | --- |
+| wait until N events have happened (once) | `CountDownLatch` |
+| start N threads at the same moment | `CountDownLatch(1)` as a starting gun |
+| make a fixed group wait for each other, repeatedly | `CyclicBarrier` |
+| make a changing group wait for each other | `Phaser` |
+| limit concurrent access to N | `Semaphore` |
+| hand objects between exactly two threads | `Exchanger` |
+| hand objects between many producers and consumers | a `BlockingQueue` ([concurrent collections](/learn/concurrency/concurrent-collections)) |
+| wait for results, not just completion | `Future` / [`CompletableFuture`](/learn/concurrency/completablefuture), or [structured concurrency](/learn/concurrency/structured-concurrency) |
+
+<Quiz question="a CountDownLatch has reached 0. a new thread calls await(). what happens?" options={["it waits forever", "it returns immediately", "it throws IllegalStateException"]} answer={1}>
+<Explain>
+a latch stays open once its count reaches zero, so every later `await()` returns at once. there's no way to reset it. if you need the gate to close again, you want a `CyclicBarrier` or a `Phaser`.
+</Explain>
+</Quiz>
+
+<Interview q="what's the difference between CountDownLatch and CyclicBarrier?">
+a CountDownLatch is one-shot, and the threads counting down are usually different from the threads waiting: workers call countDown and carry on, while a coordinator awaits zero. a CyclicBarrier is reusable, and the threads waiting are the parties themselves: each calls await and blocks until all of them have arrived, then they all proceed together and the barrier resets, optionally running a barrier action first.
+</Interview>
+
+<Keylines>
+- latch: count down to zero, then open forever. waiters and counters are different threads.
+- barrier: a fixed group meets, leaves together, and the barrier resets.
+- semaphore: N permits. acquire in, release out, in `finally`.
+- phaser: a barrier where parties can join and leave between phases.
+- all of them give happens-before: work done before arriving is visible after passing.
+</Keylines>

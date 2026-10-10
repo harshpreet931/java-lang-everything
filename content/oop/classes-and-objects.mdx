@@ -1,0 +1,182 @@
+import { NewStamper } from "@/components/figures/oop/NewStamper";
+import { ObjectBytes } from "@/components/figures/oop/ObjectBytes";
+
+export const walk = {
+  file: "Main.java",
+  source: `class Dog {
+    String name;
+    int age;
+
+    Dog(String name, int age) {
+        this.name = name;
+        this.age = age;
+    }
+
+    void birthday() {
+        age++;
+    }
+}
+
+void main() {
+    Dog rex = new Dog("rex", 3);
+    Dog luna = new Dog("luna", 3);
+    rex.birthday();
+    Dog same = rex;
+    IO.println(rex.age + " " + luna.age);
+    IO.println(same == rex);
+}`,
+  steps: [
+    { line: 16, frames: [{ name: "main", locals: {} }], heap: {}, note: "main starts. no Dog exists yet, just the class." },
+    { line: 5, frames: [{ name: "main", locals: {} }, { name: "new Dog(\"rex\", 3)", locals: {"this": {"ref": "o2"}, "name": {"ref": "o3"}, "age": 3} }], heap: { o2: {"type": "Dog", "fields": {"name": null, "age": 0}, "state": "new"},  o3: {"type": "String", "value": "\"rex\""} }, note: "new Dog(\"rex\", 3) first carves a Dog out of the heap with every field zeroed, then calls the constructor. this points at the new object." },
+    { line: 7, frames: [{ name: "main", locals: {} }, { name: "new Dog(\"rex\", 3)", locals: {"this": {"ref": "o2"}, "name": {"ref": "o3"}, "age": 3} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 0}},  o3: {"type": "String", "value": "\"rex\""} }, note: "this.name = name copies the reference to \"rex\" into the object's own name field." },
+    { line: 8, frames: [{ name: "main", locals: {} }, { name: "new Dog(\"rex\", 3)", locals: {"this": {"ref": "o2"}, "name": {"ref": "o3"}, "age": 3} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 3}},  o3: {"type": "String", "value": "\"rex\""} }, note: "this.age = age. the object is fully built now." },
+    { line: 17, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 3}},  o3: {"type": "String", "value": "\"rex\""} }, note: "the constructor's frame is popped. what new evaluates to is the reference, and it lands in rex." },
+    { line: 5, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}} }, { name: "new Dog(\"luna\", 3)", locals: {"this": {"ref": "o4"}, "name": {"ref": "o5"}, "age": 3} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 3}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": null, "age": 0}, "state": "new"},  o5: {"type": "String", "value": "\"luna\""} }, note: "same blueprint, brand new object. luna gets her own name and her own age, zeroed first again." },
+    { line: 8, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}} }, { name: "new Dog(\"luna\", 3)", locals: {"this": {"ref": "o4"}, "name": {"ref": "o5"}, "age": 3} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 3}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, note: "luna is built. two objects, two sets of fields, one class." },
+    { line: 18, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}, "luna": {"ref": "o4"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 3}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, note: "luna holds the second reference." },
+    { line: 11, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}, "luna": {"ref": "o4"}} }, { name: "birthday", locals: {"this": {"ref": "o2"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 3}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, note: "rex.birthday() runs the one shared copy of birthday(), with this = rex." },
+    { line: 12, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}, "luna": {"ref": "o4"}} }, { name: "birthday", locals: {"this": {"ref": "o2"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 4}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, note: "age++ means this.age++. only rex's age changes. luna's 3 is untouched." },
+    { line: 20, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}, "luna": {"ref": "o4"}, "same": {"ref": "o2"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 4}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, note: "same = rex copies the arrow. still two dogs, now three references." },
+    { line: 21, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}, "luna": {"ref": "o4"}, "same": {"ref": "o2"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 4}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, stdout: "4 3\n", note: "rex is 4, luna is still 3." },
+    { line: 22, frames: [{ name: "main", locals: {"rex": {"ref": "o2"}, "luna": {"ref": "o4"}, "same": {"ref": "o2"}} }], heap: { o2: {"type": "Dog", "fields": {"name": {"ref": "o3"}, "age": 4}},  o3: {"type": "String", "value": "\"rex\""},  o4: {"type": "Dog", "fields": {"name": {"ref": "o5"}, "age": 3}},  o5: {"type": "String", "value": "\"luna\""} }, stdout: "4 3\ntrue\n", note: "same == rex compares the arrows themselves. both point at the same object, so true." },
+  ],
+};
+
+<InShort>
+a **class** is a blueprint: which fields an object has and what its methods do. **`new`** uses that blueprint to carve a fresh **object** out of the heap, with its own copy of every field, runs the constructor on it, and hands you a reference.
+
+one class, as many objects as you want. the class exists once.
+</InShort>
+
+## the picture
+
+you know how everyone says "a class is a blueprint" and then never shows you the house? here's the house.
+
+think of a cookie cutter (the class) and the cookies (objects). the cutter decides the shape, every cookie gets its own dough (its own fields), and you can bite one cookie without the others noticing. what you're holding in your hand is never the cookie itself, it's a note saying which plate it's on (the reference).
+
+<Figure caption={<>press <code>new</code> and watch the four phases. the object exists with <code>null</code> and <code>0</code> in every field <em>before</em> the constructor runs. then call <code>birthday()</code> on one dog: one method, run against one object. <C k="meta">purple</C> is the class, <C k="ref">blue</C> is a reference, <C k="hot">amber</C> is the object being built.</>}>
+<NewStamper />
+</Figure>
+
+notice what got copied and what didn't. every dog has its own `name` and `age` (that's what "instance field" means: one per instance). but `birthday()` wasn't copied into anybody. the code lives once, in the class, and runs against whichever object you call it on.
+
+## a class, piece by piece
+
+```java title="Dog.java" {2-3}
+class Dog {
+    String name;                // fields: the state.
+    int age;                    // every Dog gets its own copy
+
+    Dog(String name, int age) { // constructor: fills in a fresh object
+        this.name = name;
+        this.age = age;
+    }
+
+    void birthday() {           // method: behaviour, shared by every Dog
+        age++;                  // short for this.age++
+    }
+}
+```
+
+<Defs>
+<dt>field</dt><dd>a variable that belongs to an object. it lives inside the object, on the heap, for as long as the object does.</dd>
+<dt>constructor</dt><dd>the code that runs right after <code>new</code> allocates the object. same name as the class, no return type. the full story is in <a href="/learn/oop/constructors-and-init-order">constructors and init order</a>.</dd>
+<dt>method</dt><dd>a function that belongs to the class. it gets a hidden first parameter, <code>this</code>, the object it was called on.</dd>
+<dt>object</dt><dd>one instance of a class. a chunk of heap with a small header and the fields.</dd>
+</Defs>
+
+## walk through it
+
+two dogs, one birthday, and a second arrow to the same dog. press step and watch which box each line touches.
+
+<Figure wide caption={<>steps 2 and 6: a brand new object, fields still zeroed, <C k="hot">outlined in amber</C>. step 9: <code>birthday()</code> gets a frame whose <code>this</code> is rex's arrow. that's the whole trick behind methods.</>}>
+<MemoryStepper trace={walk} />
+</Figure>
+
+see? `rex` isn't a dog. it's an arrow to a dog. `same = rex` doesn't clone anything, it copies the arrow (the same rule as [stack and heap](/learn/basics/stack-and-heap): `=` copies what's in the slot).
+
+## methods live in the class
+
+here's the thing: if every object carried its own copy of every method, a million dogs would mean a million copies of `birthday()`. instead, the method is stored once, and every call passes the object in as `this`:
+
+```text nolines
+rex.birthday()      is really      Dog.birthday(this = rex)
+```
+
+that's literally what the bytecode does: `invokevirtual Dog.birthday`, with the reference pushed first. inside the method, `age` with no prefix means `this.age`. you write `this.` yourself only when a local shadows a field, like the constructor's `this.name = name` (field on the left, parameter on the right).
+
+<Predict options={["4 4", "4 3", "3 3"]} answer={1}>
+```java
+Dog rex = new Dog("rex", 3);
+Dog luna = new Dog("luna", 3);
+rex.birthday();
+IO.println(rex.age + " " + luna.age);
+```
+<Explain>
+one method, but it only touched the object it was called on. `rex.birthday()` ran with `this = rex`, so luna's own `age` field never moved.
+</Explain>
+</Predict>
+
+## same fields, different objects
+
+two objects built from the same blueprint with the same values are still two objects. `==` on references asks "are these the same arrow target?", not "do they look alike?".
+
+<Predict options={["true true", "false true", "false false"]} answer={2}>
+```java
+Dog a = new Dog("rex", 3);
+Dog b = new Dog("rex", 3);
+IO.println(a == b);
+IO.println(a.equals(b));
+```
+<Explain>
+two `new`s, two objects, two different arrows, so `==` is `false`. and `equals` is `false` too, because `Dog` never overrode it, and the version every class inherits from `Object` is just `==`. teaching a class what "equal" means is its own chapter: [equals, hashCode, toString](/learn/oop/object-methods).
+</Explain>
+</Predict>
+
+every object has an identity: it's *this* object, not merely one that looks the same. that's why printing a plain `Dog` gives you something like `Dog@58fdd99`: a class name and a hash of the identity, not the contents.
+
+## what one object costs
+
+an object isn't just its fields. the JVM puts a small header in front: a mark word (hash, lock bits, GC age) and a pointer to the class, which is how a dog knows it's a `Dog`.
+
+<Figure caption={<>pick an object and a header mode. sizes are measured, not guessed: jdk 25 on an arm mac, allocated bytes per <code>new</code> over a million allocations. compact headers (<a href="https://openjdk.org/jeps/519">JEP 519</a>) are a product feature in 25 but still off by default.</>}>
+<ObjectBytes />
+</Figure>
+
+so an empty `new Object()` is 16 bytes, and a `Dog` with one reference and one `int` is 24. turn on compact headers and they drop to 8 and 16. that's the reason a million tiny objects can hurt more than you'd think, and why [object layout](/learn/jvm/object-layout) gets its own chapter.
+
+<Gotcha title="an array of objects holds no objects">
+`new Dog[3]` makes one array with three slots, and every slot is `null`. zero dogs. you still have to `new` each one.
+
+```java title="Main.java" run
+class Dog {
+    String name;
+    int age;
+}
+
+void main() {
+    Dog[] pack = new Dog[3];
+    IO.println(pack.length + " slots, first one: " + pack[0]);
+    pack[0].age = 1; // [!code error]
+}
+```
+
+```text title="output"
+3 slots, first one: null
+Exception in thread "main" java.lang.NullPointerException: Cannot assign field "age" because "<local1>[0]" is null
+```
+
+(the `<local1>` is because `java Main.java` compiles without debug info. compile with `javac -g` and the message names `pack[0]` instead.)
+</Gotcha>
+
+<Interview q={'what actually happens when you write new Dog("rex", 3)?'}>
+if `Dog` hasn't been used yet, the JVM loads, links and initializes the class first. then it allocates memory for the object (usually a pointer bump in the thread's [TLAB](/learn/gc/allocation-and-tlabs)), zeroes every field and writes the header. then it calls the constructor, which chains up through `super(...)` before running its own body. the value of the whole expression is a reference to the finished object. bonus: allocation and construction are two separate bytecodes (`new`, then `invokespecial <init>`), which is exactly why a half-built object can leak if the constructor hands `this` to someone.
+</Interview>
+
+<Keylines>
+- a class is the blueprint. it exists once.
+- `new` allocates an object with every field zeroed, runs the constructor, and returns a reference.
+- every object gets its own fields. methods are shared and get the object as `this`.
+- a variable of a class type holds an arrow, never the object.
+- `==` on objects compares identity. two lookalikes are still two objects.
+</Keylines>

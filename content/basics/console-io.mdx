@@ -1,0 +1,128 @@
+import { PrintfBuilder } from "@/components/figures/basics/PrintfBuilder";
+import { ScannerTrap } from "@/components/figures/basics/ScannerTrap";
+
+<InShort>
+print with `System.out.println` (or, since java 25, `IO.println`). format with **`printf`** / `String.format`, where a specifier like `%,10.2f` says exactly how a value should look. read lines with **`IO.readln`** (java 25) or a `Scanner`, and watch out for the classic trap: `nextInt()` followed by `nextLine()`.
+</InShort>
+
+## the picture
+
+every program starts with three pipes already plugged in. **standard input** comes from the keyboard (or whatever you pipe in), **standard output** goes to the terminal, and **standard error** goes to the terminal too, but on a separate pipe, so errors still show up when you redirect the normal output to a file.
+
+<Figure caption="hover a stage. java wraps each of the three pipes in an object you get for free. System.err isn't drawn: it's a second, independent output pipe that also ends at the terminal.">
+<Flow
+  stages={[
+    { label: "keyboard", sub: "or a pipe, or a file", note: "what you type, a line at a time. nothing reaches the program until you press enter." },
+    { label: "System.in", sub: "an InputStream", note: "raw bytes. you almost never read it directly: wrap it in a Scanner or a BufferedReader, or use IO.readln." },
+    { label: "your program", sub: "", note: "reads from System.in, writes to System.out and System.err." },
+    { label: "System.out", sub: "a PrintStream", note: "print, println, printf. IO.println (java 25) prints through this same stream." },
+    { label: "terminal", sub: "or > file.txt", note: "redirect with > and only System.out goes to the file. System.err still shows up on screen." },
+  ]}
+/>
+</Figure>
+
+## printing
+
+```java title="Main.java" run output="hi duke\nno newline, then one\nduke bought 3 items for $1,234.50\nleft  | right|"
+void main() {
+    String name = "duke";
+    int count = 3;
+    double total = 1234.5;
+    System.out.println("hi " + name);
+    System.out.print("no newline, ");
+    System.out.println("then one");
+    System.out.printf("%s bought %d items for $%,.2f%n", name, count, total);
+    IO.println("%-6s|%6s|".formatted("left", "right"));
+}
+```
+
+| method | does |
+| --- | --- |
+| `System.out.println(x)` | prints `x`, then a newline |
+| `System.out.print(x)` | prints `x`, no newline |
+| `System.out.printf(fmt, args...)` | prints `args` formatted by `fmt` |
+| `String.format(fmt, args...)`, `fmt.formatted(args...)` | the same formatting, but returns the `String` instead of printing (`formatted` since java 15) |
+| `IO.println(x)`, `IO.print(x)` | java 25 shortcuts, in `java.lang`, printing through `System.out` |
+| `System.err.println(x)` | prints to standard error |
+
+`println` can print anything: primitives directly, and objects by calling their `toString()`. that's why printing an array gives `[I@5a4041cc` (arrays don't override `toString`) and printing a `List` gives `[a, b, c]` (lists do).
+
+## printf and format specifiers
+
+a format string is normal text with **specifiers** in it. each `%...` is a slot that gets filled by the next argument, formatted the way the specifier says: `%[flags][width][.precision]conversion`.
+
+<Figure wide caption={<>pick a value and build a specifier. each character of the result gets its own cell, with <code>·</code> for padding spaces. bad combinations throw the same <C k="dead">exceptions</C> java throws; the formatter behind this figure was checked against <code>String.format</code> on jdk 25 for 31,616 combinations.</>}>
+<PrintfBuilder />
+</Figure>
+
+the ones you'll actually use:
+
+| specifier | means | example → result |
+| --- | --- | --- |
+| `%d` | integer | `42` → `42` |
+| `%s` | anything, via `toString()` | `"duke"` → `duke` |
+| `%f`, `%.2f` | decimal, 6 or 2 places | `3.14159` → `3.141590`, `3.14` |
+| `%,d` | thousands separators | `1000000` → `1,000,000` |
+| `%5d`, `%-5s` | width 5, right / left aligned | `42` → `···42` |
+| `%05d` | zero-padded | `42` → `00042` |
+| `%x` | hexadecimal | `255` → `ff` |
+| `%n` | a newline (the platform's) | |
+| `%%` | a literal `%` | |
+
+<Predict options={['"3.1|"', '"  3.1|"', '"3.14159|"']} answer={1}>
+```java
+IO.println(String.format("%5.1f|", 3.14159));
+```
+<Explain>
+`"  3.1|"`. `.1` rounds to one decimal place: `3.1`. `5` is the minimum **total** width, counting the digits and the point, so two spaces of padding go in front (right-aligned is the default). the `|` just shows where the field ends.
+</Explain>
+</Predict>
+
+<Gotcha title="the format string is checked at run time, not compile time">
+`String.format("%d", 3.5)` compiles fine and throws `IllegalFormatConversionException: d != java.lang.Double`. too few arguments throws `MissingFormatArgumentException`. the compiler doesn't look inside the string, so typos in format strings are runtime bugs. (decent IDEs do check them for you.) also: grouping and decimal separators follow the default **locale**: on a machine set to german, `%,.2f` prints `1.234,50`. pass `Locale.ROOT` or `Locale.US` explicitly when the output is for machines, not people.
+</Gotcha>
+
+## reading input
+
+for simple programs, java 25's `IO.readln` reads one line and returns it, with an optional prompt:
+
+```java title="Main.java"
+void main() {
+    String name = IO.readln("name? ");
+    int age = Integer.parseInt(IO.readln("age? "));
+    IO.println("hi " + name + ", next year you'll be " + (age + 1));
+}
+```
+
+```bash
+$ java Main.java
+name? duke
+age? 30
+hi duke, next year you'll be 31
+```
+
+it always returns a whole line as a `String` (or `null` when the input has ended), and you convert it yourself. that's the simplest model, and it dodges the trap below completely.
+
+the classic tool is `java.util.Scanner`, which can read the next *token* (`nextInt`, `nextDouble`, `next`) or the next *line* (`nextLine`). mixing the two is where everyone gets bitten:
+
+<Figure wide caption={<>step through, then switch programs. the input is typed as <code>42</code> enter <code>duke</code> enter. the <C k="ref">arrow</C> is the scanner's cursor. both programs were run with exactly this input on jdk 25.</>}>
+<ScannerTrap />
+</Figure>
+
+the fix is to pick one style. either read everything as lines and parse (`Integer.parseInt(in.nextLine())`, or just `IO.readln`), or read everything as tokens. if you must mix, call an extra `in.nextLine()` after `nextInt()` to eat the leftover newline. and if the user types `abc` where you called `nextInt()`, you get `InputMismatchException`, so real programs read a line and validate it.
+
+<Deep title="when Scanner is too slow">
+`Scanner` parses with regular expressions, which is fine for a person typing, and painfully slow for a million lines of input (competitive programming, big files). the fast path is a `BufferedReader` over `System.in`: `new BufferedReader(new InputStreamReader(System.in))`, then `readLine()` in a loop and parse the pieces yourself. output has the same issue in reverse: `System.out` flushes on every newline, so printing a million lines one `println` at a time is slow. build the output in a `StringBuilder` (or wrap `System.out` in a `PrintWriter` with a buffer) and print it once. more in [i/o streams](/learn/io/io-streams).
+</Deep>
+
+<Interview q="why does nextLine() return an empty string after nextInt()?">
+because `nextInt()` reads only the digits of the number and leaves the newline you typed after it in the input buffer. the next `nextLine()` reads "up to the next newline", finds one immediately, and returns an empty string. the fix is to consume the rest of the line with an extra `nextLine()`, or to read whole lines and parse them with `Integer.parseInt`, which avoids mixing token and line reads altogether.
+</Interview>
+
+<Keylines>
+- three pipes: System.in, System.out, System.err. java 25's `IO` prints and reads through the same ones.
+- `printf` / `String.format`: `%[flags][width][.precision]conversion`. checked at run time, not compile time.
+- width is a minimum, precision is digits after the point (or max characters for `%s`).
+- `IO.readln` reads a whole line. simplest, and no surprises.
+- `nextInt()` leaves the newline behind. don't mix it with `nextLine()` without eating it.
+</Keylines>

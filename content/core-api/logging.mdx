@@ -1,0 +1,157 @@
+import { LevelFunnel } from "@/components/figures/core-api/LevelFunnel";
+
+<InShort>
+every log call has a **level**. the **logger** throws away anything below its level (that's the cheap gate), then each **handler** (an "appender" elsewhere) decides whether to write it, and where.
+
+code logs through a **facade** (`System.Logger` in the JDK, SLF4J everywhere else) and the application picks the backend. build messages lazily, so a disabled log line costs about nothing.
+</InShort>
+
+## the picture
+
+a newsroom. reporters file stories all day, each marked with how urgent it is (the level). the editor (the logger) spikes everything below today's bar before anyone reads it. what survives goes to the channels (handlers): the website takes everything, the evening news only the big stories. each channel has its own bar, and a story the editor spiked never reaches any of them.
+
+## two gates
+
+<Figure caption={<>set the three levels. a call has to clear the logger first, then each handler separately. the useful setting is usually a quiet console and a chattier file. notice what happens when the logger is stricter than a handler: the handler never sees a thing.</>}>
+<LevelFunnel />
+</Figure>
+
+the level names differ between libraries, the idea doesn't:
+
+| meaning | `System.Logger` | `java.util.logging` | SLF4J, logback, log4j2 |
+| --- | --- | --- | --- |
+| every step, very noisy | `TRACE` | `FINER`, `FINEST` | `TRACE` |
+| detail for debugging | `DEBUG` | `FINE` | `DEBUG` |
+| setup and config | | `CONFIG` | |
+| normal, noteworthy events | `INFO` | `INFO` | `INFO` |
+| something odd, still working | `WARNING` | `WARNING` | `WARN` |
+| something failed | `ERROR` | `SEVERE` | `ERROR` |
+
+here's `java.util.logging`, which ships in the JDK, with a handler pointed at stdout and a one-line format:
+
+```java title="Main.java" run output="INFO    orders: order 42 placed\nWARNING orders: stock low for sku-7\nFINE    orders: cart has 3 items"
+import java.util.logging.*;
+
+void main() {
+    System.setProperty("java.util.logging.SimpleFormatter.format", "%4$-7s %3$s: %5$s%n");
+    Logger log = Logger.getLogger("orders");
+    log.setUseParentHandlers(false);                     // don't also print via the root's handler
+    Handler out = new StreamHandler(System.out, new SimpleFormatter()) {
+        @Override public synchronized void publish(LogRecord r) { super.publish(r); flush(); }
+    };
+    out.setLevel(Level.ALL);                             // gate 2: this handler takes everything
+    log.addHandler(out);
+
+    log.setLevel(Level.INFO);                            // gate 1
+    log.fine("cart has 3 items");                        // below INFO: dropped
+    log.info("order 42 placed");
+    log.warning("stock low for sku-7");
+
+    log.setLevel(Level.FINE);
+    log.fine(() -> "cart has " + 3 + " items");          // the lambda runs only because FINE is on now
+}
+```
+
+out of the box (no code at all), JUL reads `$JAVA_HOME/conf/logging.properties`: the root logger at `INFO`, one `ConsoleHandler` at `INFO`, writing two lines per record to **stderr**. loggers form a tree by name (`orders.checkout` is a child of `orders`), and a logger without its own level or handlers uses its parent's.
+
+## who's who
+
+<Figure caption="hover a stage. the first two are what your code sees, the rest is configuration. swap the backend and not a line of the code changes.">
+<Flow
+  stages={[
+    { label: "your code", sub: "log.info(...)", note: "only ever talks to the facade's interface." },
+    { label: "facade", sub: "System.Logger · SLF4J", note: "a small API with no opinions about output. System.Logger is in java.base (java 9, JEP 264). SLF4J is a library, and the de facto standard." },
+    { label: "backend", sub: "JUL · logback · log4j2", note: "the implementation: levels, formatting, async queues, rolling files. exactly one per application." },
+    { label: "handlers", sub: "appenders", note: "each one has its own level and destination." },
+    { label: "out", sub: "console · file · collector", note: "stderr, a rolling file, or JSON lines shipped to a log store." },
+  ]}
+/>
+</Figure>
+
+the rule that keeps this sane: **libraries log through a facade and never configure anything. applications pick one backend.** if your library calls logback directly, every app that uses it inherits logback, whether they wanted it or not.
+
+`System.Logger` is the JDK's own facade. by default it sends everything to `java.util.logging`, but a backend can plug in through the `System.LoggerFinder` service (SLF4J ships a bridge for it), so even the JDK's internal logging ends up in your app's backend.
+
+<Gotcha title="System.Logger formats with MessageFormat">
+log `"charged {0} cents"` with the argument `1999` and you get `charged 1,999 cents`: `{0}` placeholders go through `java.text.MessageFormat`, which formats numbers with the locale's grouping. ids and amounts come out with commas in them. pass `String.valueOf(id)` for anything a machine will grep for. (SLF4J's `{}` is plain `toString()`, no formatting.)
+</Gotcha>
+
+## lazy messages
+
+a log line below the level should cost nothing. the trap is that java evaluates arguments *before* calling the method, so the message is built even when the logger is about to drop it.
+
+<Figure caption={<>nanoseconds per disabled <code>fine(...)</code> call, best of 5 after warm-up, temurin 25 on an M4 Pro. <code>expensive(i)</code> joins 20 numbers into a string. a <C k="live">supplier</C> (<code>fine(() -&gt; ...)</code>) or an <code>isLoggable</code> guard makes a disabled call as cheap as an empty loop; string concatenation in the argument does not.</>}>
+<Bars
+  unit="ns"
+  log
+  data={[
+    { label: "empty loop", value: 1.8 },
+    { label: "supplier", value: 1.8, tone: "live" },
+    { label: "isLoggable guard", value: 1.8, tone: "live" },
+    { label: "\"item \" + i", value: 10, tone: "dead" },
+    { label: "\"..\" + expensive(i)", value: 69, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+<Compare>
+<Bad label="eager">
+```java
+log.debug("cart: " + cart.dump());   // dump() runs, string is built, then dropped
+```
+</Bad>
+<Good label="lazy">
+```java
+log.debug("cart: {}", cart);                                // SLF4J: toString() only if enabled
+log.atDebug().log(() -> "cart: " + cart.dump());            // SLF4J 2 fluent API, a supplier
+julLogger.fine(() -> "cart: " + cart.dump());               // java.util.logging
+```
+</Good>
+</Compare>
+
+<Predict options={["nothing", "dump ran"]} answer={1}>
+```java
+// SLF4J, with the logger at INFO
+log.debug("state: {}", dump());   // dump() prints "dump ran" and returns a String
+```
+<Explain>
+the `{}` placeholder makes the *formatting* lazy, not the *argument*. `dump()` is an ordinary method call in the argument list, so it runs before `debug` even starts. only `toString()` on the result is skipped. if computing the argument is expensive, use a supplier or wrap it in `if (log.isDebugEnabled())`.
+</Explain>
+</Predict>
+
+## structured logging
+
+a log line like `order 42 placed for ada in 31 ms` is easy to read and annoying to query. structured logging keeps the values as fields, usually one JSON object per line, so a log store can filter `order=42` or chart `ms`:
+
+```json
+{"ts":"2026-10-09T08:02:11Z","level":"INFO","logger":"orders","msg":"order placed","order":42,"user":"ada","ms":31,"requestId":"7f3c"}
+```
+
+in SLF4J 2 that's the fluent API plus a JSON encoder in the backend:
+
+```java
+log.atInfo().addKeyValue("order", 42).addKeyValue("ms", 31).log("order placed");
+```
+ for values that belong to a whole request (a request id, a user), the **MDC** (mapped diagnostic context) attaches them to every line logged on that thread until you clear it. (with virtual threads and thread pools, clear it in a `finally`.)
+
+<Gotcha title="logging exceptions">
+pass the exception itself as the last argument:
+
+```java
+log.error("payment failed for {}", orderId, e);          // SLF4J
+log.log(Level.SEVERE, "payment failed", e);             // java.util.logging
+```
+ logging `e.getMessage()` loses the stack trace and every `Caused by:`. and don't log an exception *and* rethrow it: whoever catches it will log it again, and you get the same failure three times in a row. log at the level that handles it. (and never log passwords, tokens or full card numbers: logs get copied everywhere.)
+</Gotcha>
+
+<Interview q="why log through SLF4J instead of calling logback directly?">
+SLF4J is a facade: an interface with no output logic. libraries code against it, and the application chooses one backend (logback, log4j2, JUL) at deploy time by putting it on the classpath. calling a backend directly from a library forces that backend on every user and causes duplicate or missing logs when two backends meet. bonus: `{}` placeholders defer formatting but not argument evaluation, and the JDK's own facade, `System.Logger`, can be routed into SLF4J too.
+</Interview>
+
+<Keylines>
+- two gates: the logger's level, then each handler's. the logger is the cheap one.
+- libraries log to a facade (`System.Logger`, SLF4J). applications pick the backend.
+- arguments are evaluated before the call. suppliers or level checks make disabled logs free.
+- pass the exception object, not its message. log it once, where it's handled.
+- structured logs (key-values, JSON) are for machines. ids in the MDC.
+</Keylines>

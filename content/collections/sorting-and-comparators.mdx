@@ -1,0 +1,113 @@
+import { ComparatorBuilder } from "@/components/figures/collections/ComparatorBuilder";
+import { TimSortRuns } from "@/components/figures/collections/TimSortRuns";
+
+<InShort>
+**`Comparable`** is an object's one natural order (`compareTo`). a **`Comparator`** is any other order, built from small pieces: `Comparator.comparing(...).thenComparing(...).reversed()`.
+
+objects are sorted with **TimSort**: it finds runs that are already in order and merges them. it's **stable**, so equal elements keep their original order, which is what makes chained sorts work.
+</InShort>
+
+## the picture
+
+you know how you sort a spreadsheet by city, then by name, and expect names to stay sorted *within* each city? that only works because the sort is stable, and it only reads well in code because java lets you say it as one chain.
+
+a comparator is a judge with one job: given two things, say which goes first (negative), second (positive), or "don't care" (zero). everything else, the sort does.
+
+## `Comparable`: the natural order
+
+a class that has one obvious order implements `Comparable<T>` and its `compareTo`. `String` (alphabetical by char code), `Integer`, `LocalDate`, `BigDecimal` all do. that's what `Collections.sort(list)`, `TreeMap` and `TreeSet` use when you don't pass anything.
+
+```java title="Main.java" run output="[bob, cy, ada]\n[cy, bob, ada]"
+record Player(String name, int score) implements Comparable<Player> {
+    public int compareTo(Player o) {
+        return Integer.compare(score, o.score);
+    }
+}
+
+void main() {
+    var ps = new ArrayList<>(List.of(new Player("ada", 30), new Player("bob", 10), new Player("cy", 20)));
+    Collections.sort(ps);
+    IO.println(ps.stream().map(Player::name).toList());
+    ps.sort(Comparator.comparing(Player::name).reversed());
+    IO.println(ps.stream().map(Player::name).toList());
+}
+```
+
+the contract, in short: `compareTo` must be antisymmetric (if a < b then b > a), transitive (a < b and b < c means a < c), and should agree with `equals` (returns 0 exactly when `equals` is true). break the last one and hash-based and tree-based collections disagree about duplicates (the `BigDecimal` story in [sets](/learn/collections/sets)).
+
+## `Comparator`: every other order
+
+`java.util.Comparator` has a set of static and default methods that compose like lego. you almost never write `compare` by hand anymore.
+
+<Figure wide caption={<>build a chain and watch the list re-sort. the <C k="hot">primary key</C> is amber. sort by <code>age</code> with no tie-breaker and look at the "was at" column: ties keep their input order. then sort by <code>city</code> without handling nulls and see what two missing cities do. results match java's <code>List.sort</code> exactly (every combination was checked on jdk 25).</>}>
+<ComparatorBuilder />
+</Figure>
+
+- `comparing(keyExtractor)`: compare by a key's natural order. `comparingInt` / `comparingLong` / `comparingDouble` skip the boxing.
+- `comparing(key, keyComparator)`: compare by a key, with a custom order for that key.
+- `thenComparing(...)`: tie-breaker, only consulted when everything before it says 0.
+- `reversed()`: flips the *whole* chain built so far. to reverse only one key, reverse its key comparator: `comparing(Person::age, reverseOrder())`.
+- `nullsFirst(cmp)` / `nullsLast(cmp)`: decide where `null`s go, instead of throwing.
+- `naturalOrder()` / `reverseOrder()`: the `Comparable` order and its opposite.
+
+<Gotcha title="the subtraction comparator">
+`(a, b) -> a - b` looks like the textbook definition of "negative if smaller". it's wrong, because `int` subtraction overflows.
+
+```java title="Main.java" run output="[0, 5, 2147483647, -2147483648, -3]\n[-2147483648, -3, 0, 5, 2147483647]\n2147483647"
+void main() {
+    Comparator<Integer> bad = (a, b) -> a - b;
+    Comparator<Integer> good = Integer::compare;
+    var nums = new ArrayList<>(List.of(5, Integer.MIN_VALUE, -3, Integer.MAX_VALUE, 0));
+    nums.sort(bad);
+    IO.println(nums);
+    nums.sort(good);
+    IO.println(nums);
+    IO.println(bad.compare(Integer.MIN_VALUE, 1));
+}
+```
+
+`Integer.MIN_VALUE - 1` wraps around to `Integer.MAX_VALUE`, a big positive number, so the comparator claims the most negative int is *greater* than 1. the "sorted" list comes out scrambled with no exception at all. use `Integer.compare`, `Long.compare`, or `comparingInt`. it works on small test data, which is exactly why it ships.
+</Gotcha>
+
+<Effective item={14} title="consider implementing Comparable">
+if your value class has an obvious natural order, implement `Comparable` so it works with sorting, `TreeSet`, `TreeMap` and binary search for free. and inside `compareTo` (or any comparator), don't use `<`, `>` or subtraction on numeric fields: use the boxed types' static `compare` methods or the `Comparator` construction methods.
+</Effective>
+
+## inside the sort: TimSort
+
+`List.sort`, `Collections.sort`, `Arrays.sort(Object[])` and `stream().sorted()` all end up in TimSort (named after Tim Peters, who wrote it for Python). its insight: real data is rarely random. it's often partly sorted, or sorted in chunks, or reversed. so instead of ignoring that order, TimSort hunts for it.
+
+<Figure wide caption={<>step through 24 numbers. timsort finds <C k="hot">natural runs</C>, flips descending ones, stretches short ones with insertion sort, and pushes them on a stack. when the stack's length rules break, it <C k="live">merges</C>. scaled down (minRun 4) so the merges are visible.</>}>
+<TimSortRuns />
+</Figure>
+
+1. **find a run**: the longest stretch starting here that's ascending, or strictly descending (reversed in place, which keeps it stable since no equal elements swap).
+2. **extend short runs**: if a run is shorter than `minRun` (16 to 32 for big arrays), binary insertion sort grows it, which is fast on tiny ranges.
+3. **push and keep the stack balanced**: each run on the stack must be longer than the one above it, and longer than the two above it combined. whenever that breaks, merge. this keeps merges between runs of similar size, which is where merging is cheapest.
+4. **merge what's left** at the end.
+
+the real merge also "gallops": when one run keeps winning, it switches to exponential search and copies whole blocks at once. arrays under 32 elements skip all of it and just get one run plus binary insertion sort.
+
+the result: O(n log n) worst case, O(n) on already-sorted or reversed input, and stable. the price: up to n/2 extra references of scratch space for merging.
+
+<Quiz question="what does Arrays.sort(int[]) use?" options={["TimSort, same as objects", "a dual-pivot quicksort", "merge sort", "heapsort"]} answer={1}>
+<Explain>
+primitive arrays use `DualPivotQuicksort` (with insertion sort for tiny ranges and heapsort as a fallback against bad cases). it isn't stable, and it doesn't need to be: two equal `int`s are indistinguishable, so nobody can tell if they swapped. objects use TimSort because for them stability is visible (two "equal" people with different names), and because TimSort is great at partially sorted data.
+</Explain>
+</Quiz>
+
+<Deep title="Comparison method violates its general contract!">
+TimSort trusts your comparator. when merging it relies on the runs being consistently ordered, and if it catches a contradiction it throws `IllegalArgumentException: Comparison method violates its general contract!`. you see it with comparators that aren't transitive, use randomness, read mutable state, or mishandle `NaN` and `null`. small inputs often sort "fine" (just wrong, like the subtraction example), because the check only fires during merges, so the bug hides until the list grows past 32.
+</Deep>
+
+<Interview q="Comparable vs Comparator?">
+`Comparable` is implemented by the class itself and defines its single natural order (`compareTo`). `Comparator` is a separate object that defines an order from the outside, so you can have as many as you like, for classes you don't own. java 8+ makes comparators composable: `comparing(...).thenComparing(...).reversed()`, with `nullsFirst`/`nullsLast` for nulls. sorting objects is stable (TimSort), so multi-key sorts behave predictably.
+</Interview>
+
+<Keylines>
+- `Comparable` = the natural order, inside the class. `Comparator` = any order, outside it.
+- build comparators: `comparing`, `thenComparing`, `reversed`, `nullsFirst`.
+- never compare with subtraction. use `Integer.compare` or `comparingInt`.
+- object sorts are TimSort: stable, and fast on partly sorted data.
+- primitive arrays use dual-pivot quicksort. stability doesn't matter there.
+</Keylines>

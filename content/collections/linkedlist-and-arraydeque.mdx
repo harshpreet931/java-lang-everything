@@ -1,0 +1,123 @@
+import { LinkedNodes } from "@/components/figures/collections/LinkedNodes";
+import { DequeRing } from "@/components/figures/collections/DequeRing";
+
+<InShort>
+a `LinkedList` is a chain of **nodes**, one 24-byte object per element, each pointing at the next and the previous. cheap at the ends, terrible by index.
+
+an `ArrayDeque` is a **circular buffer**: one array, a `head` and a `tail` that wrap around. cheap at both ends, no per-element objects. for stacks and queues, it's the answer.
+</InShort>
+
+## the picture
+
+you know how textbooks say "linked lists have O(1) insertion" and then everyone's `LinkedList` code is slow? both are true, and the gap between them is the whole chapter.
+
+a linked list is a scavenger hunt. each clue (node) tells you where the next one is hidden. getting to clue 500 means reading 499 clues first. a circular buffer is a round table with numbered seats: people join at either end of the queue, and when you run off seat 7 you just keep going at seat 0.
+
+<Figure wide caption={<>pick an index and press <code>get</code>: watch it walk <C k="hot">node by node</C> from whichever end is closer, then <C k="live">land</C>. <code>addFirst</code> and <code>addLast</code> just rewire two <C k="ref">pointers</C>. <code>removeFirst</code> leaves the old node <C k="dead">unreachable</C>.</>}>
+<LinkedNodes />
+</Figure>
+
+every element costs a whole `Node` object: a 12-byte header plus `item`, `next` and `prev` (4 bytes each with compressed references) = 24 bytes, *on top of* the element itself. an array slot is 4 bytes. and those nodes can end up anywhere in the heap, so walking the list means chasing pointers the CPU can't predict.
+
+## the get(i) trap
+
+`LinkedList` implements `List`, so `get(i)` compiles and looks innocent. it's a walk. this loop is the classic:
+
+```java
+for (int i = 0; i < list.size(); i++) {
+    total += list.get(i);   // walks from an end every time
+}
+```
+
+on an `ArrayList` that's n array reads. on a `LinkedList` each `get(i)` walks up to n/2 nodes, so the loop is O(n²).
+
+<Quiz question="that loop, on a LinkedList of 10,000 elements. how many node hops in total?" options={["10,000", "about 25 million", "about 50 million", "about 100 million"]} answer={1}>
+<Explain>
+`get(i)` walks `i` hops from the front when `i < size / 2`, otherwise `size - 1 - i` from the back. sum that over every `i` and you get 24,995,000 hops, roughly n²/4. a for-each loop (which uses the iterator) does it in 9,999.
+</Explain>
+</Quiz>
+
+so if you have a `LinkedList`, never index into it. iterate it (for-each, `iterator()`, `forEach`). which raises the question of why you have a `LinkedList`.
+
+## `ArrayDeque`: the circular buffer
+
+`ArrayDeque` keeps one array and two indexes: `head` (the first element) and `tail` (the next free slot at the back). `addLast` writes at `tail` and moves it right. `addFirst` moves `head` left and writes there. when either one falls off an end of the array, it wraps to the other end. nothing ever shifts.
+
+<Figure wide caption={<>try <code>addFirst</code> on the empty deque first: <C k="ref">head</C> wraps straight from 0 to 7. then mix adds and polls at both ends and watch the elements drift around the ring. fill all 8 slots to see it grow to 18 and slide the wrapped part to the end.</>}>
+<DequeRing />
+</Figure>
+
+the details, from jdk 25's `ArrayDeque.java`:
+
+- `new ArrayDeque<>()` makes a 17-slot array (16 + 1). `new ArrayDeque<>(7)` makes 8. one slot is always kept free, so `head == tail` can only mean "empty"... except for the instant after an add fills the last slot, which triggers an immediate grow.
+- growth: small deques (under 64 slots) grow by `capacity + 2`, roughly doubling. bigger ones grow by 50%.
+- after growing, if the contents wrapped around, the leg from `head` to the old end is copied to the end of the new array, so the elements are contiguous (in ring order) again.
+
+it's also the right way to do a stack *and* a queue in java:
+
+```java title="Main.java" run output="c b\na b"
+void main() {
+    Deque<String> stack = new ArrayDeque<>();
+    stack.push("a");
+    stack.push("b");
+    stack.push("c");
+    IO.println(stack.pop() + " " + stack.peek());
+
+    Deque<String> queue = new ArrayDeque<>();
+    queue.offer("a");
+    queue.offer("b");
+    queue.offer("c");
+    IO.println(queue.poll() + " " + queue.peek());
+}
+```
+
+`push`/`pop`/`peek` work at the front (stack, LIFO). `offer`/`poll`/`peek` add at the back and take from the front (queue, FIFO). same class, same array.
+
+<Gotcha title="ArrayDeque says no to null">
+`dq.offer(null)` throws `NullPointerException`. that's on purpose: `poll()` and `peek()` return `null` to mean "empty", so a stored `null` would be ambiguous. `LinkedList` happily stores `null`s, which is one more reason its `poll()` results are hard to trust.
+</Gotcha>
+
+## the numbers
+
+rough numbers from my machine, to make the shapes concrete. this is **not** a proper benchmark (no JMH): `System.nanoTime` around whole loops, warmup rounds first, median of 7, and the numbers below agreed within about 10% across three separate runs. jdk 25.0.4 (temurin), apple M4 Pro, default G1 and heap, 100,000 `Integer`s.
+
+<Figure caption={<>log scale. removing from the front of an <code>ArrayList</code> (20,000 elements) shifts everything left on every call. <code>LinkedList.get(i)</code> at a random index walks about 25,000 nodes on average.</>}>
+<Bars unit="ns/op" log data={[
+  { label: "ArrayList.remove(0)", value: 515, tone: "dead" },
+  { label: "LinkedList.pollFirst()", value: 6.3 },
+  { label: "ArrayDeque.pollFirst()", value: 2.5, tone: "live" },
+  { label: "LinkedList.get(i)", value: 40200, tone: "dead" },
+  { label: "ArrayList.get(i)", value: 26, tone: "live" },
+]} />
+</Figure>
+
+the honest surprise: `LinkedList` isn't *that* bad at its own game. `addLast` was about the same speed for all three (allocation is very cheap in the JVM), and for-each iteration was only ~1.6x slower than `ArrayList` (2.0 vs 1.3 ns per element). that's partly because a freshly built list's nodes were allocated one after another, so they happen to sit next to each other in memory. in a long-running program, after other allocations and a few GCs, they scatter, and the gap grows.
+
+## so when do you use LinkedList?
+
+almost never. the one thing it does that `ArrayList` and `ArrayDeque` can't: insert or remove in the **middle** in O(1), *if you're already standing there with a `ListIterator`*. no shifting, just relinking. that's real, but rare, and even then a plain `ArrayList` often wins for small-to-medium lists because shifting a few thousand contiguous references is fast.
+
+Joshua Bloch, who wrote `LinkedList`, has said publicly that he doesn't use it. take the hint.
+
+| | `ArrayList` | `ArrayDeque` | `LinkedList` |
+| --- | --- | --- | --- |
+| add / remove at the end | O(1)* | O(1)* | O(1) |
+| add / remove at the front | O(n) | O(1)* | O(1) |
+| `get(i)` | O(1) | not offered | O(n) |
+| middle insert via iterator | O(n) | not offered | O(1) |
+| memory per element | 4 B slot (+ slack) | 4 B slot (+ slack) | 24 B node |
+| `null` elements | yes | no | yes |
+
+<span className="text-12 text-mute">* amortized: the occasional grow copies everything.</span>
+
+<Interview q="ArrayList or LinkedList?">
+ArrayList, nearly always. `get(i)` is O(1) instead of O(n), it uses about a sixth of the memory per element, and iteration is cache-friendly. LinkedList's O(1) insert only applies when you already hold an iterator at the spot, and finding the spot is O(n) anyway. if you need fast operations at both ends, the answer is ArrayDeque, not LinkedList.
+</Interview>
+
+<Keylines>
+- `LinkedList` = one 24-byte node per element, pointers both ways.
+- `get(i)` on a `LinkedList` walks. a counted for-loop over one is O(n²).
+- `ArrayDeque` = a circular array. `head` and `tail` wrap, nothing shifts.
+- stack or queue in java? `ArrayDeque`. not `Stack`, not `LinkedList`.
+- `ArrayDeque` rejects `null`, because `null` means "empty" from `poll()`.
+</Keylines>

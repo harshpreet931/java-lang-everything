@@ -1,0 +1,9 @@
+[
+  { "term": "unified logging", "short": "the JVM's -Xlog system (java 9): pick tags and levels, an output and decorators. GC logs are -Xlog:gc*.", "chapter": "reading-gc-logs", "aka": ["-Xlog", "GC log", "Xlog:gc"] },
+  { "term": "heap dump", "short": "a snapshot of every object in the heap and every reference between them, in an .hprof file. how you find leaks.", "chapter": "memory-leaks", "aka": ["hprof", "GC.heap_dump", "HeapDumpOnOutOfMemoryError"] },
+  { "term": "retained size", "short": "what would become garbage if one object disappeared: itself plus everything reachable only through it.", "chapter": "memory-leaks", "aka": ["shallow size"] },
+  { "term": "dominator tree", "short": "a tree of objects where each parent is on every path from the GC roots to its children. sorted by retained size, it points at leaks.", "chapter": "memory-leaks", "aka": ["dominator"] },
+  { "term": "native memory tracking", "short": "a JVM feature that breaks the process's non-heap memory down by category. -XX:NativeMemoryTracking=summary, then jcmd VM.native_memory.", "chapter": "native-memory", "aka": ["NMT", "VM.native_memory"] },
+  { "term": "direct buffer", "short": "a ByteBuffer whose bytes live outside the heap, freed only when the GC collects its small heap object. capped by -XX:MaxDirectMemorySize.", "chapter": "native-memory", "aka": ["allocateDirect", "DirectByteBuffer", "MaxDirectMemorySize"] },
+  { "term": "RSS", "short": "resident set size: memory pages actually in RAM. what top and container limits count, and always more than -Xmx.", "chapter": "native-memory", "aka": ["resident set size", "resident memory"] }
+]

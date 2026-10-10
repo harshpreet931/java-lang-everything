@@ -1,0 +1,204 @@
+import { ServiceDiscovery } from "@/components/figures/meta/ServiceDiscovery";
+
+<InShort>
+**`ServiceLoader`** finds implementations of an interface at runtime, including ones your code has never heard of. a provider jar announces itself with a file at **`META-INF/services/<interface name>`** on the class path, or with **`provides … with …`** in its `module-info.java`. the consumer just asks for the interface (and, in a module, says **`uses`**). providers are created lazily, one at a time, as you iterate.
+
+that's how JDBC finds your database driver, javac finds annotation processors, and SLF4J finds its backend. no framework, it's been in the JDK since java 6.
+</InShort>
+
+## the picture
+
+you know how adding the postgres driver jar to your classpath makes `DriverManager.getConnection("jdbc:postgresql://…")` just work, even though nothing in your code mentions postgres? the driver jar registered itself.
+
+think of a wall socket. the appliance (your code) is built against the socket's shape (an interface). whoever plugs in at the other end (a provider jar) supplies the power. the appliance never needs to know which power company it is, and you can switch companies by swapping a jar.
+
+the three roles:
+
+<Defs>
+<dt>service</dt>
+<dd>an interface (or abstract class) everyone agrees on. `java.sql.Driver`, `javax.annotation.processing.Processor`, your own `com.shop.spi.Greeter`.</dd>
+<dt>provider</dt>
+<dd>a class implementing it, in some jar, plus a declaration saying so.</dd>
+<dt>consumer</dt>
+<dd>the code that calls `ServiceLoader.load(Greeter.class)` and iterates whatever turns up.</dd>
+</Defs>
+
+<Figure caption="hover a stage. what one ServiceLoader.load call does on the class path. nothing happens until you start iterating, and each provider is created only when the iterator reaches it.">
+<Flow stages={[
+  { label: "load(Greeter.class)", sub: "consumer", note: "returns immediately. it just remembers the service type and the class loader to search (the thread's context class loader, unless you pass one)." },
+  { label: "find the files", sub: "META-INF/services/…", note: "on the first hasNext(), it asks the class loader for every resource named META-INF/services/com.shop.spi.Greeter, one per jar that has one, in class path order." },
+  { label: "read the names", sub: "one class per line", note: "each file is plain UTF-8 text: fully qualified class names, one per line, # starts a comment. duplicates are ignored." },
+  { label: "instantiate", sub: "on next()", note: "load the class, check it implements Greeter, call its public no-arg constructor. a problem here is a ServiceConfigurationError, thrown right at this step." },
+]} />
+</Figure>
+
+## the smallest real one
+
+the JDK uses it on itself. every command-line tool that can also run in-process registers as a `java.util.spi.ToolProvider`:
+
+```java title="Main.java" run output="[jar, javac, javadoc, javap, jdeps, jlink, jmod, jnativescan, jpackage]\ncom.sun.tools.javac.main.JavacToolProvider"
+import java.util.ServiceLoader;
+import java.util.spi.ToolProvider;
+
+void main() {
+    var names = ServiceLoader.load(ToolProvider.class).stream()
+        .map(provider -> provider.get().name())
+        .sorted()
+        .toList();
+    IO.println(names);
+
+    ToolProvider javac = ToolProvider.findFirst("javac").orElseThrow();
+    IO.println(javac.getClass().getName());
+}
+```
+
+nine tools, found at runtime, none of them named in your code. `JavacToolProvider` lives in the `jdk.compiler` module, in a package that module doesn't export: you couldn't write `new JavacToolProvider()` if you tried. you can still get one, because the module *provides* it.
+
+## a plugin, for real
+
+an interface in one jar, two implementations in two more, and an app that only knows the interface:
+
+```java title="com/shop/spi/Greeter.java (shop-api.jar)"
+package com.shop.spi;
+
+public interface Greeter {
+    String lang();
+    String greet(String name);
+}
+```
+
+```java title="com/shop/fr/French.java (greeter-fr.jar)"
+package com.shop.fr;
+
+import com.shop.spi.Greeter;
+
+public class French implements Greeter {
+    public French() { System.out.println("  (French constructed)"); }
+    public String lang() { return "fr"; }
+    public String greet(String name) { return "bonjour, " + name; }
+}
+```
+
+```text title="META-INF/services/com.shop.spi.Greeter (inside greeter-fr.jar)"
+com.shop.fr.French
+```
+
+```java title="Main.java (app.jar)"
+import com.shop.spi.Greeter;
+import java.util.ServiceLoader;
+
+public class Main {
+    public static void main(String[] args) {
+        for (Greeter g : ServiceLoader.load(Greeter.class)) {
+            System.out.println(g.lang() + ": " + g.greet("ada"));
+        }
+    }
+}
+```
+
+`greeter-en.jar` is the same with `English`. inside the provider jar, the registration is one small text file:
+
+<Figure caption={<>what <code>unzip -l greeter-fr.jar</code> listed. the file's <C k="hot">name</C> is the service interface; its contents are the implementation class. that's the whole registration.</>}>
+<Tree>{`
+greeter-fr.jar
+    META-INF
+        MANIFEST.MF
+        services
+            com.shop.spi.Greeter #hot // contains one line: com.shop.fr.French
+    com
+        shop
+            fr
+                French.class      // implements com.shop.spi.Greeter
+`}</Tree>
+</Figure>
+
+build them and change nothing but the class path:
+
+```bash
+$ java -cp shop-api.jar:app.jar Main
+$ java -cp shop-api.jar:app.jar:greeter-en.jar Main
+en: hello, ada
+$ java -cp shop-api.jar:app.jar:greeter-en.jar:greeter-fr.jar Main
+en: hello, ada
+  (French constructed)
+fr: bonjour, ada
+$ java -cp shop-api.jar:app.jar:greeter-fr.jar:greeter-en.jar Main
+  (French constructed)
+fr: bonjour, ada
+en: hello, ada
+```
+
+same `app.jar`, three behaviours. and look at where `(French constructed)` lands: after the English greeting, not at the start. the loader reads the service files up front but only instantiates each provider when the iterator reaches it.
+
+<Figure wide caption={<>click the provider jars to take them off the path, swap their order, then switch to the module path and turn off <code>uses</code>. the <C k="ref">blue</C> text is each provider's declaration. every output is a real run.</>}>
+<ServiceDiscovery />
+</Figure>
+
+<Quiz question="greeter-en.jar declares com.shop.en.Engish in its services file (a typo). what happens?" options={["English is skipped silently", "the app fails to start", "ServiceConfigurationError when the iterator reaches it", "a compile error"]} answer={2}>
+<Explain>
+a `ServiceConfigurationError` (`Provider com.shop.en.Engish not found`), and only when iteration gets to that line, because providers are resolved lazily. i tried it with the French jar first on the class path: `fr: bonjour, ada` printed fine, then the error. the same error shows up for a class that doesn't implement the interface or has no public no-arg constructor. the services file is just text, so nothing checks it at build time.
+</Explain>
+</Quiz>
+
+## the module way
+
+on the module path, the text file is replaced by declarations the JVM checks when it resolves the module graph:
+
+```java title="shop.fr/module-info.java"
+module shop.fr {
+    requires shop.api;
+    provides com.shop.spi.Greeter with com.shop.fr.French;
+}
+```
+
+```java title="shop.app/module-info.java"
+module shop.app {
+    requires shop.api;
+    uses com.shop.spi.Greeter;
+}
+```
+
+three things change:
+
+- **the provider's package can stay private.** `shop.fr` exports nothing. nobody can `new French()`, but `ServiceLoader` can still hand one out.
+- **a provider can be a factory.** if the class has a `public static Greeter provider()` method, that's called instead of a constructor, so the provider can return a singleton or a cached instance.
+- **`uses` is mandatory.** leave it out and using the loader throws (real message below). it's the module system's way of making service dependencies visible in the descriptor, where `jlink` can read them (`jlink --bind-services` pulls in every module that provides a service you use, see [jlink](/learn/tooling/jars-jlink-jpackage)).
+
+```text
+Exception in thread "main" java.util.ServiceConfigurationError: com.shop.spi.Greeter: module shop.app does not declare `uses`
+```
+
+old-style jars on the class path still work when the app itself is a module: i put `greeter-en.jar` on the class path next to a modular `shop.app`, and the loader found it through its `META-INF/services` file. migrating is one side at a time ([class path to module path](/learn/tooling/classpath-to-modulepath)).
+
+## where it's already working for you
+
+| service | provided by | what it buys you |
+| --- | --- | --- |
+| `java.sql.Driver` | every JDBC driver jar | no more `Class.forName("org.postgresql.Driver")` since JDBC 4 ([jdbc](/learn/io/jdbc)) |
+| `javax.annotation.processing.Processor` | lombok, mapstruct, dagger | how javac used to discover processors ([annotation processing](/learn/meta/annotation-processing)) |
+| `java.nio.file.spi.FileSystemProvider` | `jdk.zipfs`, your own | `FileSystems.newFileSystem(zipPath)` opens a zip as a file system |
+| `java.util.spi.ToolProvider` | the JDK's tools | run `javac` or `jar` in-process |
+| `System.LoggerFinder` | logging backends | where `System.getLogger` output goes ([logging](/learn/core-api/logging)) |
+| `org.slf4j.spi.SLF4JServiceProvider` | logback, log4j's slf4j bridge | SLF4J 2 picks its backend this way |
+
+compared to a DI container, it's tiny: no injection, no scopes, no configuration. just "give me every implementation of this interface that's on the path". that's often all a plugin system needs.
+
+<Gotcha title="the fat jar that lost its drivers">
+build an uber-jar by unzipping every dependency into one, and two jars that both contain `META-INF/services/java.sql.Driver` collide: one file overwrites the other, and a driver silently disappears. the symptom is `No suitable driver found` in production while everything worked in the IDE. the fix is to *merge* service files when shading: Maven Shade's `ServicesResourceTransformer`, or Gradle Shadow's `mergeServiceFiles()`.
+</Gotcha>
+
+<Deep title="laziness, caching and threads">
+each `ServiceLoader` instance caches the providers it has already created, and iterating it again replays the cache before looking for more. `reload()` clears that. two different `ServiceLoader` instances create two sets of provider objects, so providers are not singletons unless they make themselves one (with a `provider()` factory, for example). the loader itself isn't thread-safe; load once and share the instances you got. and `stream()` gives you `Provider` handles, so you can filter by `type()` and only call `get()`, which instantiates, on the one you want.
+</Deep>
+
+<Interview q="how does JDBC find the driver if you never call Class.forName?">
+through `ServiceLoader`. since JDBC 4 (java 6), every driver jar contains `META-INF/services/java.sql.Driver` listing its driver class. the first time `DriverManager` is used, it loads every `java.sql.Driver` provider on the class path and registers them, then asks each one whether it accepts the URL. on the module path the driver module declares `provides java.sql.Driver with ...` instead. the old `Class.forName` call worked because loading the class ran its static initializer, which registered the driver by hand; it's harmless now, but unnecessary.
+</Interview>
+
+<Keylines>
+- a service is an interface. providers declare themselves; the consumer just asks.
+- class path: a text file at `META-INF/services/<interface>`. module path: `provides … with` and `uses`.
+- providers are created lazily, in path order on the class path. a broken entry fails when it's reached.
+- a provider package doesn't need to be exported, and can use a static `provider()` factory.
+- shading jars? merge the service files, or your plugins vanish.
+</Keylines>

@@ -1,0 +1,161 @@
+import { NmtStages } from "@/components/figures/gc/NmtStages";
+import { DirectIceberg } from "@/components/figures/gc/DirectIceberg";
+
+<InShort>
+the heap is one slice of a JVM process. the rest is **native memory**: thread stacks, metaspace, the code cache, GC bookkeeping, **direct buffers**, and whatever native libraries allocate. `-Xmx` caps none of it.
+
+**Native Memory Tracking** shows it by category: start with `-XX:NativeMemoryTracking=summary`, ask with `jcmd <pid> VM.native_memory summary`. that's how you answer "why is my process twice the size of its heap?"
+</InShort>
+
+## the picture
+
+you know how a container running `-Xmx1g` can still get killed for using too much memory, with no `OutOfMemoryError` anywhere? the heap is the tip of the iceberg. it's the part you configured, the part every dashboard shows, and the part the GC manages. under the waterline is everything else the JVM needs to run your code, and the container's memory limit counts all of it.
+
+the [memory map](/learn/gc/runtime-data-areas) chapter drew those areas. this one measures them, grows them one at a time, and shows how to find the one that's leaking.
+
+## reserved, committed, resident
+
+the JVM gets memory from the OS in two steps, reserve and commit. there's a third number the OS keeps on its own, and it's the one your container limit cares about.
+
+<Figure caption={<>the same fresh JVM, three ways of counting (jdk 25, G1, <code>-Xms256m -Xmx256m</code>, measured with NMT and <code>ps</code>). only the last one costs RAM.</>}>
+<Flow
+  stages={[
+    { label: "reserved", sub: "1,715 MB", note: "address space set aside. costs nothing" },
+    { label: "committed", sub: "342 MB", note: "the OS promised to back it. what NMT counts" },
+    { label: "resident (RSS)", sub: "51 MB", note: "pages actually touched. what RAM holds" },
+  ]}
+/>
+</Figure>
+
+a page only becomes resident the first time something writes to it. so a JVM that commits a 256 MB heap at startup sits at 51 MB of RAM until the heap actually fills up. NMT reports reserved and committed. `ps`, `top` and the container report resident.
+
+## turning on NMT
+
+```bash
+# start the JVM with tracking on (summary is cheap; detail adds call sites and costs more)
+java -XX:NativeMemoryTracking=summary -jar app.jar
+
+# ask it, any time
+jcmd <pid> VM.native_memory summary scale=MB
+
+# find a leak: take a baseline now, diff against it later
+jcmd <pid> VM.native_memory baseline
+jcmd <pid> VM.native_memory summary.diff scale=MB
+```
+
+here's part of the summary from the experiment below, at the point where it had 533 threads, 21,065 classes and 128 MB of direct buffers:
+
+```text title="jcmd <pid> VM.native_memory summary scale=MB" nolines
+Total: reserved=2902MB, committed=583MB
+       malloc: 189MB #228253, peak=202MB #228364
+       mmap:   reserved=2713MB, committed=394MB
+-                 Java Heap (reserved=264MB, committed=256MB)
+-                     Class (reserved=1036MB, committed=31MB)
+                            (classes #21065)
+-                    Thread (reserved=1066MB, committed=42MB)
+                            (threads #533)
+                            (stack: reserved=1064MB, committed=40MB, peak=40MB)
+-                      Code (reserved=244MB, committed=8MB)
+-                        GC (reserved=60MB, committed=60MB)
+-                     Other (reserved=128MB, committed=128MB)
+-                 Metaspace (reserved=67MB, committed=23MB)
+```
+
+| category | what's in it | what limits it |
+| --- | --- | --- |
+| Java Heap | your objects | `-Xmx` |
+| Class, Metaspace, Shared class space | class metadata, the class pointer space, the CDS archive | `-XX:MaxMetaspaceSize` (unlimited by default) |
+| Thread | one stack per platform thread | `-Xss` times the number of threads |
+| Code | JIT-compiled machine code | `-XX:ReservedCodeCacheSize` |
+| GC | card tables, mark bitmaps, remembered sets | grows with the heap, differs per collector |
+| Other | direct `ByteBuffer`s (and other `Unsafe` allocations) | `-XX:MaxDirectMemorySize` (defaults to the max heap size) |
+| Internal, Symbol, Arena Chunk, ... | the JVM's own C++ data, the symbol table, compiler scratch space | nothing, mostly |
+
+NMT isn't free: Oracle's documentation puts it at a 5 to 10% slowdown, and it can only be switched on at startup. turn it on when you're investigating, not forever.
+
+## growing it one category at a time
+
+this little program grows one native category per step and asks NMT (and `ps`) about itself after each one. same JVM, same 256 MB heap, start to finish.
+
+<Figure wide caption={<>step through it. the top bar is what NMT says is committed, by category; the bottom bar is what was actually in RAM. <C k="hot">amber</C> is what the step changed. the <C k="dead">dashed line</C> is <code>-Xmx</code>, and look how little it explains by the end.</>}>
+<NmtStages />
+</Figure>
+
+so the same `-Xmx256m` process went from 51 MB to 486 MB of RAM, and by the end the heap was less than half of what NMT counted (256 of 583 MB committed). the rough costs, from this run:
+
+- **a platform thread**: a 2 MB stack reserved (1 MB on linux x64), about 100 KB resident while idle, more if it ever recursed deep. a pool of 2,000 threads is a few hundred MB before it does any work. [virtual threads](/learn/concurrency/virtual-threads) keep their stacks on the heap instead.
+- **a direct buffer**: exactly its capacity, plus a little bookkeeping.
+- **a class**: metaspace plus class space plus symbols. tiny classes here cost about 2.6 MB per thousand; real classes, with real methods, cost more.
+
+<Quiz question="a service runs with -Xmx2g in a container limited to 2 GB. under load it gets killed with exit code 137, and there's no OutOfMemoryError anywhere in the logs. most likely?" options={["a leak in the heap", "over the container limit", "the GC crashed"]} answer={1}>
+<Explain>
+exit code 137 is 128 + 9: the process got a `SIGKILL`, which is what the kernel's out-of-memory killer sends when a container goes over its memory limit. the JVM never gets a chance to throw anything. a heap leak would hit `-Xmx` first and throw `OutOfMemoryError: Java heap space`. a 2 GB heap in a 2 GB container leaves zero room for stacks, metaspace, the code cache, GC structures and direct buffers, so the first time the heap really fills up, the process is over the limit. leave headroom (a heap around 70 to 75% of the limit is a common start, `-XX:MaxRAMPercentage=75`) and measure with NMT. more in [the JVM in containers](/learn/performance/jvm-in-containers).
+</Explain>
+</Quiz>
+
+## direct buffers
+
+a direct `ByteBuffer` is the classic way to hand memory to native code and I/O without copying (see [buffers and channels](/learn/io/buffers-and-channels)). it's also the classic native leak, because of how it's freed.
+
+<Figure wide caption={<>step through it. each <C k="hot">new</C> buffer is a 136-byte object in the heap holding 1 MB outside it. <C k="dead">red outlines</C> are buffers that are garbage but not yet collected, and their memory is still taken. numbers from a real run on jdk 25 with a 64 MB direct memory limit.</>}>
+<DirectIceberg />
+</Figure>
+
+the native memory is released by a [cleaner](/learn/gc/reachability-and-references) when the GC notices the small heap object is unreachable. so the size of the native memory has nothing to do with when the GC runs. a program can churn through gigabytes of direct buffers while the heap stays so calm that no GC ever happens. the JDK patches over this by calling `System.gc()` itself when you hit the limit, which is why this works:
+
+```java title="Buffers.java"
+import java.nio.ByteBuffer;
+
+// allocates 1,000 direct buffers of 1 MB and throws every one away immediately.
+public class Buffers {
+    public static void main(String[] args) {
+        for (int i = 1; i <= 1000; i++) {
+            ByteBuffer b = ByteBuffer.allocateDirect(1 << 20);   // 1 MB outside the heap
+            b.put(0, (byte) i);                                  // use it, then drop it
+        }
+        System.out.println("done: 1000 MB allocated, 0 kept");
+    }
+}
+```
+
+```bash
+$ java -XX:MaxDirectMemorySize=64m Buffers.java
+done: 1000 MB allocated, 0 kept
+
+$ java -XX:MaxDirectMemorySize=64m -XX:+DisableExplicitGC Buffers.java
+Exception in thread "main" java.lang.OutOfMemoryError: Cannot reserve 1048576 bytes of direct buffer memory (allocated: 67108864, limit: 67108864)
+	at java.base/java.nio.Bits.reserveMemory(Bits.java:178)
+```
+
+<Gotcha title="-XX:+DisableExplicitGC breaks direct buffers">
+it's in a lot of old tuning guides, to stop libraries from triggering full GCs. but the JDK's own safety net for direct memory is a `System.gc()`, and this flag turns it into a no-op. if you want to tame `System.gc()` calls, use `-XX:+ExplicitGCInvokesConcurrent` instead (G1 runs a concurrent cycle rather than a full GC), and the direct-buffer net keeps working. better still: reuse buffers in a pool instead of allocating them per request. `allocateDirect` is slow anyway.
+</Gotcha>
+
+## finding a native leak
+
+when RSS keeps climbing and the heap doesn't, take an NMT baseline, wait, and diff. here's a "buffer pool" that only ever grows, five seconds after the baseline:
+
+```text title="jcmd <pid> VM.native_memory summary.diff scale=MB" nolines
+Total: reserved=1973MB +211MB, committed=597MB +205MB
+-                 Java Heap (reserved=264MB, committed=256MB)
+-                     Other (reserved=256MB +205MB, committed=256MB +205MB)
+                            (malloc=256MB +205MB #256 +205)
+```
+
+`Other`, +205 MB, in exactly 205 allocations since the baseline: that's direct buffers, one megabyte at a time. the category tells you which kind of memory to look for; a heap dump then tells you who holds the `ByteBuffer`s (they're small, but they're there).
+
+<Deep title="the memory NMT can't see">
+NMT tracks what the JVM itself allocates. it can't see memory that native libraries malloc on their own (a JNI library, a compression codec, a database driver with native parts), and it doesn't count the code of the shared libraries themselves (`libjvm` alone is around 20 MB). so RSS is always a bit above NMT's committed total, and if the gap keeps growing, the leak is outside the JVM: time for OS-level tools (`pmap`, jemalloc's profiler or heaptrack on linux, Instruments on a mac). one more linux-specific trap: glibc's malloc keeps freed memory in per-thread arenas instead of returning it, so RSS can stay high after a spike. `-XX:TrimNativeHeapInterval=<ms>` makes the JVM hand it back periodically.
+</Deep>
+
+<Interview q="why does a java process use more memory than its -Xmx?">
+because `-Xmx` only limits the java heap. the process also has a stack per platform thread, metaspace and class space for loaded classes, the code cache for JIT-compiled code, the garbage collector's own data structures, direct byte buffers, the JVM's internal allocations and any native libraries. Native Memory Tracking (`-XX:NativeMemoryTracking=summary` plus `jcmd <pid> VM.native_memory summary`) breaks it down by category, and a baseline plus `summary.diff` finds whatever is growing. in containers, size the heap to leave room for all of it, or the kernel kills the process without an OutOfMemoryError.
+</Interview>
+
+<Keylines>
+- reserved is free, committed is promised, resident is what costs RAM. containers count resident.
+- `-Xmx` caps the heap only. threads, classes, code, GC structures and direct buffers are extra.
+- NMT: `-XX:NativeMemoryTracking=summary`, then `jcmd VM.native_memory summary`, or baseline + `summary.diff`.
+- direct buffers are freed by the GC, through a tiny heap object. never combine them with `-XX:+DisableExplicitGC`.
+- exit code 137 with no OOM in the logs: the container limit, not the heap.
+</Keylines>

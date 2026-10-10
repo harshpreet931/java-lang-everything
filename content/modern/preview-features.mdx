@@ -1,0 +1,96 @@
+import { PreviewFlow } from "@/components/figures/modern/PreviewFlow";
+
+<InShort>
+a **preview feature** is finished but not permanent: fully specified and implemented, shipped so people can try it, and allowed to change or disappear. you opt in twice, with `--enable-preview` on `javac` *and* on `java`.
+
+an **incubator** is an earlier, rougher API in a `jdk.incubator.*` module. an **experimental** feature is a JVM option behind `-XX:+UnlockExperimentalVMOptions`. all three are how big things reach java without being locked in forever on day one.
+</InShort>
+
+## the picture
+
+you know how a java feature, once it's in, is in forever? `Vector`, `Date`, `Thread.stop` and the rest of the museum are proof. java is serious about backward compatibility, which makes every design mistake permanent. previews are the escape hatch: ship it for real, let millions of people kick the tires, then decide.
+
+think of a restaurant trying a new dish as a "special" before it goes on the printed menu. it's a real dish, cooked properly, you can order it. but next month it might come back with a different sauce, or not at all. you have to ask for it by name (that's `--enable-preview`).
+
+<Figure caption={<>pick a scenario. the <C k="hot">0xFFFF</C> in the class file header is javac's stamp that says "this class needs preview features of exactly this release". every command and message is real output from jdk 25 (and jdk 21 for the old class).</>}>
+<PreviewFlow />
+</Figure>
+
+## the rules of the game
+
+the process is written down in **JEP 12**. the parts worth knowing:
+
+<Defs>
+<dt>what can preview</dt><dd>language features (`instanceof byte b`), JVM features, and `java.*` APIs (`StableValue` in 25). an API preview fails to compile without the flag too: `error: StableValue is a preview API and is disabled by default.`</dd>
+<dt>how long</dt><dd>the target is final within about a year: preview in release N and N+1, final in N+2. big ones take longer. structured concurrency has been previewing since 21.</dd>
+<dt>what happens after</dt><dd>it goes final (maybe with changes), previews again (that needs a new JEP), or gets removed. string templates were removed.</dd>
+<dt>the stamp</dt><dd>a class file that uses preview features gets minor version 65535 (all 16 bits set): 69.65535 for java 25. it runs only on that exact release, and only with `--enable-preview`.</dd>
+<dt>the noise</dt><dd>with the flag on, javac reminds you on every compile (`Note: Main.java uses preview features of Java SE 25.`). that's on purpose.</dd>
+</Defs>
+
+```bash
+$ javac --release 25 --enable-preview Main.java
+Note: Main.java uses preview features of Java SE 25.
+Note: Recompile with -Xlint:preview for details.
+$ javap -v Main.class | grep version
+  minor version: 65535
+  major version: 69
+$ java --enable-preview Main
+300 doesn't fit in a byte
+
+$ java --enable-preview --source 25 Main.java     # the source launcher, both in one go
+```
+
+maven and gradle need the flag in two places too: the compiler plugin (`<compilerArgs>--enable-preview</compilerArgs>`) and whatever runs the code, tests included (surefire's `argLine`, gradle's `jvmArgs`). forgetting the second one is the classic "it compiles but every test fails" afternoon.
+
+<Quiz question="you compiled with --enable-preview on jdk 25. your server runs jdk 27, with --enable-preview. what happens?" options={["it runs: 27 is newer", "UnsupportedClassVersionError when the class loads", "it runs, but the preview features are switched off"]} answer={1}>
+<Explain>
+a preview class file is tied to the exact release that compiled it (69.65535 means "java 25's previews"). a 27 JVM only accepts 71.65535, so it rejects the class before running anything, even with the flag. recompile on 27. this is deliberate: the feature might work differently in 27, and silently running 25's semantics would be worse than failing.
+</Explain>
+</Quiz>
+
+## incubator and experimental
+
+previews are for things that are almost done. there are two earlier stages:
+
+<Compare>
+<Good label="incubator: a whole module, opt in with --add-modules">
+```bash
+$ java --add-modules jdk.incubator.vector Main.java
+WARNING: Using incubator modules: jdk.incubator.vector
+```
+the API lives in `jdk.incubator.vector`, not `java.*`, so the package name itself tells you it's temporary. when it graduates, it moves and your imports change.
+</Good>
+<Good label="experimental: a JVM option, opt in with an unlock flag">
+```bash
+$ java -XX:+UseEpsilonGC -version
+Error: VM option 'UseEpsilonGC' is experimental and must be enabled via -XX:+UnlockExperimentalVMOptions.
+```
+this is how runtime features start: a new GC mode, a new header layout. no API, just a switch.
+</Good>
+</Compare>
+
+| stage | for | opt in with | can change? | example |
+| --- | --- | --- | --- | --- |
+| incubator (JEP 11) | APIs, early | `--add-modules jdk.incubator.x` | completely | vector API, since 16 |
+| experimental | JVM features | `-XX:+UnlockExperimentalVMOptions` | yes | compact object headers in 24 |
+| preview (JEP 12) | language, VM, APIs, nearly done | `--enable-preview` | yes, or be removed | primitive patterns in 27 |
+| final | everything | nothing | no | records, since 16 |
+
+see every feature's path through these stages in the [release timeline](/learn/modern/release-timeline), and what's in preview right now in [what's in preview](/learn/modern/in-preview).
+
+<Gotcha title="don't ship preview features to production">
+it works, until you upgrade the JDK. preview class files don't run on the next release at all, and the source might not even compile there if the feature changed (structured concurrency's API changed several times across its seven previews). previews are for trying things and giving feedback. if you use one in real code, pin the JDK version and budget a rewrite.
+</Gotcha>
+
+<Interview q="what's the difference between a preview feature and an incubator module?">
+an incubator module is an early API in a `jdk.incubator.*` package that you add with `--add-modules`, and it can change completely, including its package name when it graduates. a preview feature is done (fully specified and implemented) and lives where it will stay, but it isn't permanent yet: you need `--enable-preview` at compile time and run time, and the class files only run on that exact JDK release. bonus point: JVM-level features use a third path, experimental `-XX` options behind `-XX:+UnlockExperimentalVMOptions`.
+</Interview>
+
+<Keylines>
+- preview = finished but not permanent. it can change, re-preview, or be removed.
+- `--enable-preview` on javac and on java. the source launcher also needs `--source N`.
+- preview class files are stamped N.65535 and only run on that exact release.
+- incubator = `jdk.incubator.*` module + `--add-modules`. experimental = `-XX:+UnlockExperimentalVMOptions`.
+- great for trying things. a liability in production.
+</Keylines>

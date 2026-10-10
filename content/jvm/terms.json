@@ -1,0 +1,22 @@
+[
+  { "term": "constant pool", "short": "the numbered table of names, types and literals at the front of a class file. most of the file points into it.", "chapter": "class-file-format" },
+  { "term": "operand stack", "short": "the per-frame stack that bytecode instructions push to and pop from. the JVM's scratchpad, next to the local variable array.", "chapter": "bytecode", "aka": ["local variable array"] },
+  { "term": "nestmates", "short": "classes from one source file that may use each other's private members directly. java 11, JEP 181.", "chapter": "invoke-instructions", "aka": ["nest-based access control"] },
+  { "term": "itable", "short": "a per-class table of method pointers grouped by interface, used by invokeinterface.", "chapter": "invoke-instructions" },
+  { "term": "<clinit>", "short": "a class's static initializer: static fields and static blocks, run once on first active use.", "chapter": "class-loading", "aka": ["class initialization", "static initializer"] },
+  { "term": "parent delegation", "short": "a class loader asks its parent first and only looks itself when the parent comes back empty.", "chapter": "classloaders", "aka": ["bootstrap class loader", "platform class loader", "app class loader"] },
+  { "term": "tiered compilation", "short": "running code at levels 0 to 4: interpreter, three flavours of C1, then C2, climbing as it gets hotter.", "chapter": "interpreter-and-jit" },
+  { "term": "on-stack replacement", "short": "swapping a long-running loop from the interpreter into compiled code while it runs. the % in PrintCompilation.", "chapter": "interpreter-and-jit", "aka": ["OSR"] },
+  { "term": "megamorphic call site", "short": "a virtual call that has seen three or more receiver classes. C2 stops inlining it.", "chapter": "jit-optimizations", "aka": ["monomorphic", "bimorphic", "inline cache"] },
+  { "term": "uncommon trap", "short": "the exit C2 compiles in for cases its profile said never happen. hitting one deoptimizes the method.", "chapter": "jit-optimizations", "aka": ["made not entrant"] },
+  { "term": "scalar replacement", "short": "C2 skipping an allocation entirely and keeping a non-escaping object's fields in registers.", "chapter": "jit-optimizations" },
+  { "term": "intrinsic", "short": "a JDK method the JIT replaces with hand-written machine code, like System.arraycopy or Integer.bitCount.", "chapter": "jit-optimizations" },
+  { "term": "compressed oops", "short": "storing references in 32 bits by shifting 8-byte-aligned addresses. works for heaps up to about 32 GB.", "chapter": "object-layout", "aka": ["compressed class pointers"] },
+  { "term": "compact object headers", "short": "an 8-byte object header with the class pointer folded into the mark word. product in 25, default in 27.", "chapter": "object-layout", "aka": ["lilliput", "UseCompactObjectHeaders"] },
+  { "term": "lightweight locking", "short": "HotSpot's uncontended lock: one CAS on the mark word's lock bits plus a push on the thread's lock stack.", "chapter": "locking-internals", "aka": ["lock stack"] },
+  { "term": "lock inflation", "short": "turning a contended or waited-on lock into a full ObjectMonitor with entry and wait queues.", "chapter": "locking-internals", "aka": ["ObjectMonitor", "monitor deflation"] },
+  { "term": "time to safepoint", "short": "how long the JVM waits for every running thread to reach a poll before a global pause can start.", "chapter": "safepoints", "aka": ["TTSP", "safepoint poll"] },
+  { "term": "handshake", "short": "a JVM operation that stops just one thread at its next poll instead of all of them. java 10.", "chapter": "safepoints", "aka": ["thread-local handshake"] },
+  { "term": "CDS", "short": "class data sharing: parsed class metadata saved to an archive and mapped in at startup.", "chapter": "aot-and-leyden", "aka": ["class data sharing", "AppCDS"] },
+  { "term": "AOT cache", "short": "Leyden's startup archive: classes already loaded and linked, plus method profiles, from a training run. java 24+.", "chapter": "aot-and-leyden", "aka": ["Project Leyden", "AOTCache"] }
+]

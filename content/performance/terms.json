@@ -1,0 +1,17 @@
+[
+  { "term": "percentile", "short": "the latency that a given share of requests stay under. p99 = 99% were faster. report p50, p99, p99.9 and max, not the mean.", "chapter": "measuring-performance", "aka": ["p99", "tail latency", "latency histogram"] },
+  { "term": "coordinated omission", "short": "a load tool that waits for each response stops sending while the system is slow, so the slow period is never measured.", "chapter": "measuring-performance" },
+  { "term": "dead code elimination", "short": "the JIT deleting work whose result nobody uses. the reason a timing loop can report 0 ns.", "chapter": "jmh", "aka": ["constant folding", "Blackhole"] },
+  { "term": "warmup", "short": "the first calls of a method run interpreted or lightly compiled. benchmarks discard them before measuring.", "chapter": "jmh", "aka": ["warmup iteration", "fork"] },
+  { "term": "flame graph", "short": "all sampled stacks merged into one picture: width is share of samples, height is call depth. the x axis is not time.", "chapter": "profiling-and-flame-graphs", "aka": ["icicle graph", "stack sampling"] },
+  { "term": "safepoint bias", "short": "a profiler that can only sample at safepoint polls credits time in poll-free code to whatever runs after it.", "chapter": "profiling-and-flame-graphs" },
+  { "term": "async-profiler", "short": "an open-source java profiler that samples at the real instruction via OS signals, so it avoids safepoint bias.", "chapter": "profiling-and-flame-graphs", "aka": ["AsyncGetCallTrace"] },
+  { "term": "MaxRAMPercentage", "short": "the default max heap as a share of the memory the JVM sees: 25%, or the container's limit inside a container.", "chapter": "jvm-in-containers", "aka": ["UseContainerSupport", "MinRAMPercentage", "cgroup limits"] },
+  { "term": "OOMKilled", "short": "the kernel killing a process for exceeding its container's memory limit: exit code 137, no OutOfMemoryError.", "chapter": "jvm-in-containers", "aka": ["exit code 137"] },
+  { "term": "cache line", "short": "the unit memory moves in between RAM and the CPU caches, 64 bytes on most CPUs. read in order and the prefetcher keeps up.", "chapter": "mechanical-sympathy", "aka": ["L1 cache", "prefetching", "memory hierarchy"] },
+  { "term": "branch prediction", "short": "the CPU guessing which way an if goes so its pipeline doesn't stall. random branches mispredict and cost time.", "chapter": "mechanical-sympathy", "aka": ["branch misprediction"] },
+  { "term": "MemorySegment", "short": "the FFM API's bounded, checked view of memory, on or off the heap, freed when its Arena closes.", "chapter": "ffm-api", "aka": ["Arena", "off-heap memory", "downcall"] },
+  { "term": "JNI", "short": "the java native interface: native methods implemented in C against JNIEnv, loaded with System.loadLibrary.", "chapter": "jni", "aka": ["Java Native Interface", "JNIEnv", "native method"] },
+  { "term": "restricted method", "short": "a method that can break java's safety, like System.loadLibrary or Linker.downcallHandle. warns unless native access is enabled.", "chapter": "jni", "aka": ["--enable-native-access", "native access", "jnativescan"] },
+  { "term": "auto-vectorization", "short": "C2 turning a simple array loop into SIMD instructions by itself. it can't for float reductions, which is where the Vector API helps.", "chapter": "vector-api", "aka": ["SuperWord", "FloatVector", "vector species"] }
+]

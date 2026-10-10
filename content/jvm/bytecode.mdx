@@ -1,0 +1,175 @@
+import { BytecodeStepper } from "@/components/figures/jvm/BytecodeStepper";
+
+<InShort>
+the JVM is a **stack machine**. every method call gets a frame with two things in it: a **local variable array** (numbered slots for `this`, the parameters and your locals) and an **operand stack**. instructions push values onto the stack, pop them off, and push results back. there are no registers.
+
+`a + b` is "push a, push b, add". that's bytecode.
+</InShort>
+
+## the picture
+
+you know how a calculator with an "enter" key (the old HP kind) never needs parentheses? you type `3 enter 4 +` and it works, because every number goes on a stack and every operation eats the top of it. that's reverse polish notation, and it's exactly how the JVM thinks.
+
+the local variable array is the calculator's memory buttons (named slots you can store into and recall from). the operand stack is the display stack (where the actual math happens). every instruction is one button press.
+
+so `int c = a + b;` becomes four presses: recall a, recall b, add, store into c.
+
+## watch it run
+
+pick a method, then press step. one step is one instruction. the bytecode is real: it's what `javap -c` prints for these methods on jdk 25.
+
+<Figure wide caption={<>the <C k="hot">hot</C> bar is the instruction that just ran; the outlined row is the next one. watch the operand stack: values only ever go on or come off the top. in <em>a method call</em>, see how the first result waits on the caller's stack while <code>square</code> runs again. in <em>new Point(1, 2)</em>, the object exists with zeroed fields four instructions before its constructor starts, and the <C k="ref">blue</C> values are references.</>}>
+<BytecodeStepper />
+</Figure>
+
+three things to notice:
+
+1. **locals are numbered, not named.** `a` is slot 0, `b` is slot 1. in an instance method slot 0 is always `this` (step into `Point.<init>` to see it). the names only survive in an optional debug table (`javac -g`), which is how your debugger shows them.
+2. **the stack has a fixed max depth.** javac computes it per method (`stack=2` above) and writes it into the class file, so the JVM can allocate the frame up front. `new Point(1, 2)` needs 4: two references and two ints.
+3. **calls pass values by copying them.** `invokestatic` pops the arguments off the caller's stack and they become the callee's first locals. that's [pass-by-value](/learn/basics/pass-by-value), at the instruction level.
+
+## reading javap
+
+here's the add method, as `javap -c -p` prints it:
+
+```text title="javap -c -p Calc"
+static int add(int, int);
+  Code:
+     0: iload_0
+     1: iload_1
+     2: iadd
+     3: istore_2
+     4: iload_2
+     5: ireturn
+```
+
+the number on the left is the byte offset of the instruction inside the method (the pc). most instructions are one byte, so they count up by one; `if_icmpge 19` is three (an opcode plus a two-byte jump offset), which is why the loop above goes 6, 9, 10.
+
+the first letter of an instruction is its type. the JVM never figures out types at runtime: javac picked the instruction for you, and the verifier checked it before anything ran.
+
+| prefix | type | e.g. |
+| --- | --- | --- |
+| `i` | int (and boolean, byte, char, short) | `iload`, `iadd`, `ireturn` |
+| `l` | long | `lload`, `lmul`, `lreturn` |
+| `f` | float | `fadd`, `fcmpl` |
+| `d` | double | `dadd`, `dcmpg` |
+| `a` | reference | `aload`, `areturn`, `aastore` |
+| `b` `c` `s` | byte, char, short arrays | `baload`, `castore`, `saload` |
+
+and the families, roughly 200 opcodes in all (an opcode is one byte, so there's room for 256):
+
+<Tree>{`
+bytecode
+    load / store              // locals ↔ operand stack
+        iload_0  aload_1  istore_2  ...
+    constants                 // push a literal
+        iconst_0..5  bipush  sipush  ldc  aconst_null
+    math + conversion
+        iadd  lmul  ddiv  irem  ineg  ishl  i2l  d2i  ...
+    compare + jump            // all control flow is this
+        if_icmpge  ifeq  ifnull  goto  tableswitch  lookupswitch
+    objects + arrays
+        new  getfield  putfield  getstatic  newarray  arraylength  checkcast  instanceof
+    stack shuffling
+        dup  dup_x1  pop  swap
+    calls #hot                // the next chapter
+        invokestatic  invokevirtual  invokeinterface  invokespecial  invokedynamic
+    return
+        ireturn  areturn  return
+    the rest
+        athrow  monitorenter  monitorexit
+`}</Tree>
+
+<Quiz question="x and y are doubles. what does x + y compile to?" options={["iadd", "fadd", "dadd", "add, with the type checked at runtime"]} answer={2}>
+<Explain>
+`dadd`. there is no generic add: the type is baked into the opcode. if you mix types (`int + double`), javac inserts a conversion first (`i2d`) and then uses `dadd`. that's why the JVM can run arithmetic without checking types at all.
+</Explain>
+</Quiz>
+
+## why a stack machine?
+
+real CPUs have registers. why didn't the JVM?
+
+- **portability.** a stack machine assumes nothing about the CPU underneath. x86 has 16 general-purpose registers, ARM64 has 31. bytecode doesn't care.
+- **size.** `iload_0` doesn't need to name a register, so it fits in one byte. java was designed in the 90s to ship code over slow networks.
+- **verification.** with a fixed stack depth and typed instructions, the JVM can check a method in one pass before running it: no stack underflow, no `int` used as a reference.
+
+the catch: stack code is slow to interpret literally. but nothing runs it literally for long. the [JIT](/learn/jvm/interpreter-and-jit) turns hot methods into register-based machine code, and the operand stack mostly disappears. Android's runtime went the other way and used a register-based bytecode (dex) for its interpreter.
+
+<Predict options={["5", "6", "compile error"]} answer={0}>
+```java
+int i = 5;
+i = i++;
+IO.println(i);
+```
+<Explain>
+5. here's the real bytecode for those two lines:
+
+```text
+0: iconst_5
+1: istore_0      // i = 5
+2: iload_0       // push the OLD value of i (5)
+3: iinc 0, 1     // i becomes 6, in the local slot
+6: istore_0      // pop the 5 back into i. the 6 is gone
+```
+
+`i++` means "use the old value, then increment". the old value was already sitting on the operand stack before `iinc` touched the local, and the assignment writes it back over the 6. the stack makes it obvious.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="5"
+void main() {
+    int i = 5;
+    i = i++;
+    IO.println(i);
+}
+```
+
+## long and double take two slots
+
+in the spec's model, one local slot (or one operand stack entry) holds an `int`, a `float` or a reference. a `long` or a `double` takes two of each.
+
+```text title="javap -v Misc (static long twice(long x) { return x * 2; })"
+static long twice(long);
+  stack=4, locals=2, args_size=1
+     0: lload_0
+     1: ldc2_w  #7      // long 2l
+     4: lmul
+     5: lreturn
+```
+
+<Figure caption={<>one parameter, two local slots. two values on the stack, four entries. this is why a <code>long</code> after an <code>int</code> parameter lands in slots 1 and 2, and the next parameter starts at 3.</>}>
+<div className="flex flex-wrap gap-x-12 gap-y-6">
+<ArrayViz label="local variable array" values={["x", "x"]} range={[0, 1, "hot"]} />
+<ArrayViz label="operand stack at lmul" values={["x", "x", "2L", "2L"]} range={[0, 1, "hot"]} />
+</div>
+</Figure>
+
+<Gotcha title="string + is not what it looks like">
+since java 9, `"hi " + name + " #" + n` doesn't compile to a `StringBuilder` chain anymore. it's one instruction:
+
+```text
+0: aload_0
+1: iload_1
+2: invokedynamic #9, 0   // makeConcatWithConstants:(Ljava/lang/String;I)Ljava/lang/String;
+7: areturn
+```
+
+the JVM decides how to build the string the first time that line runs, and can pick a faster strategy than javac could ([JEP 280](https://openjdk.org/jeps/280)). which means: decompiling a modern class and seeing no `StringBuilder` isn't a bug, and the advice "always use `StringBuilder` for `+`" is outdated for single expressions. inside a loop that grows one string, `StringBuilder` still wins, because each `+=` builds a new string. more on `invokedynamic` in [the five invoke instructions](/learn/jvm/invoke-instructions).
+</Gotcha>
+
+<Deep title="tableswitch vs lookupswitch">
+a `switch` on ints compiles to one of two instructions. with dense keys (1, 2, 3) javac emits `tableswitch`: a jump table indexed by `key - low`, so finding the case is one array lookup. with sparse keys (1 and 1000) it emits `lookupswitch`: a sorted list of key/offset pairs the JVM can binary-search. javac picks by comparing the estimated cost of both. `switch` on strings compiles to a `lookupswitch` on `hashCode()` followed by `equals` checks, and pattern `switch` uses `invokedynamic` (`SwitchBootstraps.typeSwitch`).
+</Deep>
+
+<Interview q="what is bytecode, and why doesn't java compile straight to machine code?">
+bytecode is the instruction set of the JVM: compact, typed instructions for a stack machine, stored in class files. compiling to it instead of machine code buys portability (the same `.class` runs on any OS and CPU with a JVM), safety (the JVM verifies it before running it), and better optimization: the JIT compiles hot methods at runtime, when it knows the actual CPU and how the code actually behaves (which branches are taken, which classes show up). a static compiler has to guess at both.
+</Interview>
+
+<Keylines>
+- a frame is a local variable array plus an operand stack. that's the whole machine.
+- instructions push and pop. `a + b` is iload, iload, iadd.
+- the type is in the opcode: iadd, ladd, dadd. nothing is checked at runtime.
+- loops are jumps. `new` is allocate, dup, invokespecial. calls copy arguments into the callee's locals.
+- `javap -c -p` shows you all of it. read it whenever java surprises you.
+</Keylines>

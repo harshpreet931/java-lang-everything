@@ -1,0 +1,149 @@
+import { TimeTypes } from "@/components/figures/core-api/TimeTypes";
+import { DstSlider } from "@/components/figures/core-api/DstSlider";
+
+<InShort>
+`java.time` has one type per question. **Instant** is a moment on the global timeline. **LocalDate** and **LocalDateTime** are what a calendar or a wall clock says, with no idea where. **ZonedDateTime** is a wall clock plus a zone's rules.
+
+store and compare instants, convert to a zone only to talk to humans. and because of daylight saving, some local times never happen and some happen twice.
+</InShort>
+
+## the picture
+
+there's one clock for the whole universe: UTC, counted as seconds since 1970-01-01T00:00Z. every city also has a wall clock, and the wall clock is that universal time shifted by an offset that politicians choose, and change twice a year.
+
+a `LocalDateTime` is a photo of a wall clock with the city cropped out. "03:30" tells you nothing about *when*, until someone says where. that's the root of most date bugs: code that treats a wall-clock reading as if it were a moment.
+
+<Figure wide caption={<>one moment, <code>2026-03-08T07:30:00Z</code>, held by each type. click a row. only the types with a <C k="live">yes</C> actually pin down a moment; the <code>Local</code> ones are missing the "where".</>}>
+<TimeTypes />
+</Figure>
+
+```java title="Main.java" run output="2026-03-08T07:30:00Z\n2026-03-08T03:30-04:00[America/New_York]\n2026-03-08T03:30\n2026-03-08T03:30-04:00\n2026-03-08T13:00+05:30[Asia/Kolkata]"
+import java.time.*;
+
+void main() {
+    Instant moment = Instant.parse("2026-03-08T07:30:00Z");
+    ZonedDateTime ny = moment.atZone(ZoneId.of("America/New_York"));
+    IO.println(moment);
+    IO.println(ny);
+    IO.println(ny.toLocalDateTime());                          // the zone is cropped out
+    IO.println(ny.toOffsetDateTime());                         // just the offset, no rules
+    IO.println(moment.atZone(ZoneId.of("Asia/Kolkata")));      // same moment, another wall
+}
+```
+
+everything in `java.time` (java 8, JSR 310) is **immutable** and thread-safe: `plusDays` returns a new object, just like `String`. that alone fixes half the bugs of the old `java.util.Date`.
+
+## daylight saving: the hour that doesn't exist
+
+on 2026-03-08, new york's clocks go from 01:59:59 straight to 03:00. so `02:30` that night isn't a time, it's a hole. on 2026-11-01 they go from 01:59:59 back to 01:00, so every minute between 01:00 and 02:00 happens twice, an hour apart.
+
+<Figure wide caption={<>pick a zone and slide the wall-clock time. the lines join each local time to the UTC instant it means. in a <C k="dead">gap</C>, there's no line: java quietly moves your time forward. in an overlap, there are two, and java picks the <C k="hot">earlier</C> one unless you ask. the transitions come from the JDK's own tz database (2026b, in temurin 25.0.4), and every result was checked against real java output.</>}>
+<DstSlider />
+</Figure>
+
+these are the rules of `ZonedDateTime.of(...)` and `LocalDateTime.atZone(...)`:
+
+- **gap**: no exception. the time moves forward by the length of the gap (`02:30` → `03:30-04:00`).
+- **overlap**: the earlier offset wins. `withLaterOffsetAtOverlap()` gives you the other one, `withEarlierOffsetAtOverlap()` goes back.
+- **strict**: if a non-existent time should be an error, `ZonedDateTime.ofStrict(...)` throws `DateTimeException` instead.
+
+this is why a job scheduled for 02:30 new york time can silently skip a day in march, one at 01:30 can run twice in november, and why you never store a `LocalDateTime` and hope.
+
+## `Duration` vs `Period`
+
+two ways to say "how long", and they disagree whenever a day isn't 24 hours.
+
+<Defs>
+<dt>Duration</dt><dd>an exact amount of time: seconds and nanos. `PT2H15M`. what a stopwatch measures.</dd>
+<dt>Period</dt><dd>an amount of calendar: years, months, days. `P1Y2M3D`. what a calendar flips through.</dd>
+</Defs>
+
+<Predict options={["both 12:00", "12:00 and 13:00", "13:00 and 12:00"]} answer={1}>
+```java
+var sat = ZonedDateTime.of(2026, 3, 7, 12, 0, 0, 0, ZoneId.of("America/New_York"));
+IO.println(sat.plus(Period.ofDays(1)));     // "same time tomorrow"
+IO.println(sat.plus(Duration.ofHours(24))); // "24 hours from now"
+```
+<Explain>
+saturday noon plus one calendar day is sunday noon: `2026-03-08T12:00-04:00`. but sunday only had 23 hours (the clocks skipped one), so exactly 24 hours later the wall clock says 13:00. `Duration.between(sat, sat.plusDays(1))` is `PT23H`.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="2026-02-28\nP1M1D\nPT23H\nPT2H15M"
+import java.time.*;
+
+void main() {
+    IO.println(LocalDate.of(2026, 1, 31).plusMonths(1));               // no feb 31: clamps to the 28th
+    IO.println(Period.between(LocalDate.of(2026, 1, 31), LocalDate.of(2026, 3, 1)));
+    var ny = ZoneId.of("America/New_York");
+    IO.println(Duration.between(LocalDate.of(2026, 3, 8).atStartOfDay(ny),
+                                LocalDate.of(2026, 3, 9).atStartOfDay(ny)));
+    IO.println(Duration.ofMinutes(135));
+}
+```
+
+rule of thumb: timeouts, rate limits and measurements are `Duration` (on `Instant`s). subscriptions, due dates and "every month on the 15th" are `Period` (on `LocalDate`s or `ZonedDateTime`s).
+
+## formatting and parsing
+
+`toString()` and `parse()` use ISO-8601 (`2026-03-08T03:30-04:00`) everywhere, which is what you want for anything a machine reads. for humans, `DateTimeFormatter`:
+
+```java
+DateTimeFormatter.ofPattern("EEE d MMM uuuu, HH:mm", Locale.UK)   // Sun 8 Mar 2026, 07:30
+```
+
+formatters are immutable and thread-safe, so make them `static final` constants. (the old `SimpleDateFormat` is neither, and sharing one between threads corrupts dates silently.)
+
+<Gotcha title="YYYY is not the year">
+`Y` is the *week-based* year, `y` (or `u`) is the year you mean. they agree for most of the year and then, in the last days of december:
+
+```text
+                 yyyy-MM-dd    YYYY-MM-dd   (Locale.US)
+SATURDAY         2025-12-27    2025-12-27
+SUNDAY           2025-12-28    2026-12-28
+WEDNESDAY        2025-12-31    2026-12-31
+```
+
+the week containing december 28 already belongs to 2026's first week, so `YYYY` says 2026, and your invoices are dated a year in the future. the same family: `MM` is month but `mm` is minutes, `HH` is 0-23 but `hh` is 1-12 and needs `a`, `dd` is day of month but `DD` is day of year.
+</Gotcha>
+
+## the old API
+
+before java 8 there was `java.util.Date` (a mutable wrapper around milliseconds, whose `toString` uses the JVM's default zone) and `Calendar` (months numbered from 0, lenient by default). you'll still meet them in older libraries and JDBC code.
+
+<Compare>
+<Bad label="java.util">
+```java
+var c = new GregorianCalendar(2026, 1, 30);   // month 1 is february
+c.getTime();   // no feb 30: silently rolls to march 2
+```
+</Bad>
+<Good label="java.time">
+```java
+LocalDate.of(2026, 2, 30);   // month 2 is february
+// DateTimeException: Invalid date 'FEBRUARY 30'
+```
+</Good>
+</Compare>
+
+to cross the boundary: `date.toInstant()` and `Date.from(instant)`. then stay in `java.time`.
+
+<Gotcha title="now() uses the server's zone">
+`LocalDateTime.now()` and `LocalDate.now()` read the JVM's default time zone, which is whatever the machine (or container) was set to. the same code says different dates on your laptop and in production, and "today" changes at midnight *somewhere*. record events as `Instant.now()`, convert to a user's zone for display, and for code that needs the current time, take a `Clock` as a parameter so tests can pass `Clock.fixed(...)`.
+</Gotcha>
+
+<Deep title="the rules change, so the JDK ships a database">
+offsets and DST dates are set by governments, and they change: countries drop DST, move it, or switch zones, sometimes with weeks of notice. java bundles the IANA tz database (temurin 25.0.4 has release `2026b`; you can ask with `ZoneRulesProvider.getVersions("UTC")`). JDK updates bring new rules, and oracle's `tzupdater` tool can patch an installed JDK in between. this is also why you store zone *ids* (`"America/New_York"`), not offsets: the id keeps meaning the right thing when the rules change.
+</Deep>
+
+<Interview q="Instant vs LocalDateTime vs ZonedDateTime: which one do you store?">
+an `Instant` (or an `OffsetDateTime`, or a UTC timestamp column), because only those name an exact moment and compare correctly across zones. `LocalDateTime` has no zone, so it's ambiguous by design. `ZonedDateTime` is for doing calendar math in a place ("every day at 9 in new york") and for display. bonus points: DST gaps and overlaps, `Duration` vs `Period`, and the `YYYY` vs `yyyy` trap.
+</Interview>
+
+<Keylines>
+- `Instant` is a moment. `Local*` is a wall-clock reading with no place. `ZonedDateTime` is both, plus the zone's rules.
+- store instants, convert to a zone only for humans.
+- DST: in a gap java shifts forward, in an overlap it picks the earlier offset.
+- `Duration` is stopwatch time, `Period` is calendar time. a day can be 23 hours.
+- `yyyy`, not `YYYY`. and inject a `Clock` instead of calling `now()` everywhere.
+</Keylines>

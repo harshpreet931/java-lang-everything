@@ -1,0 +1,160 @@
+import { HeapCalculator } from "@/components/figures/performance/HeapCalculator";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+inside a container the JVM reads its **cgroup limits** and sizes itself from them, not from the host. by default the max heap is **25% of the memory limit** (`MaxRAMPercentage`), the CPU count is the **CPU quota rounded up**, and with fewer than 2 CPUs or less than about 1.8 GB it quietly switches from G1 to **Serial**.
+
+the defaults are conservative on purpose. for a container that runs one JVM and nothing else, you almost always want `-XX:MaxRAMPercentage` set higher.
+</InShort>
+
+## the picture
+
+think of a hotel guest who reads the size of the building off the fire-escape plan and decides to spread out accordingly. that was the JVM in a container before java 10: it asked the operating system how much memory the machine had, got the *host's* answer (say 64 GB), picked a 16 GB heap inside a container allowed 2 GB, and then the kernel's OOM killer shot it. no `OutOfMemoryError`, no stack trace, just exit code 137.
+
+java 10 (backported to 8u191) made the JVM read the container's cgroup limits instead; cgroup v2, the newer format most distributions use now, is supported since java 15 (and 11.0.16, 8u372). the flag is `-XX:+UseContainerSupport`, on by default, linux only. here's what the JVM sees in a container started with `docker run -m 512m --cpus 2`:
+
+```bash
+$ docker run --rm -m 512m --cpus 2 eclipse-temurin:25-jre java -XshowSettings:system -version
+Operating System Metrics:
+    Provider: cgroupv2
+    Effective CPU Count: 2
+    CPU Period: 100000us
+    CPU Quota: 200000us
+    CPU Shares: -1
+    List of Effective Processors, 14 total:
+    0 1 2 3 4 5 6 7 8 9 10 11 12 13
+    Memory Limit: 512.00M
+    Memory & Swap Limit: 1.00G
+```
+
+the host has 14 cores and the container could run on any of them, but the quota allows 2 CPUs' worth of time per period, so the JVM sizes itself for 2.
+
+<Figure caption="hover a stage. how the limits get from docker (or kubernetes) into the JVM's defaults, on cgroup v2.">
+<Flow stages={[
+  { label: "docker -m 512m --cpus 2", sub: "or a pod's limits", note: "the container runtime writes the limits into the container's cgroup. a kubernetes memory limit and CPU limit end up in the same place; a CPU request only becomes a weight." },
+  { label: "/sys/fs/cgroup", sub: "memory.max, cpu.max", note: "on cgroup v2 the JVM reads files like memory.max (512 MB here) and cpu.max (\"200000 100000\": 200 ms of CPU time per 100 ms period, so 2 CPUs)." },
+  { label: "OSContainer", sub: "UseContainerSupport", note: "HotSpot's container code turns those into a memory limit and an active processor count, instead of asking the host. -Xlog:os+container=debug shows it happening." },
+  { label: "ergonomics", sub: "heap, GC, threads", note: "everything sized from 'the machine' now uses those numbers: max heap, which GC, GC thread counts, JIT compiler threads, the common fork-join pool's parallelism." },
+]} />
+</Figure>
+
+## what it picks
+
+every number below comes from the same image, `eclipse-temurin:25-jre` (jdk 25.0.4.1), run with different limits and read back with `-XX:+PrintFlagsFinal`:
+
+<Figure wide caption={<>drag the memory limit and change the CPUs. <C k="live">measured</C> values are real container runs; others follow the same rule. the <C k="ref">blue</C> part is the most heap the JVM will use. try 128 MB with 75%: the percentage you asked for is ignored.</>}>
+<HeapCalculator />
+</Figure>
+
+the rule, as HotSpot implements it, has three cases:
+
+| container memory | max heap | why |
+| --- | --- | --- |
+| under about 250 MB | half of it | `MinRAMPercentage` (50). confusingly named: it's the max heap for *small* machines |
+| about 250 MB to 500 MB | 126 MB | the built-in default `MaxHeapSize` is a floor |
+| above that | 25% of it | `MaxRAMPercentage` (25) |
+
+and the CPU side: the quota is rounded up (`--cpus 1.5` looks like 2 CPUs), a `--cpuset-cpus 0-2` pin counts too (3 CPUs), but CPU *shares* are ignored: `--cpu-shares 512` still showed all 14 cores. that matters on Kubernetes, where a CPU *request* becomes shares and only a *limit* becomes a quota. a pod with `requests: cpu: 1` and no limit sizes its GC and JIT thread pools for every core on the node.
+
+the GC choice follows the same numbers. the JVM only considers itself a "server class machine" with at least 2 CPUs and about 1.8 GB (`-m 1792m` got G1, `-m 1g` got Serial). below that you get the Serial collector: one GC thread, stop-the-world, which is the right call for a tiny box and a surprise if you expected G1's pause-time behaviour ([choosing a collector](/learn/gc/choosing-a-gc)).
+
+<Quiz question="a container with -m 128m runs java -XX:MaxRAMPercentage=75. what's the max heap?" options={["96 MB", "64 MB", "126 MB", "128 MB"]} answer={1}>
+<Explain>
+64 MB. i ran it. half of 128 MB is under the 126 MB built-in default, which puts the JVM in the "small machine" branch, where it uses `MinRAMPercentage` (50%) and never looks at `MaxRAMPercentage` at all. to get more, raise `-XX:MinRAMPercentage` (80 gave 104 MB) or just set `-Xmx`. at 256 MB the same flag does work: 192 MB.
+</Explain>
+</Quiz>
+
+## the heap is not the whole JVM
+
+the container limit applies to the whole process, and the heap is only part of it. the rest:
+
+<Defs>
+<dt>metaspace</dt>
+<dd>class metadata. grows with the number of loaded classes; frameworks load tens of thousands.</dd>
+<dt>code cache</dt>
+<dd>JIT-compiled machine code. reserved up to 240 MB by default, committed as it fills.</dd>
+<dt>thread stacks</dt>
+<dd>up to 1 MB each by default (`-Xss`), committed as they're touched. 200 platform threads can mean a lot.</dd>
+<dt>GC structures</dt>
+<dd>remembered sets, mark bitmaps. G1's can be a few percent of the heap.</dd>
+<dt>direct buffers and native</dt>
+<dd>NIO direct `ByteBuffer`s, the FFM API's off-heap segments, JNI libraries, the C allocator's own overhead.</dd>
+</Defs>
+
+native memory tracking shows the split. the order-processing app from the [flight recorder](/learn/performance/jfr-and-jmc) chapter, in a 512 MB container, with `-XX:MaxRAMPercentage=75` and `-XX:NativeMemoryTracking=summary`:
+
+<Figure caption={<>committed memory, in MB, from <code>-XX:+PrintNMTStatistics</code> at exit. the heap filled its whole 384 MB (the app allocates a lot). everything else came to about 34 MB for this tiny app; a real framework app with thousands of classes and hundreds of threads needs far more.</>}>
+<Bench
+  unit="MB"
+  digits={1}
+  data={[
+    { label: "Java heap", value: 383.9, tone: "ref" },
+    { label: "code cache", value: 8.3 },
+    { label: "GC", value: 1.3 },
+    { label: "symbols", value: 1.1 },
+    { label: "metaspace", value: 0.9 },
+    { label: "thread stacks", value: 0.8 },
+    { label: "total committed", value: 418.2 },
+  ]}
+/>
+</Figure>
+
+so "75% heap" left 128 MB for everything else, and this app used about 34 MB of it. that headroom is what decides whether a container lives. here's what happens without it:
+
+```bash
+$ docker run --rm -m 256m --memory-swap 256m eclipse-temurin:25-jre java -Xmx400m -Xms400m -XX:+AlwaysPreTouch -version
+$ echo $?
+137
+```
+
+nothing printed. `-XX:+AlwaysPreTouch` makes the JVM touch every page of its 400 MB heap at startup, the kernel noticed the container had passed 256 MB, and killed the process. exit code 137 is 128 + 9: SIGKILL. the same thing happens slowly in production when native memory creeps up, which is why `OOMKilled` in kubectl and `OutOfMemoryError` in your logs are two completely different problems ([native memory](/learn/gc/native-memory)).
+
+## the flags that matter
+
+<Tabs>
+<Tab label="a typical service">
+```bash
+java -XX:MaxRAMPercentage=75 \
+     -XX:+ExitOnOutOfMemoryError \
+     -Xlog:gc*:file=/tmp/gc.log:time,uptime:filecount=5,filesize=10m \
+     -jar app.jar
+```
+</Tab>
+<Tab label="tiny container">
+```bash
+# under ~250 MB, MaxRAMPercentage is ignored: be explicit
+java -Xmx160m -Xss512k -XX:MaxMetaspaceSize=64m -jar app.jar
+```
+</Tab>
+<Tab label="no quota, but don't use the whole node">
+```bash
+# requests without limits: tell the JVM how many CPUs to size for
+java -XX:ActiveProcessorCount=2 -XX:MaxRAMPercentage=75 -jar app.jar
+```
+</Tab>
+</Tabs>
+
+- **`-XX:MaxRAMPercentage`**: the heap as a share of the container limit. 60 to 80 for a single-process container is common; leave room for the list above. it scales automatically when someone changes the pod's memory, which a fixed `-Xmx` doesn't.
+- **`-XX:ActiveProcessorCount=n`**: override the CPU count the JVM sizes thread pools, GC threads and JIT threads for. useful when there's no quota.
+- **`-XX:+ExitOnOutOfMemoryError`**: die on the first `OutOfMemoryError` and let the orchestrator restart the container, instead of limping on in a broken state.
+- **`-Xlog:os+container=debug`** prints how the JVM read the limits, and `jfr view container-configuration` shows the same in a recording.
+
+<Gotcha title="setting -Xmx to the container limit">
+`-Xmx2g` in a `-m 2g` container looks tidy and is guaranteed to get killed eventually: the heap alone can fill the whole limit, and metaspace, the code cache and thread stacks come on top. the JVM doesn't check, because a heap limit and a container limit are different things to it. rule of thumb: heap at most 75% of the limit for typical services, less if you use lots of threads or direct buffers, and watch the process's resident memory, not just the heap graph.
+</Gotcha>
+
+<Deep title="startup in a container">
+containers are often small and restarted often, so startup costs show up more there. a 1-CPU container gets Serial GC and only 2 JIT compiler threads (`CICompilerCount=2` at 1 or 2 CPUs, 3 at 4, 4 at 8, all measured), so warmup takes longer. class data sharing and the AOT cache cut startup and warmup time and work fine in images ([AOT and Leyden](/learn/jvm/aot-and-leyden)). and `jlink` can build a runtime with only the modules you use, making the image smaller ([jlink](/learn/tooling/jars-jlink-jpackage)).
+</Deep>
+
+<Interview q="our java pods keep getting OOMKilled but there's no OutOfMemoryError in the logs. why?">
+the kernel killed the process because the container's total memory went over its limit; the JVM never ran out of heap, so it never threw. the heap is only part of a JVM's memory: metaspace, the code cache, thread stacks, GC structures, direct buffers and native libraries all count toward the cgroup limit. usually `-Xmx` (or `MaxRAMPercentage`) is set too close to the limit, or native memory grows over time. i'd lower the heap share to leave headroom, turn on native memory tracking (`-XX:NativeMemoryTracking=summary`, then `jcmd <pid> VM.native_memory summary`) to see what's growing, and check thread counts and direct buffer usage.
+</Interview>
+
+<Keylines>
+- the JVM reads cgroup limits: memory limit, CPU quota, cpuset. CPU shares (k8s requests) are ignored.
+- default max heap: 25% of the limit, 50% under about 250 MB, never less than 126 MB above that.
+- under 2 CPUs or about 1.8 GB you get Serial GC, not G1.
+- the container limit covers the whole process. leave headroom for metaspace, code cache, threads, buffers.
+- exit code 137 with no OutOfMemoryError means the kernel killed you, not the JVM.
+</Keylines>

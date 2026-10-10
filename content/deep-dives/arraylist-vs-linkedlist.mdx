@@ -1,0 +1,123 @@
+import { ListBench } from "@/components/figures/deep-dives/ListBench";
+import { AccessTrace } from "@/components/figures/deep-dives/AccessTrace";
+
+<InShort>
+big-O counts **steps**. the CPU charges for **memory**: how many bytes you touch, whether they're next to each other, and whether it can see the next address coming. an `ArrayList` is one array of references. a `LinkedList` is a 24-byte node per element, and walking it is **pointer chasing**.
+
+measured on jdk 25: iteration is 4.7x slower on a fresh `LinkedList` and 26x slower on a shuffled one, `get(i)` is 61,000x slower, and even "insert in the middle", the textbook win, loses 27 to 1 unless you're already standing there with an iterator.
+</InShort>
+
+## the picture
+
+you know the table every data structures course hands out? `LinkedList`: O(1) insert, O(n) access. `ArrayList`: O(1) access, O(n) insert. so for anything insert-heavy, linked list, right? that table counts how many *steps* each operation takes. it says nothing about how long a step takes, and on a modern CPU the answer ranges from a fraction of a nanosecond (data already in cache, or on its way) to around a hundred (a trip to main memory).
+
+an array is a row of houses on one street: walk along and the next door is always right there, and you can see the next ten doors coming. a linked list is a scavenger hunt: each house has a note with the address of the next one, which could be across town, and you can't even start walking until you've read the note.
+
+the basics (what each list holds, the node layout, `ArrayDeque`) are in [ArrayList](/learn/collections/arraylist) and [LinkedList and ArrayDeque](/learn/collections/linkedlist-and-arraydeque). this chapter measures.
+
+## big-O vs the stopwatch
+
+four operations, measured on the same machine, each in a fresh JVM. pick one and compare what big-O predicts with what happened.
+
+<Figure wide caption={<>pick an operation. bars are log scale: each step to the right is about 10x slower. <C k="live">green</C> is the winner, <C k="dead">red</C> the loser, <C k="hot">amber</C> is LinkedList's one real trick. jdk 25, apple M4 Pro, median of three runs.</>}>
+<ListBench />
+</Figure>
+
+two of the four go the way big-O says (`get(i)` and adding at the front). the other two are where the CPU disagrees with the textbook. iteration is the big one, because it's what most code does most of the time, and its big-O is identical for both lists.
+
+## why iteration isn't equal
+
+here are the addresses a for-each loop actually reads, in order, for 32 elements.
+
+<Figure wide caption={<>switch layouts. each dot is one memory read, in order. the <C k="ref">blue line</C> is the path from one read to the next. same 32 numbers in all three, very different paths through memory.</>}>
+<AccessTrace />
+</Figure>
+
+three things add up:
+
+1. **bytes per element.** an `ArrayList` reads a 4-byte slot and the 16-byte `Integer`. a `LinkedList` reads a 24-byte node and the `Integer`. twice the memory traffic for the same data.
+2. **dependent loads.** in an array, the address of slot `i + 1` is known before you finish with slot `i`, so the CPU starts several loads at once. in a linked list, the address of the next node is *inside* the current node, so each load waits for the one before it. no overlap.
+3. **order.** a fresh `LinkedList` was allocated in order, so its nodes sit next to each other and the hardware prefetcher keeps up. a list that's been built by inserting at random positions (or has lived through enough `add` and `remove` in the middle) points all over the heap, and every hop is a guess the prefetcher gets wrong.
+
+the [collections chapter](/learn/collections/linkedlist-and-arraydeque) measured the fresh case and noted the gap would grow as nodes scatter. here's how much: 1.6 ns per element fresh, 8.9 shuffled, against 0.34 for the `ArrayList`. a garbage collector that copies objects can sometimes put a list's nodes back in order, which is why the shuffled number is a bad day, not a constant.
+
+## memory per element
+
+measured with `jcmd GC.class_histogram` on a million `Integer`s (values from 1,000 up, so none come from the [integer cache](/learn/deep-dives/integer-cache)):
+
+<Figure caption={<>bytes per element, including the <code>Integer</code> (16 bytes) each element points at. ArrayList's array had grown to 1,215,487 slots for 1,000,000 elements, so its slot cost includes 22% slack. compact object headers (<code>-XX:+UseCompactObjectHeaders</code>) changed nothing here: an 8-byte header plus a node's 12 bytes of fields still rounds up to 24.</>}>
+<Bars
+  unit="B"
+  data={[
+    { label: "ArrayList", value: 20.9, tone: "live" },
+    { label: "LinkedList", value: 40, tone: "dead" },
+    { label: "ArrayList, no compressed oops", value: 25.7 },
+    { label: "LinkedList, no compressed oops", value: 56 },
+  ]}
+/>
+</Figure>
+
+so a `LinkedList` roughly doubles the memory per element, and turning off compressed references (above a 32 GB heap they turn off by themselves, see [object layout](/learn/jvm/object-layout)) makes the gap wider, since a node has three references and an array slot has one.
+
+## where LinkedList actually wins
+
+removing elements while you iterate. `LinkedList`'s iterator unlinks a node in O(1); `ArrayList`'s shifts everything after it, every time.
+
+<Quiz question="remove every even value from a 100,000-element list (built fresh, values 1,000 and up). which way is about 700 times slower than the other three?" options={["ArrayList with iterator.remove()", "LinkedList with iterator.remove()", "ArrayList.removeIf", "LinkedList.removeIf"]} answer={0}>
+<Explain>
+`ArrayList` with `iterator.remove()`: 177 ms, against about 0.2 ms for each of the others (0.18 to 0.28 ms for `LinkedList` with its iterator, 0.24 ms for `ArrayList.removeIf`, 0.18 ms for `LinkedList.removeIf`, median of three runs). each `remove()` on an `ArrayList` shifts the whole tail of the array left, so 50,000 removals move about 2.5 billion references. `ArrayList.removeIf` is smart about it: it finds everything to remove first, then compacts the survivors in one pass. so the fix for the slow case isn't switching lists, it's calling `removeIf`.
+</Explain>
+</Quiz>
+
+so `LinkedList` is genuinely good at exactly one thing: changing a list at a spot you're already standing on, through a `ListIterator`. 9.7 ns for an insert and remove in the middle, against 6 µs for `ArrayList`. if your algorithm does a lot of that, on a big list, it's a real win. in practice that's rare enough that the person who wrote `LinkedList`, Joshua Bloch, has said he never uses it.
+
+## how these were measured
+
+no JMH, so the harness had to be careful on its own. the core of it:
+
+```java title="Bench.java"
+// runs op() in rounds of `reps` calls; the first 5 rounds are warmup; prints the median round
+static void time(String name, int reps, long opsPerCall, LongSupplier op) {
+    int rounds = 21;
+    double[] ns = new double[rounds - 5];
+    for (int r = 0; r < rounds; r++) {
+        long t0 = System.nanoTime();
+        long acc = 0;
+        for (int i = 0; i < reps; i++) acc += op.getAsLong();   // results feed a sum...
+        long t = System.nanoTime() - t0;
+        sink += acc;                                            // ...that escapes, so the JIT can't delete the work
+        if (r >= 5) ns[r - 5] = (double) t / reps / opsPerCall;
+    }
+    Arrays.sort(ns);
+    System.out.printf("%-28s %10.2f ns/op%n", name, ns[ns.length / 2]);
+}
+```
+
+```bash
+java -Xms4g -Xmx4g -Xmn2g -cp . Bench iter-ll-scattered 100000
+```
+
+- **one case per JVM.** if one method calls `get` on both lists, the call site becomes polymorphic and the JIT optimizes it worse for both. a fresh JVM per case keeps every measurement monomorphic.
+- **warmup rounds thrown away**, so the code is compiled by C2 before anything counts.
+- **a sink.** every result is added into a `static volatile` field. without that, C2 is allowed to notice nobody uses the sum and delete the loop.
+- **a huge young gen** (`-Xmn2g`), so no GC runs in the middle of a measurement and moves the shuffled nodes back into order.
+- **median, three runs, busy machine.** the laptop was running other work (load average 10 to 19), so single runs wobbled, one case by almost 2x between runs. the ratios barely moved.
+
+for anything you'd publish or base a decision on, use [JMH](/learn/performance/jmh). it does all of this and more (forking, blackholes, statistics), and it catches the mistakes you didn't think of.
+
+<Gotcha title="the List interface hides the cost">
+`List.get(i)` compiles fine against a `LinkedList`, and the classic counted loop that calls `list.get(i)` for every `i` is O(n²) on one. code that takes a `List` parameter doesn't know which one it got. `RandomAccess` is the marker interface for "`get(i)` is fast" (`ArrayList` has it, `LinkedList` doesn't), and the JDK's own algorithms check it: `Collections.binarySearch` uses an iterator instead of `get` when the list isn't `RandomAccess`. if you write generic list code, use for-each or an iterator and you're fast on both.
+</Gotcha>
+
+<Interview q="when is a LinkedList faster than an ArrayList?">
+almost only when you insert or remove at a position you've already reached with a `ListIterator`: that's O(1) relinking versus an O(n) array shift, and it wins big on large lists (removing every other element through an iterator: about 0.2 ms versus 177 ms on 100,000 elements). adding at the front also favours it, though `ArrayDeque` does that better. everything else favours `ArrayList`: `get(i)` is O(1) instead of O(n), iteration is several times faster because the array is contiguous and the CPU can prefetch and overlap loads, and it uses about half the memory per element (21 versus 40 bytes with compressed oops). and `ArrayList.removeIf` fixes the one case people usually reach for `LinkedList` for.
+</Interview>
+
+<Keylines>
+- big-O counts steps. the CPU charges for bytes touched and for loads it can't predict.
+- `ArrayList` iterates 4.7x faster than a fresh `LinkedList`, 26x faster than a shuffled one.
+- `LinkedList.get(i)` walks. 40 µs per call at 100,000 elements.
+- insert in the middle by index: `ArrayList` wins 27 to 1. with an iterator already there, `LinkedList` wins.
+- a `LinkedList` costs about 40 bytes per element, an `ArrayList` about 21.
+- measure with JMH. if you can't, one case per JVM, warmup, a sink, and a median.
+</Keylines>

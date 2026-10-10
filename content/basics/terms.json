@@ -1,0 +1,17 @@
+[
+  { "term": "casting", "short": "converting between types. widening (int → long) is automatic, narrowing (long → int) needs a cast and can lose bits.", "chapter": "casting-and-overflow", "aka": ["widening conversion", "narrowing conversion", "type conversion"] },
+  { "term": "two's complement", "short": "how integers store negative numbers: flip the bits and add 1. why the range is -128 to 127.", "chapter": "casting-and-overflow" },
+  { "term": "integer overflow", "short": "int or long math that doesn't fit wraps around silently. Integer.MAX_VALUE + 1 is Integer.MIN_VALUE.", "chapter": "casting-and-overflow", "aka": ["wraparound", "addExact"] },
+  { "term": "IEEE 754", "short": "the binary floating-point standard behind float and double. why 0.1 + 0.2 != 0.3.", "chapter": "floating-point", "aka": ["floating point", "double"] },
+  { "term": "NaN", "short": "not a number: what 0.0 / 0.0 gives. the only value not equal to itself, so test with Double.isNaN.", "chapter": "floating-point" },
+  { "term": "short-circuit evaluation", "short": "&& and || skip the right side when the left side already decides the answer.", "chapter": "operators", "aka": ["&&", "||"] },
+  { "term": "operator precedence", "short": "which operators bind tighter, like * before +. it shapes the expression tree, not the evaluation order.", "chapter": "operators" },
+  { "term": "text block", "short": "a multi-line string in triple quotes. java strips the indentation your code added. java 15.", "chapter": "strings-101" },
+  { "term": "labeled break", "short": "break outer; jumps out of the loop labelled outer, even from inside a nested loop.", "chapter": "control-flow", "aka": ["labeled continue", "break label"] },
+  { "term": "switch expression", "short": "a switch with case X -> arms that produces a value. no fallthrough, and it must cover every input. java 14.", "chapter": "switch", "aka": ["arrow case", "yield", "fallthrough"] },
+  { "term": "jagged array", "short": "a 2d array whose rows have different lengths. possible because int[][] is an array of separate arrays.", "chapter": "arrays", "aka": ["2d array", "array of arrays"] },
+  { "term": "overloading", "short": "several methods with the same name and different parameter lists. the compiler picks one from the argument types.", "chapter": "methods", "aka": ["overload resolution", "method signature"] },
+  { "term": "varargs", "short": "a T... parameter that accepts any number of arguments, delivered to the method as an array.", "chapter": "methods", "aka": ["variable arity"] },
+  { "term": "recursion", "short": "a method calling itself. needs a base case. java never optimizes tail calls, so deep recursion overflows the stack.", "chapter": "call-stack-and-recursion", "aka": ["base case", "tail call", "memoization"] },
+  { "term": "local variable type inference", "short": "var: the compiler infers a local's type from its initializer. still statically typed. java 10.", "chapter": "var", "aka": ["var"] }
+]

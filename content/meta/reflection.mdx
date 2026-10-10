@@ -1,0 +1,149 @@
+import { MemberFinder } from "@/components/figures/meta/MemberFinder";
+import { AccessCheck } from "@/components/figures/meta/AccessCheck";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+every loaded class has a **`Class` object**, and it will hand you **`Field`**, **`Method`** and **`Constructor`** objects for everything the class declares. with those you can read fields, call methods and create objects *by name*, at runtime, with no compile-time knowledge of the class. that's **reflection**.
+
+the catch since java 17: the JDK's own private parts are sealed off, and `setAccessible(true)` throws instead of shrugging.
+</InShort>
+
+## the picture
+
+you know how a framework like Spring can call your constructor, or JUnit can find your `@Test` methods, when neither of them has ever seen your code? they ask the class about itself.
+
+think of a building with a directory at the front desk. the directory (the `Class` object) lists every room (fields), every service on offer (methods) and how to add a new floor (constructors). reflection is reading that directory and then walking into the rooms it lists. the directory is always there, because the JVM needed it to load the class in the first place.
+
+there are three ways to get the directory:
+
+```java
+Class<?> a = Dog.class;              // you know the type at compile time
+Class<?> b = someDog.getClass();     // you have an object; this is its runtime class
+Class<?> c = Class.forName("Dog");   // you have a string (a config file, a plugin name)
+```
+
+all three give the very same object: one `Class` per class per [class loader](/learn/jvm/classloaders). then you ask it for members. the API comes in pairs, and the pairs mean different things:
+
+<Figure caption={<>pick a call. members it returns turn <C k="live">green</C>. <code>getX</code> means public, inherited included. <code>getDeclaredX</code> means everything written in this class, private included, nothing inherited. the counts are what jdk 25 returns for these exact classes.</>}>
+<MemberFinder />
+</Figure>
+
+so "give me every field, private and inherited" is a loop: `getDeclaredFields()` on the class, then on `getSuperclass()`, until you hit `Object`. every serialization library has that loop somewhere.
+
+<Predict options={["1", "10", "12"]} answer={1}>
+```java
+class Dog {
+    public void bark() {}
+}
+// Dog.class.getMethods().length == ?
+```
+<Explain>
+10. `bark`, plus `Object`'s nine public methods: `equals`, `hashCode`, `toString`, `getClass`, `notify`, `notifyAll` and three overloads of `wait`. `clone` and `finalize` are protected, so `getMethods` skips them. `getDeclaredMethods().length` would be 1.
+</Explain>
+</Predict>
+
+## calling things by name
+
+here's the whole toolkit in one go: find a class from a string, make an instance, call a method, poke a private field, and see what happens when the method you call throws.
+
+```java title="Main.java" run output="woof woof\nage = 4\nwrapped: java.lang.IllegalStateException: good dogs don't bite"
+import java.lang.reflect.*;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Class<?> c = Class.forName("Dog");
+        Object dog = c.getDeclaredConstructor().newInstance();
+
+        Method bark = c.getMethod("bark", int.class);
+        System.out.println(bark.invoke(dog, 2));
+
+        Field age = c.getDeclaredField("age");
+        age.setAccessible(true);
+        age.set(dog, 4);
+        System.out.println("age = " + age.get(dog));
+
+        try {
+            c.getMethod("bite").invoke(dog);
+        } catch (InvocationTargetException e) {
+            System.out.println("wrapped: " + e.getCause());
+        }
+    }
+}
+
+class Dog {
+    private int age = 3;
+    public String bark(int times) { return "woof ".repeat(times).trim(); }
+    public void bite() { throw new IllegalStateException("good dogs don't bite"); }
+}
+```
+
+things to notice:
+
+- **methods are found by name and parameter types.** `getMethod("bark", int.class)`, because overloads share a name. get either one wrong and it's a `NoSuchMethodException` at runtime, not a compile error.
+- **everything is `Object`.** `invoke` takes `Object...` and returns `Object`, so the `2` got boxed into an `Integer` and unboxed again on the way in. the compiler checks nothing.
+- **`getDeclaredConstructor()`, not `getConstructor()`.** `Dog` isn't public, so its default constructor isn't either, and `getConstructor()` (public only) throws `NoSuchMethodException: Dog.<init>()`. that one catches everybody once.
+- **the method's own exception comes back wrapped** in an `InvocationTargetException`. the real one is `getCause()`.
+
+<Gotcha title="logging the wrapper, not the bug">
+a stack trace that says `InvocationTargetException` and nothing else is a classic. the useful exception is one `getCause()` away, and frameworks that forget to unwrap it hide your actual bug behind ten lines of `jdk.internal.reflect` frames. unwrap it, or rethrow `e.getCause()`.
+</Gotcha>
+
+## setAccessible, and the wall
+
+`setAccessible(true)` turns off the language's access checks for one `Field`, `Method` or `Constructor`. for your own classes it still works exactly like it always did. for the JDK's, it used to work too, and half the ecosystem quietly depended on reading `String.value` or calling `ClassLoader.defineClass`.
+
+then modules arrived ([modules](/learn/tooling/modules)). a module can **export** a package (you may use its public API) and separately **open** it (you may reflect into its privates). `java.base` exports `java.lang` and opens nothing.
+
+the JDK didn't slam the door at once. java 9 to 15 let illegal reflective access through with a warning. java 16 denied it by default ([JEP 396](https://openjdk.org/jeps/396)). java 17 removed the switch that turned it back on ([JEP 403](https://openjdk.org/jeps/403)). here's where things stand on jdk 25:
+
+<Figure caption={<>pick a target. the messages are the real ones from jdk 25. <C k="dead">red</C> is what fails, and notice the final field: the one that "works" is the scariest.</>}>
+<AccessCheck />
+</Figure>
+
+the fixes, from best to worst:
+
+1. **use the public API.** most internals people reached for now have a real replacement: `MethodHandles.Lookup.defineClass` instead of `ClassLoader.defineClass`, [VarHandles](/learn/meta/method-handles-and-varhandles) instead of `Unsafe` field tricks, the [FFM API](/learn/performance/ffm-api) instead of `Unsafe` memory.
+2. **open your own packages on purpose.** `opens com.shop.model to com.fasterxml.jackson.databind;` in your `module-info.java` lets one library reflect into one package.
+3. **`--add-opens java.base/java.lang=ALL-UNNAMED`** on the command line (or `Add-Opens:` in a jar manifest). it works, and it's an honest label: this app breaks into the JDK.
+
+the same tightening is coming for `final`. on 25, `Field.set` on a non-static final instance field still succeeds silently. java 26 prints a warning for it ([JEP 500](https://openjdk.org/jeps/500)), and a later release will make it throw unless you pass `--enable-final-field-mutation`.
+
+## what it actually costs
+
+"reflection is slow" is folklore with a kernel of truth. here's `t.add(x)` called six ways, measured with [JMH](/learn/performance/jmh):
+
+<Figure caption={<>JMH, 2 forks × 5 one-second iterations, jdk 25 on an apple M4 Pro, with the JMH error after each number. a cached <code>Method</code> in a <code>static final</code> costs about one extra nanosecond. looking the method up on every call is the <C k="dead">real</C> mistake.</>}>
+<Bench
+  unit="ns/op"
+  data={[
+    { label: "direct call", value: 0.711, err: 0.03, tone: "live" },
+    { label: "MethodHandle in a static final", value: 0.707, err: 0.03 },
+    { label: "Method.invoke, static final Method", value: 1.592, err: 0.009 },
+    { label: "MethodHandle in a plain field", value: 3.099, err: 0.043 },
+    { label: "Method.invoke, plain field", value: 5.565, err: 0.051 },
+    { label: "getMethod + invoke, every call", value: 14.128, err: 0.124, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+since java 18, `Method.invoke` is built on [method handles](/learn/meta/method-handles-and-varhandles) ([JEP 416](https://openjdk.org/jeps/416)). when the `Method` sits in a `static final` field, the JIT treats it as a constant and can inline almost straight through to the target. in an ordinary field it can't, and you pay for the argument array, the boxing and the checks on every call. `getMethod` itself searches the class and hands back a fresh copy of the `Method` every time, which is why it's the slowest row by far.
+
+so the rule is boring: look things up once, keep them in `static final` fields, and the speed mostly stops mattering. what doesn't go away is everything else you lose. the compiler can't check names or types, refactoring tools can't see the calls, and ahead-of-time compilers like GraalVM native image need a config file listing every reflective access. that's why newer frameworks (Micronaut, Quarkus, Dagger) do their wiring at compile time with [annotation processors](/learn/meta/annotation-processing) instead.
+
+<Deep title="what about generics, records and annotations?">
+generic type arguments are erased from objects, but not from declarations. `Field.getGenericType()` on a `List<String> names` field returns a `ParameterizedType` that knows about `String`, which is how Jackson knows what to put in your list. the full story is in [generics and reflection](/learn/generics/generics-and-reflection).
+
+records get their own accessors: `getRecordComponents()` returns the components in declaration order, each with its accessor `Method`, which serialization libraries use instead of guessing at fields. and every `Field`, `Method` and `Class` can be asked for its runtime-visible [annotations](/learn/meta/annotations), which is the other half of how frameworks find your code.
+</Deep>
+
+<Interview q="why does setAccessible(true) throw InaccessibleObjectException on java 17 when it worked on java 8?">
+strong encapsulation. since java 9 the JDK is made of modules, and a module only lets other code reflect into its private members if it *opens* the package. `java.base` opens none of its packages. java 9 to 15 allowed the access anyway with a warning, java 16 denied it by default (JEP 396), and java 17 removed `--illegal-access` entirely (JEP 403). the fix is a public replacement API, or an explicit `--add-opens module/package=ALL-UNNAMED`. bonus: `sun.misc.Unsafe` is the deliberate exception, still open through the `jdk.unsupported` module, though its memory methods now warn on use.
+</Interview>
+
+<Keylines>
+- one `Class` object per loaded class. it hands out `Field`, `Method` and `Constructor` objects.
+- `getX` is public and inherited. `getDeclaredX` is everything in this class, nothing inherited.
+- `invoke` boxes everything, checks nothing at compile time, and wraps thrown exceptions in `InvocationTargetException`.
+- since java 17, the JDK's privates are closed. `--add-opens` is the explicit, honest escape hatch.
+- a `static final` `Method` costs about a nanosecond. a lookup on every call costs fourteen.
+</Keylines>

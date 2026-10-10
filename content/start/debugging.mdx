@@ -1,0 +1,108 @@
+import { StackTraceReader } from "@/components/figures/start/StackTraceReader";
+import { DebuggerSim } from "@/components/figures/start/DebuggerSim";
+
+<InShort>
+a **stack trace** is a list of calls, newest first: the top line is where things broke, the bottom is where it all started, and the line to fix is usually the **first one that's yours**. a **debugger** lets you pause the program on a **breakpoint**, look at every variable, and walk forward one line at a time.
+</InShort>
+
+## the picture
+
+your program printed the wrong number, or crashed with forty lines of red text. kinda scary the first time. here's the thing: both are evidence, not punishment.
+
+a stack trace is the program's last words: "i was in this method, which was called by that one, which was called by that one". a debugger is a pause button with an x-ray: freeze the program mid-run and look inside every frame on the [call stack](/learn/basics/call-stack-and-recursion).
+
+## reading a stack trace
+
+<Figure wide caption={<>hover or tap any line. both traces are real, from jdk 25. the <C k="dead">red</C> lines name what went wrong, the full-strength lines are your code, the faint ones are the JDK's.</>}>
+<StackTraceReader />
+</Figure>
+
+the reading order that works almost every time:
+
+1. **the headline.** exception type plus message. the message is often the whole answer.
+2. **the top frame.** where it was thrown: `Class.method(File.java:line)`.
+3. **the first frame that's yours.** skip the `java.base/...` lines, the JDK is very rarely the bug.
+4. **`Caused by:`** if there is one, scroll down. the last `Caused by` is the original problem, everything above it is wrapping.
+
+then ask the question the trace can't answer: *why* was `email` null? in the first trace, the crash is in `domainOf`, but the cause is in `main`, three frames down: someone asked about a user that doesn't exist.
+
+<Gotcha title="catch (Exception e) {}">
+the one thing worse than a stack trace is no stack trace. an empty catch block swallows the exception and the program carries on with broken data, and you find out three steps later with no clue where it started. if you catch something, handle it, or rethrow it with the original as the cause: `throw new IllegalArgumentException("bad port: " + s, e)`. that `e` at the end is what gives you the `Caused by:` section. more in [exceptions](/learn/core-api/exceptions).
+</Gotcha>
+
+<Deep title='why the null message sometimes says "<local1>"'>
+the helpful null messages (java 14, [JEP 358](https://openjdk.org/jeps/358)) name the variable that was null, but only if the class file remembers local variable names. `javac` drops them unless you pass `-g`. the same program, compiled both ways:
+
+```bash
+$ javac Main.java && java Main
+Exception in thread "main" java.lang.NullPointerException: Cannot invoke "String.indexOf(int)" because "<local1>" is null
+
+$ javac -g Main.java && java Main
+Exception in thread "main" java.lang.NullPointerException: Cannot invoke "String.indexOf(int)" because "email" is null
+```
+
+maven, gradle and IDEs compile with debug info by default, so in a real project you get the names. fields and method results are named either way (`because "Main.name" is null`, `because the return value of "java.util.Map.get(Object)" is null`), since those names are in the class file anyway.
+</Deep>
+
+## a debugger
+
+the program below should print 2.5 (the average of 1, 2, 3 and 4). it prints <C k="dead">1.5</C>. you could stare at it. or you could watch it run.
+
+<Figure wide caption={<>press <strong>debug</strong>: the program runs until it hits the breakpoint on line 5. press <strong>resume</strong> to go round the loop again and watch <code>i</code>. click any line number to add or remove a <C k="meta">breakpoint</C>; click a frame to see that method's variables. the execution is a real recording from the JVM.</>}>
+<DebuggerSim />
+</Figure>
+
+see it? `i` goes 1, 2, 3 and then the loop ends. it never reaches 4, because the condition is `i < n` instead of `i <= n`. `total` comes out as 6 instead of 10. that's an off-by-one, the most common bug there is, and the debugger found it in four clicks.
+
+<Defs>
+<dt>breakpoint</dt><dd>"pause here". the program runs at full speed until some thread is about to run that line.</dd>
+<dt>resume</dt><dd>run until the next breakpoint (or the end).</dd>
+<dt>step over</dt><dd>run the current line, including any methods it calls, and stop at the next line of <em>this</em> method.</dd>
+<dt>step into</dt><dd>if the current line calls a method, go inside it and stop at its first line.</dd>
+<dt>step out</dt><dd>finish the current method and stop back in the caller, right after the call.</dd>
+<dt>frames</dt><dd>the call stack while paused. pick an older frame to see the caller's variables at the moment it made the call.</dd>
+</Defs>
+
+<Quiz question={<>you're paused on line 11, <code>int sum = sumTo(n);</code>. you suspect <code>sumTo</code>. which button gets you inside it?</>} options={["step over", "step into", "step out", "resume"]} answer={1}>
+<Explain>
+step into. step over would run all of `sumTo` and stop on line 12 with `sum` already set to 6. that's useful too: step over first to see *that* a call returns the wrong value, then restart and step into it to see *why*.
+</Explain>
+</Quiz>
+
+## how it works underneath
+
+a debugger isn't magic, and it isn't part of your IDE. the JVM itself can be paused and inspected, and it speaks a protocol for exactly that.
+
+<Figure caption="hover a stage. the IDE and the JVM are separate processes talking over a socket, which is why you can debug a program running on another machine (or in a container) the same way.">
+<Flow
+  stages={[
+    { label: "your IDE", sub: "the buttons", note: "IntelliJ, VS Code, or jdb in a terminal. they all speak the same protocol." },
+    { label: "JDI", sub: "java API", note: "the java debug interface: a java library for 'set breakpoint', 'list frames', 'read variable'. the tracer that recorded the run above is a small JDI program." },
+    { label: "JDWP", sub: "wire protocol", note: "java debug wire protocol: those requests, as bytes on a socket." },
+    { label: "JVM", sub: "jdwp agent", note: "started with -agentlib:jdwp, the JVM listens, pauses threads, and reports what's in each frame." },
+  ]}
+/>
+</Figure>
+
+to debug a program you didn't start from your IDE, start it with the agent and attach to the port:
+
+```bash
+$ java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005 Main.java
+Listening for transport dt_socket at address: 5005
+```
+
+`suspend=y` makes it wait for a debugger before running `main`. then "attach to remote JVM" in your IDE, port 5005. `address=5005` only listens on localhost; `address=*:5005` listens on every network interface, which is what you'd need inside a container and exactly what you never want in production: anyone who can reach that port can run code in your JVM.
+
+and yes, `System.out.println("here: " + x)` is a legit debugging tool. it's fast for one question. the debugger wins when you don't know which question to ask yet.
+
+<Interview q="you get a stack trace in production. walk me through it.">
+headline first: exception type and message (for an NPE on java 14+, the message names what was null). then the top frame for where it was thrown, then down to the first frame in our own code, which is usually where the fix goes. if there's a `Caused by:`, the deepest one is the root cause. then the part the trace can't tell you: why that value was bad. that means looking at the caller frames and the input, and reproducing it locally under a debugger with a breakpoint just before the line that blew up.
+</Interview>
+
+<Keylines>
+- a stack trace is the call stack at the moment of the crash, newest call on top.
+- read: headline → top frame → first frame that's yours → the last `Caused by:`.
+- never swallow exceptions. wrap them with the original as the cause.
+- breakpoint to pause, step over to stay in this method, step into to follow a call, step out to go back up.
+- the debugger talks to the JVM over JDWP. same tool, local or remote.
+</Keylines>

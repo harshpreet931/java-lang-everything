@@ -1,0 +1,121 @@
+import { StwTimeline } from "@/components/figures/gc/StwTimeline";
+
+<InShort>
+**Serial** and **Parallel** are the stop-the-world collectors: freeze every app thread, collect, let them go. both are generational (copy the young gen, mark-compact the old gen). Serial does the work on **one** GC thread, Parallel splits it across **many**.
+
+no concurrent phases means no barriers to speak of and the least overhead of any collector. the price: every pause grows with your live data.
+</InShort>
+
+## the picture
+
+think of a pit stop. every car on the track (every app thread) pulls in and waits. Serial is one mechanic doing all four tyres. Parallel is a crew. nobody races while the crew works, but a crew gets the cars back out a lot sooner, and the race (your program) finishes earlier.
+
+<Figure wide caption={<>switch between serial and parallel, then change the thread count. the <C k="meta">GC threads</C> only ever work while every app thread is stopped. the pause lengths are real medians from the program below; the <C k="hot">tick</C> shows when the same amount of app work is finished.</>}>
+<StwTimeline />
+</Figure>
+
+see the diminishing returns? one thread to two nearly halves the pause. four to eight still helps. eight to eleven does nothing: the young gen in this run only has a couple of milliseconds of copying in it, and splitting a small job across more threads adds coordination (handing out work, stealing it back, agreeing that everyone's done). meanwhile the CPU time keeps going up. that's [Amdahl's law](/learn/concurrency/fork-join) wearing a GC costume.
+
+the numbers come from this toy service, run three times per setting with a fixed 200 MB young gen on jdk 25 (14 cores):
+
+```java title="Service.java" run
+import java.util.*;
+
+// a toy service: every request makes short-lived garbage,
+// and a cache keeps the last 20,000 results alive for a while.
+public class Service {
+    static final Map<Integer, byte[]> cache = new LinkedHashMap<>(16, 0.75f, true) {
+        protected boolean removeEldestEntry(Map.Entry<Integer, byte[]> e) { return size() > 20_000; }
+    };
+
+    public static void main(String[] args) {
+        Random rnd = new Random(42);
+        long sum = 0;
+        for (int req = 0; req < 3_000_000; req++) {
+            String body = ("request " + req + " ").repeat(8);       // garbage in microseconds
+            sum += body.length();
+            cache.put(rnd.nextInt(100_000), new byte[2048]);       // lives until evicted
+            if (req % 400_000 == 0) sum += new byte[4 << 20].length; // a 4 MB buffer
+        }
+        System.out.println(sum);
+    }
+}
+```
+
+```bash
+java -XX:+UseSerialGC   -Xms512m -Xmx512m -Xmn200m -Xlog:gc Service.java
+java -XX:+UseParallelGC -XX:ParallelGCThreads=4 -XX:-UseAdaptiveSizePolicy \
+     -Xms512m -Xmx512m -Xmn200m -Xlog:gc Service.java
+```
+
+## how everyone stops
+
+a stop-the-world pause starts with a **safepoint**. the JVM sets a flag, and every running thread checks it at its next poll (on method returns and loop back-edges), parks itself, and waits. only when the last thread has arrived does the GC start. that waiting is **time to safepoint**, and one thread stuck in a long loop without a poll delays everybody. it shows up in your latency but not in the GC's own pause number. the full story is in [safepoints](/learn/jvm/safepoints).
+
+then the collector runs exactly the algorithms from [how GC works](/learn/gc/gc-fundamentals). a young GC copies eden and the survivors. a full GC is a mark-compact, and Parallel's log even names the passes:
+
+```text title="-Xlog:gc* with Parallel, one full GC" nolines
+GC(3) Pause Full (Allocation Failure)
+GC(3) Marking Phase 0.908ms
+GC(3) Summary Phase 0.017ms
+GC(3) Forward 0.665ms
+GC(3) Adjust Pointers 0.531ms
+GC(3) Compaction Phase 0.922ms
+GC(3) PSYoungGen: 76256K(76288K)->0K(76288K) Eden: 65536K(65536K)->0K(65536K) From: 10720K(10752K)->0K(10752K)
+GC(3) ParOldGen: 135758K(175104K)->51402K(174592K)
+GC(3) Pause Full (Allocation Failure) 207M->50M(245M) 3.367ms
+```
+
+mark, work out forwarding addresses ("Forward"), rewrite every pointer ("Adjust Pointers"), slide ("Compaction"). the same three passes as the mark-compact figure, now across 11 threads.
+
+## serial: one thread, almost no overhead
+
+Serial is the simplest collector in the JDK and the smallest. its bookkeeping is a card table and not much else. with a 256 MB heap on an idle program, here's what each collector allocated for its own data structures (native memory tracking, jdk 25):
+
+<Figure caption="committed memory in the NMT 'GC' category, -Xms256m -Xmx256m, same idle program. the GC's own memory, on top of the heap. a lot of Parallel's and G1's is per-GC-thread work queues, so it grows with the core count.">
+<Bars
+  unit="MB"
+  data={[
+    { label: "Serial", value: 0.8, tone: "live" },
+    { label: "Parallel", value: 37.9 },
+    { label: "G1", value: 59.6 },
+  ]}
+/>
+</Figure>
+
+until java 27, the JVM picked Serial by itself on small machines (one CPU, or less than 1792 MB of memory), which in practice meant a lot of small containers. java 27 made G1 the default everywhere (JEP 523), since G1's footprint is now close enough. Serial is still there and still good: `-XX:+UseSerialGC`.
+
+## parallel: the throughput collector
+
+Parallel (sometimes called the throughput collector) was the default in java 8. it has no pause goal unless you give it one. what it optimizes for is the fraction of time spent in GC: `-XX:GCTimeRatio=99` means "at most 1 in 100". its adaptive size policy keeps resizing the young and old gens to hit that. if you'd rather bound the pauses, `-XX:MaxGCPauseMillis=<ms>` makes it shrink the young gen to keep pauses short, at the cost of collecting more often.
+
+java 9 replaced it as the default with [G1](/learn/gc/g1), which trades a little throughput for pauses that don't grow with the heap. but for work where nobody is waiting on a single request, Parallel is often still the fastest collector you can pick.
+
+<Quiz question="a 32 GB heap with 20 GB of long-lived data, an API with a 100 ms latency budget. why is Parallel a bad fit?" options={["it can't handle heaps that big", "a full GC has to mark-compact 20 GB with every thread stopped", "it uses too many threads"]} answer={1}>
+<Explain>
+every collection in Parallel is stop-the-world, and an old-gen collection has to mark and move the live data. with 20 GB live that takes seconds, not milliseconds, even on 11 threads. Parallel handles big heaps fine for throughput; it's the pause that breaks your budget. that's the job G1, ZGC and Shenandoah were built for.
+</Explain>
+</Quiz>
+
+## when they're still the right call
+
+- **batch jobs, ETL, builds, offline analytics.** nobody cares about one pause, only total runtime. Parallel's low overhead wins.
+- **tiny containers and CLI tools.** one or two cores, a few hundred MB of heap. Serial's pauses are short because the heap is small, and it doesn't spend memory on structures it can't use.
+- **short-lived JVMs.** a process that runs for two seconds and does three young GCs doesn't need a concurrent collector.
+- **you measured.** the right collector is the one whose log looks best under your real load. [reading GC logs](/learn/gc/reading-gc-logs) shows how.
+
+<Gotcha title="GC threads in a container">
+`ParallelGCThreads` defaults to the number of CPUs the JVM sees (up to 8, then 5/8 of the rest: 14 cores gave 11 threads here). since java 10 the JVM reads container CPU limits, so a container limited to 2 CPUs gets 2 GC threads. but if the limit isn't visible (some CPU-share setups), a JVM in a tiny container can think it owns a 64-core host and spin up dozens of GC threads that fight over two real CPUs. check with `-XX:+PrintFlagsFinal`, and pin it with `-XX:ActiveProcessorCount=<n>` or `-XX:ParallelGCThreads=<n>` if it's wrong. more in [the JVM in containers](/learn/performance/jvm-in-containers).
+</Gotcha>
+
+<Interview q="why would anyone still use the Serial collector?">
+because it's the cheapest one. no concurrent threads, almost no extra memory, the simplest barriers. on a single core, parallel GC threads have nothing to run on anyway, and on a small heap the pauses are short no matter what. so for small containers, CLI tools and short jobs, Serial gives the best throughput per byte and per core. it only becomes a problem when the live set gets big enough that a single-threaded full GC takes longer than your latency budget.
+</Interview>
+
+<Keylines>
+- Serial and Parallel stop every app thread for every collection, young and full.
+- both copy the young gen and mark-compact the old gen. Parallel just uses many threads.
+- more GC threads shorten pauses until there isn't enough work to split, then just burn CPU.
+- they have the lowest overhead of any collector: great for batch jobs, small heaps, short runs.
+- their pauses grow with the live set, so big heaps with latency budgets need G1, ZGC or Shenandoah.
+</Keylines>

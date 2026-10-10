@@ -1,0 +1,234 @@
+import { DefensiveCopy } from "@/components/figures/oop/DefensiveCopy";
+
+export const finalList = {
+  frames: [{ name: "main", locals: {} }],
+  heap: {
+    cls: { type: "class Fin", tag: "static fields", fields: { "final NAMES": { ref: "al" } } },
+    al: { type: "ArrayList<String>", items: ['"ada"', '"duke"'], tag: "not final, not frozen" },
+  },
+};
+
+export const views = {
+  frames: [{ name: "main", locals: { list: { ref: "al" }, view: { ref: "uv" }, copy: { ref: "im" } } }],
+  heap: {
+    al: { type: "ArrayList<String>", items: ['"a"', '"b"', '"c"'] },
+    uv: { type: "Collections$UnmodifiableRandomAccessList", fields: { list: { ref: "al" } }, tag: "a view" },
+    im: { type: "ImmutableCollections$List12", items: ['"a"', '"b"'], tag: "a snapshot" },
+  },
+};
+
+<InShort>
+an **immutable** object can't change after it's built. making one takes more than `final`: `final` freezes the **reference**, not the object it points at. the recipe is no setters, `private final` fields, a class nobody can subclass, and **defensive copies** of anything mutable that comes in or goes out. records get you most of the way, but they're only **shallowly** immutable.
+</InShort>
+
+## the picture
+
+a printed receipt versus a whiteboard. you can hand a receipt to anyone, photocopy it, file it, and it'll say the same thing forever. a whiteboard you share is a whiteboard someone else can erase.
+
+the trap is a receipt that *refers* to a whiteboard. "total: see board 3". the receipt itself never changes, and yet what it says does.
+
+## final isn't immutable
+
+`final` on a field (or a variable) means the slot can't be reassigned. the object it points at is another matter.
+
+<Figure caption={<>the <code>final</code> slot is locked: it will always point at this list. the list itself is an ordinary <code>ArrayList</code>, and <code>NAMES.add(...)</code> changes it just fine.</>}>
+<Memory frames={finalList.frames} heap={finalList.heap} />
+</Figure>
+
+```java title="Fin.java"
+import java.util.*;
+
+public class Fin {
+    static final List<String> NAMES = new ArrayList<>();
+
+    public static void main(String[] args) {
+        NAMES.add("ada");             // fine: changes the list
+        NAMES.add("duke");
+        NAMES = new ArrayList<>();    // [!code error]
+    }
+}
+```
+
+`error: cannot assign a value to static final variable NAMES`. the arrow is frozen, the list isn't. (a `public static final` array is the worst version of this: anyone can overwrite its elements.)
+
+## the aliasing bug
+
+here's the classic, from effective java item 50. a `Period` with two `java.util.Date`s (which are mutable), `private final` fields, a check in the constructor, no setters. looks immutable. isn't.
+
+<Figure wide caption={<>run both attacks with no copies and watch the <C k="dead">Period break</C> while its fields stay final. the trick is the shared <C k="ref">arrows</C>: the caller and the Period point at the same Date. turn on copies in the constructor, then in the getter: you need both.</>}>
+<DefensiveCopy />
+</Figure>
+
+```java title="Period.java" run output="true\ntrue"
+import java.util.Date;
+
+public final class Period {
+    private final Date start;
+    private final Date end;
+
+    public Period(Date start, Date end) {
+        if (start.compareTo(end) > 0) throw new IllegalArgumentException("start after end");
+        this.start = start;
+        this.end = end;
+    }
+
+    public Date start() { return start; }
+    public Date end() { return end; }
+
+    public static void main(String[] args) {
+        Date start = new Date(1_000_000_000_000L);
+        Date end = new Date(2_000_000_000_000L);
+        Period p = new Period(start, end);
+        end.setTime(0);                        // attack 1: keep the argument, mutate it
+        System.out.println(p.end().before(p.start()));
+        p.start().setTime(5_000_000_000_000L); // attack 2: mutate what the getter returned
+        System.out.println(p.start().after(p.end()));
+    }
+}
+```
+
+two `true`s: the constructor's check passed, and the period ended up running backwards anyway. the fix copies on the way in *and* on the way out:
+
+```java title="Safe.java" run output="false\nfalse" {8-11,15-16}
+import java.util.Date;
+
+public final class Safe {
+    private final Date start;
+    private final Date end;
+
+    public Safe(Date start, Date end) {
+        this.start = new Date(start.getTime());   // copy first,
+        this.end = new Date(end.getTime());
+        if (this.start.compareTo(this.end) > 0)   // then check the copies
+            throw new IllegalArgumentException("start after end");
+    }
+
+    public Date start() { return new Date(start.getTime()); }
+    public Date end() { return new Date(end.getTime()); }
+
+    public static void main(String[] args) {
+        Date start = new Date(1_000_000_000_000L);
+        Date end = new Date(2_000_000_000_000L);
+        Safe p = new Safe(start, end);
+        end.setTime(0);
+        System.out.println(p.end().before(p.start()));
+        p.start().setTime(5_000_000_000_000L);
+        System.out.println(p.start().after(p.end()));
+    }
+}
+```
+
+notice the order: copy *first*, validate the copies. validate the originals and another thread can change them between your check and your copy (a time-of-check/time-of-use bug). and the real modern fix is to not use `Date` at all: `java.time.Instant` and `LocalDate` are immutable, so there's nothing to copy. see [dates and time](/learn/core-api/date-and-time).
+
+## unmodifiable is not immutable
+
+`Collections.unmodifiableList(list)` doesn't copy anything. it's a read-only *view*: a wrapper holding a reference to your list, which throws on `add`. whoever still holds the original list can change it, and the view shows every change. `List.copyOf` takes a real snapshot.
+
+<Figure caption={<>the view is a wrapper with an <C k="ref">arrow</C> to the same <code>ArrayList</code> you can still change. the copy is its own object. class names are the real ones on jdk 25.</>}>
+<Memory frames={views.frames} heap={views.heap} />
+</Figure>
+
+```java title="Views.java" run output="[a, b, c] [a, b]\nview.add: UnsupportedOperationException"
+import java.util.*;
+
+public class Views {
+    public static void main(String[] args) {
+        List<String> list = new ArrayList<>(List.of("a", "b"));
+        List<String> view = Collections.unmodifiableList(list);
+        List<String> copy = List.copyOf(list);
+        list.add("c");
+        System.out.println(view + " " + copy);
+        try {
+            view.add("d");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("view.add: " + e.getClass().getSimpleName());
+        }
+    }
+}
+```
+
+more in [immutable collections](/learn/collections/immutable-collections).
+
+## records are shallowly immutable
+
+a record's fields are `private final` and there are no setters. but a component that's a mutable object is still that same mutable object:
+
+<Predict options={["[ada] [ada]", "[ada, mallory] [ada]", "[ada, mallory] [ada, mallory]", "compile error"]} answer={1}>
+```java
+record Team(String name, List<String> members) {}
+
+record SafeTeam(String name, List<String> members) {
+    SafeTeam {
+        members = List.copyOf(members);
+    }
+}
+
+List<String> people = new ArrayList<>(List.of("ada"));
+Team t = new Team("core", people);
+SafeTeam s = new SafeTeam("core", people);
+people.add("mallory");
+IO.println(t.members() + " " + s.members());
+```
+<Explain>
+`Team` stores the caller's list itself, so mallory shows up in the team. `SafeTeam`'s compact constructor replaces the argument with an immutable copy before the field is assigned, so it's sealed at `[ada]`. (and `t.members().add("eve")` would work too, while `s.members().add(...)` throws.)
+</Explain>
+</Predict>
+
+```java title="Rec.java" run output="[ada, mallory] [ada]\nTeam[name=core, members=[ada, mallory, eve]]"
+import java.util.*;
+
+record Team(String name, List<String> members) {}
+
+record SafeTeam(String name, List<String> members) {
+    SafeTeam {
+        members = List.copyOf(members);   // compact constructor: defensive copy
+    }
+}
+
+public class Rec {
+    public static void main(String[] args) {
+        List<String> people = new ArrayList<>(List.of("ada"));
+        Team t = new Team("core", people);
+        SafeTeam s = new SafeTeam("core", people);
+        people.add("mallory");
+        System.out.println(t.members() + " " + s.members());
+        t.members().add("eve");
+        System.out.println(t);
+    }
+}
+```
+
+## the recipe
+
+1. **no mutators.** no setters, no methods that change state.
+2. **make the class `final`** (or give it only private constructors and static factories), so a subclass can't add mutable state or override methods to lie.
+3. **all fields `private final`.** private so nobody reaches in, final so even you can't reassign them, and so the [memory model](/learn/concurrency/java-memory-model) guarantees other threads see them fully initialized.
+4. **defensive copies** of mutable inputs (in the constructor) and mutable outputs (in getters). or better, only use immutable component types.
+5. **don't leak `this`** from the constructor (no registering listeners, no starting threads), so nobody sees the object half-built.
+
+"modifying" an immutable object means making a new one: `String.toUpperCase()`, `BigDecimal.add()`, `LocalDate.plusDays()` all return fresh objects and leave the original alone.
+
+## why bother
+
+- **thread-safe for free.** no locks, no races: nothing changes, so there's nothing to coordinate.
+- **safe map keys and set elements.** the hash can't change under the collection (see [the vanishing key](/learn/oop/object-methods)).
+- **shareable and cacheable.** the [string pool](/learn/deep-dives/string-pool) and the [integer cache](/learn/deep-dives/integer-cache) only work because strings and Integers can't change.
+- **failure atomic.** an operation that throws halfway can't leave the object in a weird state, because there's no state to mess up.
+
+the cost is allocation: every "change" is a new object. usually fine (young-generation garbage is cheap, see [generational GC](/learn/gc/generational-gc)); in a hot loop, a mutable companion like `StringBuilder` does the building and an immutable value comes out the end.
+
+<Effective item="17 & 50" title="minimize mutability, make defensive copies when needed">
+classes should be immutable unless there's a good reason to make them mutable, and if a class can't be immutable, limit its mutability as much as possible. when a class has mutable components it got from or hands to clients, copy them defensively, copy before validating, and don't use `clone` to copy a parameter whose type could be subclassed by an attacker.
+</Effective>
+
+<Interview q="how do you make a class immutable in java?">
+final class (or private constructors), all fields private and final, no setters, and defensive copies of any mutable objects on the way in and out (copy before validating). don't let `this` escape during construction. then point out that `final` alone only freezes the reference, that `Collections.unmodifiableList` is a view and not a copy, and that records are only shallowly immutable unless their components are immutable too (`List.copyOf` in a compact constructor fixes that).
+</Interview>
+
+<Keylines>
+- `final` freezes the reference, not the object.
+- immutable = no mutators, final class, private final fields, defensive copies.
+- copy mutable inputs in the constructor and mutable outputs in getters. copy, then validate.
+- unmodifiable views show changes to the original. `List.copyOf` doesn't.
+- records are shallowly immutable. their components decide the rest.
+</Keylines>

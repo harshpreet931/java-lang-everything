@@ -1,0 +1,352 @@
+export const before = {
+  file: "Main.java",
+  source: `class Person {
+    final String name;
+    final int age;
+
+    Person(String name, int age) {
+        this.name = name;
+        this.age = age;
+        show();
+    }
+
+    void show() { IO.println(name + ", " + age); }
+}
+
+class Employee extends Person {
+    final String officeId;
+
+    Employee(String name, int age, String officeId) {
+        if (age < 18) throw new IllegalArgumentException();
+        this.officeId = officeId;
+        super(name, age);
+    }
+
+    @Override
+    void show() { IO.println(name + ", office " + officeId); }
+}
+
+void main() {
+    new Employee("ada", 36, "CAM-FORA");
+}`,
+  steps: [
+    { line: 28, frames: [{ name: "main", locals: {} }], heap: {}, note: "main is about to build an Employee." },
+    {
+      line: 18,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: null, age: 0, officeId: null }, state: "new" }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      note: "new allocates the object with every field zeroed, then runs Employee's constructor. this is the prologue: everything before super(...). first, validate.",
+    },
+    {
+      line: 19,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: null, age: 0, officeId: null } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      note: "36 passes. the prologue can't read fields or call methods on this, but it can assign a field of its own class that has no initializer.",
+    },
+    {
+      line: 20,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: null, age: 0, officeId: { ref: "o" } } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      changed: ["officeId"],
+      note: "officeId is set before a single line of Person runs.",
+    },
+    {
+      line: 6,
+      frames: [
+        { name: "main", locals: {} },
+        { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } },
+        { name: "Person.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36 } },
+      ],
+      heap: { e: { type: "Employee", fields: { name: null, age: 0, officeId: { ref: "o" } } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      note: "super(name, age) runs Person's constructor on the same object (and Person's implicit super() runs Object's first).",
+    },
+    {
+      line: 8,
+      frames: [
+        { name: "main", locals: {} },
+        { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } },
+        { name: "Person.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36 } },
+      ],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      changed: ["name", "age"],
+      note: "Person sets its fields, then calls show(). show is overridable, and this object is an Employee.",
+    },
+    {
+      line: 24,
+      frames: [
+        { name: "main", locals: {} },
+        { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } },
+        { name: "Person.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36 } },
+        { name: "Employee.show", locals: { this: { ref: "e" } } },
+      ],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      stdout: "ada, office CAM-FORA\n",
+      note: "dynamic dispatch picks Employee.show, in the middle of Person's constructor. officeId is already set, so it prints the real office.",
+    },
+    {
+      line: 21,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      stdout: "ada, office CAM-FORA\n",
+      note: "back in Employee. its epilogue (everything after super) is empty. the object is complete.",
+    },
+    {
+      line: 29,
+      frames: [{ name: "main", locals: {} }],
+      heap: {},
+      stdout: "ada, office CAM-FORA\n",
+      note: "no code ever saw a half-built officeId.",
+    },
+  ],
+};
+
+export const after = {
+  file: "Main.java",
+  source: `class Person {
+    final String name;
+    final int age;
+
+    Person(String name, int age) {
+        this.name = name;
+        this.age = age;
+        show();
+    }
+
+    void show() { IO.println(name + ", " + age); }
+}
+
+class Employee extends Person {
+    final String officeId;
+
+    Employee(String name, int age, String officeId) {
+        if (age < 18) throw new IllegalArgumentException();
+        super(name, age);
+        this.officeId = officeId;
+    }
+
+    @Override
+    void show() { IO.println(name + ", office " + officeId); }
+}
+
+void main() {
+    new Employee("ada", 36, "CAM-FORA");
+}`,
+  steps: [
+    { line: 28, frames: [{ name: "main", locals: {} }], heap: {}, note: "same program, with the field assigned after super(...), which was the only legal place before java 25." },
+    {
+      line: 18,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: null, age: 0, officeId: null }, state: "new" }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      note: "the object starts zeroed: officeId is null.",
+    },
+    {
+      line: 19,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: null, age: 0, officeId: null } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      note: "straight to super(name, age). officeId is still null.",
+    },
+    {
+      line: 8,
+      frames: [
+        { name: "main", locals: {} },
+        { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } },
+        { name: "Person.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36 } },
+      ],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: null } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      changed: ["name", "age"],
+      note: "Person sets name and age, then calls show().",
+    },
+    {
+      line: 24,
+      frames: [
+        { name: "main", locals: {} },
+        { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } },
+        { name: "Person.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36 } },
+        { name: "Employee.show", locals: { this: { ref: "e" } } },
+      ],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: null } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      stdout: "ada, office null\n",
+      note: "Employee.show runs before Employee's constructor got to its own field. it prints the default: null. and officeId is final, so it was null and will be something else: a final field seen with two values.",
+    },
+    {
+      line: 20,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: null } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      stdout: "ada, office null\n",
+      note: "only now does Employee's epilogue assign officeId.",
+    },
+    {
+      line: 21,
+      frames: [{ name: "main", locals: {} }, { name: "Employee.<init>", locals: { this: { ref: "e" }, name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }],
+      heap: { e: { type: "Employee", fields: { name: { ref: "n" }, age: 36, officeId: { ref: "o" } } }, n: { type: "String", value: '"ada"' }, o: { type: "String", value: '"CAM-FORA"' } },
+      stdout: "ada, office null\n",
+      changed: ["officeId"],
+      note: "too late. the output already says null.",
+    },
+  ],
+};
+
+<InShort>
+since java 25 (JEP 513), a constructor can run statements **before** `super(...)` or `this(...)`. that part is the **prologue**: it can validate arguments, compute values for the superclass constructor, and assign its own fields, all before any superclass code runs.
+
+what it still can't do is touch the object: no reading fields, no calling instance methods, no passing `this` anywhere. the object isn't built yet, and the compiler makes sure nobody finds out.
+</InShort>
+
+## the picture
+
+you know the rule "`super(...)` must be the first statement in a constructor"? it was there from java 1.0, and it made simple things awkward. want to check an argument before handing it to the superclass? you couldn't, so you wrote a static helper and called it inside the `super(...)` arguments, or you let the superclass do work with a bad value and threw afterwards.
+
+think of building a house. the old rule said the foundation crew (the superclass) has to start before you've even looked at the plans: you can't check the plot, can't measure anything, just pour concrete and hope. the new rule lets you survey the land and check the permits first, as long as you don't try to move furniture into a house that doesn't exist yet.
+
+<Compare>
+<Bad label="before java 25: logic squeezed into a static helper">
+```java
+class Employee extends Person {
+    Employee(String rawName) {
+        super(clean(rawName));
+    }
+
+    private static String clean(String raw) {
+        if (raw == null || raw.isBlank())
+            throw new IllegalArgumentException("no name");
+        return raw.strip().toUpperCase();
+    }
+}
+```
+</Bad>
+<Good label="java 25: just write it in order">
+```java
+class Employee extends Person {
+    Employee(String rawName) {
+        if (rawName == null || rawName.isBlank())
+            throw new IllegalArgumentException("no name");
+        String name = rawName.strip().toUpperCase();
+        super(name);
+    }
+}
+```
+</Good>
+</Compare>
+
+same behaviour, but the right side reads top to bottom: check, prepare, construct. compile the right side with `--release 24` and javac 25 refuses:
+
+```text
+error: flexible constructors is not supported in -source 24
+```
+
+## prologue and epilogue
+
+with statements allowed before `super(...)`, a constructor has two halves. the prologue runs before the superclass is constructed, the epilogue after. across a hierarchy that gives a neat order: prologues run from the subclass **up**, epilogues from the top **down**:
+
+<Figure caption={<>three classes, <code>C extends B extends A</code>, each printing in its prologue and its epilogue. this is the real output of <code>new C()</code> on jdk 25.</>}>
+<Flow stages={[
+  { label: "C prologue", sub: "1st", note: "new C() starts in C's constructor. everything before super() runs first." },
+  { label: "B prologue", sub: "2nd", note: "C's super() enters B's constructor, whose prologue runs next." },
+  { label: "A prologue", sub: "3rd", note: "then A's. after A's super(), Object's constructor runs." },
+  { label: "A epilogue", sub: "4th", note: "now the object exists as an A. epilogues may use this freely." },
+  { label: "B epilogue", sub: "5th", note: "back down to B." },
+  { label: "C epilogue", sub: "6th", note: "and finally C. new C() returns." },
+]} />
+</Figure>
+
+## the real win: fields set before the superclass looks
+
+here's the bug that the old rule made unavoidable. `Person`'s constructor calls `show()`, an overridable method, and `Employee` overrides it to print a field of its own. switch between the two orders:
+
+<Figure wide caption={<>step through both tabs. the old order prints <C k="dead">null</C> for a final field that is never null once construction finishes. assigning the field in the prologue fixes it. the output matches jdk 25.</>}>
+<Tabs>
+<Tab label="java 25: assign before super(...)">
+<MemoryStepper trace={before} />
+</Tab>
+<Tab label="the old order: assign after super(...)">
+<MemoryStepper trace={after} />
+</Tab>
+</Tabs>
+</Figure>
+
+```java title="Main.java" run output="ada, office CAM-FORA\nException in thread \"main\" java.lang.IllegalArgumentException: too young: 16"
+class Person {
+    final String name;
+    final int age;
+
+    Person(String name, int age) {
+        this.name = name;
+        this.age = age;
+        show();                              // an overridable call: careful
+    }
+
+    void show() { IO.println(name + ", " + age); }
+}
+
+class Employee extends Person {
+    final String officeId;
+
+    Employee(String name, int age, String officeId) {
+        if (age < 18) throw new IllegalArgumentException("too young: " + age);
+        this.officeId = officeId;            // before super(...): new in java 25
+        super(name, age);
+    }
+
+    @Override
+    void show() { IO.println(name + ", office " + officeId); }
+}
+
+void main() {
+    new Employee("ada", 36, "CAM-FORA");
+    new Employee("bob", 16, "CAM-FORA");
+}
+```
+
+the second `new` throws before `Person` ever runs. fail fast, no half-built object, no wasted superclass work. (calling overridable methods from a constructor is still a bad idea, [effective java item 19](/learn/effective-java/classes-and-interfaces) says so for good reasons. but now the subclass can at least defend itself.)
+
+## what the prologue still can't do
+
+the object is allocated (memory, zeroed fields) but not constructed, so anything that could observe it is off limits. every one of these is rejected by javac 25:
+
+| in the prologue | javac 25 says |
+| --- | --- |
+| read a field: `int y = a;` | `cannot reference a before supertype constructor has been called` |
+| call an instance method: `hashCode();` | `cannot reference hashCode() before supertype constructor has been called` |
+| use `this`: `System.out.println(this);` | `cannot reference this before supertype constructor has been called` |
+| call a superclass method: `super.m();` | `cannot reference super before supertype constructor has been called` |
+| assign a field that has an initializer | `cannot assign initialized field 's' before supertype constructor has been called` |
+| `return;` | `'return' not allowed before explicit constructor invocation` |
+| `if (b) super(1); else super(2);` | `explicit constructor invocation not allowed here` |
+
+what *is* allowed: locals, arguments, static methods and fields, throwing, and assigning your own fields that don't have an initializer. a lambda in the prologue counts as touching `this` if it mentions a field, so that's out too.
+
+<Predict options={["Range[lo=3, hi=7]", "error: code before this()", "error: extra constructor"]} answer={0}>
+```java
+record Range(int lo, int hi) {
+    Range(String text) {                     // "3-7"
+        String[] parts = text.strip().split("-");
+        this(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]));
+    }
+}
+
+IO.println(new Range(" 3-7 "));
+```
+<Explain>
+records can have extra (non-canonical) constructors, and they must delegate with `this(...)`. the prologue rule covers `this(...)` as well as `super(...)`, so the parsing can happen first, in plain local variables. before java 25 you'd have split the string twice inside the `this(...)` arguments, or written a static factory. checked on jdk 25: `Range[lo=3, hi=7]`.
+</Explain>
+</Predict>
+
+<Gotcha title="the prologue runs before the superclass checks anything">
+moving validation into the prologue changes *when* it runs: before the superclass constructor, not after. usually that's what you want (fail before doing work). but if the superclass constructor itself validated or normalized an argument you're now inspecting, your check sees the raw value. and the other way round: a field you set in the prologue is visible to superclass code, which is exactly the point, so set it to something valid.
+</Gotcha>
+
+<Deep title="why the old rule existed, and why it could go">
+the JVM never required `super(...)` to come first. its rules are looser: on every code path the superclass constructor is called exactly once (and not inside a `try`), and until then the half-built object is off limits except for assigning fields. javac itself has always relied on that, for instance to store the hidden outer-instance field of an inner class before calling `super`. the "first statement" rule was the language being stricter than the JVM, because "first" was easy to check and guaranteed "not used". JEP 513 swaps it for the real requirement, checked in what the spec now calls an *early construction context*, and needed no JVM change at all. it previewed three times: as "statements before super(...)" (JEP 447, java 22), as "flexible constructor bodies" with early field assignment (JEP 482, 23, and JEP 492, 24), and went final unchanged in java 25.
+</Deep>
+
+<Interview q="what are flexible constructor bodies?">
+java 25 lets a constructor have statements before its explicit `super(...)` or `this(...)` call. that prologue can validate arguments, compute the arguments for the superclass constructor, and initialize the class's own fields (ones without initializers), but it can't use the instance: no field reads, no instance method calls, no `this`, no `super.x`. prologues run bottom-up through the hierarchy, epilogues top-down. the practical wins are fail-fast validation without static helpers, and setting subclass fields before a superclass constructor can call an overridden method and see their default values. JEP 513, final in 25.
+</Interview>
+
+<Keylines>
+- java 25: statements may come before `super(...)` or `this(...)`.
+- the prologue validates, prepares arguments, and may assign its own uninitialized fields.
+- it can't touch the object: no field reads, no instance methods, no `this`, no `super.x`.
+- prologues run subclass-first, epilogues superclass-first.
+- set fields in the prologue and an overridden method called by the superclass sees real values.
+</Keylines>

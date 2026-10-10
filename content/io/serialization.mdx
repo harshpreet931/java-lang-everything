@@ -1,0 +1,286 @@
+import { SerialStream } from "@/components/figures/io/SerialStream";
+
+<InShort>
+implement **`Serializable`**, hand the object to an `ObjectOutputStream`, and java writes the whole object graph as bytes: class descriptors, field values, and **back-references** so shared objects are written once. reading it back builds the objects **without running their constructors**.
+
+that last part is why everyone says don't. use JSON or protobuf for data. if you're stuck with it, serialize **records** and install a **filter**.
+</InShort>
+
+## the picture
+
+you know how saving a game freezes the whole world, every character and every item, and loading it puts everything back exactly as it was? java serialization is that, for objects. "save" walks every reference from the object you hand it. "load" rebuilds the world, including which things pointed at which.
+
+the catch: whoever made the save file decides what world you load. you don't get to ask the characters if they agree with their stats.
+
+<Figure wide caption={<>step through the real 91 bytes java writes for a <code>Line</code> whose two fields point at <em>one</em> <code>Point</code>. every new thing gets a <C k="hot">handle</C>; the second time something shows up, the stream just writes a <C k="ref">back-reference</C> to it.</>}>
+<SerialStream />
+</Figure>
+
+here's the program behind those bytes. note the classic `public class Main`: the classes have to be top-level (more on why below).
+
+```java title="Main.java" run output="91 bytes\nac ed 00 05 73 72 00 04 4c 69 6e 65 b8 25 02 dd 83 0d 08 c6 02 00 02 4c 00 01 61 74 00 07 4c 50 6f 69 6e 74 3b 4c 00 01 62 71 00 7e 00 01 78 70 73 72 00 05 50 6f 69 6e 74 a8 09 4b 80 51 f2 94 15 02 00 02 49 00 01 78 49 00 01 79 78 70 00 00 00 01 00 00 00 02 71 00 7e 00 04\ncopy.a == copy.b: true\ncopy.a == p: false"
+import java.io.*;
+import java.util.HexFormat;
+
+class Point implements Serializable {
+    int x, y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+}
+
+class Line implements Serializable {
+    Point a, b;
+    Line(Point a, Point b) { this.a = a; this.b = b; }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Point p = new Point(1, 2);
+        Line line = new Line(p, p);          // one Point, two references
+
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) {
+            out.writeObject(line);
+        }
+        byte[] raw = bytes.toByteArray();
+        System.out.println(raw.length + " bytes");
+        System.out.println(HexFormat.ofDelimiter(" ").formatHex(raw));
+
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(raw))) {
+            Line copy = (Line) in.readObject();
+            System.out.println("copy.a == copy.b: " + (copy.a == copy.b));
+            System.out.println("copy.a == p: " + (copy.a == p));
+        }
+    }
+}
+```
+
+the shape survives (`copy.a == copy.b`), the identity doesn't (`copy.a != p`, it's a brand new object). that's a deep copy, which is why "serialize and deserialize" is an old, slow trick for cloning a graph.
+
+## what gets written
+
+| thing | written? |
+| --- | --- |
+| instance fields, any visibility | yes, recursively. every referenced object must be `Serializable` too |
+| `transient` fields | no. they come back as `0`, `false` or `null` |
+| `static` fields | no. they belong to the class, not the object |
+| the class's bytecode | no, just its name and a version stamp. the reader needs the class on its classpath |
+| a non-serializable superclass | no. its no-arg constructor runs on read, and must exist |
+
+```java title="Main.java" run output="ada null 0"
+import java.io.*;
+
+class Session implements Serializable {
+    String user = "ada";
+    transient String password = "hunter2";
+    transient int hits = 42;
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) {
+            out.writeObject(new Session());
+        }
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+            Session s = (Session) in.readObject();
+            System.out.println(s.user + " " + s.password + " " + s.hits);
+        }
+    }
+}
+```
+
+`hits` came back as `0`, not `42`. the field initializers didn't run either, because no constructor ran: the object was allocated and its fields filled straight from the stream.
+
+<Gotcha title="inner classes drag their outer object along">
+a non-static inner class has a hidden reference to its enclosing instance, so serializing it tries to serialize the outer object too. in a compact source file (`void main()`), every class you declare is an inner class of the implicit one, so this:
+
+```java title="Main.java"
+record Point(int x, int y) implements Serializable {}   // fine: records are static
+class Line implements Serializable { Point a, b; }      // inner class of Main
+```
+
+fails with `java.io.NotSerializableException: Main` the moment you write a `Line`. make it `static class`, a record, or top-level. ([effective java](/learn/effective-java/serialization) says the same for inner classes in general.)
+</Gotcha>
+
+## serialVersionUID
+
+every class descriptor carries a 64-bit version stamp. if the class doesn't declare `private static final long serialVersionUID`, java computes one by hashing the class's shape: its name, interfaces, fields, constructors and methods. add a method, and the hash changes.
+
+on read, the stamp in the stream must equal the stamp of the class on the reader's classpath. here's what happens when it doesn't (faked by flipping one bit of the stored UID, since a program can't easily hold two versions of one class):
+
+```java title="Main.java" run output="Point; local class incompatible: stream classdesc serialVersionUID = -6338451986044513003, local class serialVersionUID = -6338451986044513259"
+import java.io.*;
+
+class Point implements Serializable {
+    int x, y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) {
+            out.writeObject(new Point(1, 2));
+        }
+        byte[] raw = bytes.toByteArray();
+        raw[19] ^= 1;   // bytes 12 to 19 are Point's serialVersionUID. change one bit
+
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(raw))) {
+            in.readObject();
+        } catch (InvalidClassException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+}
+```
+
+so the rule: **if you serialize a class, declare the UID yourself** (`serialver` in the JDK prints the current computed one). then compatible changes (adding a field, which old streams just leave at its default) keep working, and you only bump it when you mean to break old data.
+
+<Predict options={["true", "false", "it throws"]} answer={0}>
+```java
+// after the round trip in the first example:
+Line copy = (Line) in.readObject();
+IO.println(copy.a == copy.b);
+```
+<Explain>
+the writer saw the same `Point` twice and wrote the second one as a back-reference (`71 00 7e 00 04`). the reader resolves that handle to the object it already built. so the copy has the same shape as the original: one `Point`, two fields pointing at it. the whole graph is copied, sharing and cycles included.
+</Explain>
+</Predict>
+
+## why everyone says don't
+
+because deserialization is a constructor you don't control. your class's constructor checks its invariants, but `readObject` never calls it. whoever wrote the bytes picks every field value.
+
+<Compare>
+<Bad label="a class: the check never runs">
+```java title="Main.java" run output="lo=9 hi=5"
+import java.io.*;
+
+class Range implements Serializable {
+    final int lo, hi;
+    Range(int lo, int hi) {
+        if (lo > hi) throw new IllegalArgumentException(lo + " > " + hi);
+        this.lo = lo;
+        this.hi = hi;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) {
+            out.writeObject(new Range(1, 5));
+        }
+        byte[] raw = bytes.toByteArray();
+        raw[raw.length - 1] = 9;   // fields go in name order: hi, lo
+
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(raw))) {
+            Range r = (Range) in.readObject();
+            System.out.println("lo=" + r.lo + " hi=" + r.hi);
+        }
+    }
+}
+```
+</Bad>
+<Good label="a record: the canonical constructor runs">
+```java title="Main.java" run output="InvalidObjectException: 9 > 5"
+import java.io.*;
+
+record Range(int lo, int hi) implements Serializable {
+    Range {
+        if (lo > hi) throw new IllegalArgumentException(lo + " > " + hi);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) {
+            out.writeObject(new Range(1, 5));
+        }
+        byte[] raw = bytes.toByteArray();
+        raw[raw.length - 1] = 9;
+
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(raw))) {
+            System.out.println(in.readObject());
+        } catch (InvalidObjectException e) {
+            System.out.println(e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
+}
+```
+</Good>
+</Compare>
+
+a `Range` with `lo=9, hi=5` exists, and its constructor swears that's impossible. that's the mild version. the bad version is the **gadget chain**: classes already on your classpath whose `readObject`, `hashCode` or `equals` do something powerful. the attacker doesn't send code, just a graph of *your* objects, wired so that deserializing it calls one method that calls another, until something ends up running a command.
+
+<Figure caption={<>hover a stage. this is the shape of the real 2015 attacks: the payload is only data, but deserializing it <C k="dead">runs code</C> that was already sitting in a library jar on the server.</>}>
+<Flow
+  stages={[
+    { label: "attacker's bytes", sub: "a crafted graph", note: "a HashMap whose key is an object from a library on your classpath, with fields set to whatever the attacker likes." },
+    { label: "readObject()", sub: "your server", note: "the server deserializes a cookie, an RMI call, a cache entry, a message. it never meant to accept arbitrary classes." },
+    { label: "HashMap.readObject", sub: "rebuilds the map", note: "to put each key back, it calls key.hashCode(). on an object the attacker chose." },
+    { label: "gadget → gadget", sub: "library code", note: "that hashCode calls a method, which calls a transformer, which uses reflection to call another method..." },
+    { label: "Runtime.exec", sub: "game over", note: "the chain ends somewhere that runs a command. no bug in your code, just the wrong classes being reachable." },
+  ]}
+/>
+</Figure>
+
+in 2015 this went from theory to every-big-app-server: a chain through Apache Commons Collections, which sat on the classpath of WebLogic, WebSphere, JBoss and Jenkins, turned any endpoint that deserialized untrusted input into remote code execution. Oracle's own chief architect has since called serialization a mistake and estimated it was involved in at least a third of java's vulnerabilities.
+
+## if you must: filters
+
+<Since v={9} /> [JEP 290](https://openjdk.org/jeps/290) added **deserialization filters**: an allowlist (or blocklist, plus limits on depth, array size and object count) checked *before* any class is loaded or instantiated. [JEP 415](https://openjdk.org/jeps/415) <Since v={17} /> made them per-context with a filter factory. allowlist exactly the classes you expect and reject everything else:
+
+```java title="Main.java" run output="Range[lo=1, hi=5]\nfilter status: REJECTED"
+import java.io.*;
+import java.util.HashMap;
+
+record Range(int lo, int hi) implements Serializable {}
+
+public class Main {
+    static Object read(byte[] raw) throws Exception {
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(raw))) {
+            in.setObjectInputFilter(ObjectInputFilter.Config.createFilter("Range;!*"));
+            return in.readObject();
+        }
+    }
+
+    static byte[] write(Object o) throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) { out.writeObject(o); }
+        return bytes.toByteArray();
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println(read(write(new Range(1, 5))));
+        try {
+            read(write(new HashMap<>()));
+        } catch (InvalidClassException e) {
+            System.out.println(e.getMessage());
+        }
+    }
+}
+```
+
+`Range;!*` reads as "allow `Range`, reject everything else". the same pattern can be set JVM-wide with `-Djdk.serialFilter=...`, without touching code. the `HashMap` never got created, so its `readObject` never ran.
+
+<Effective item="85-90" title="the serialization chapter">
+the book's last chapter is six items on this, and they boil down to: prefer anything else (JSON, protobuf) for new code (85). implementing `Serializable` freezes your private fields into a public format forever (86). if you must, design the serialized form on purpose (87), write `readObject` as defensively as a public constructor (88), use an enum rather than `readResolve` for singletons (89), and consider a serialization proxy (90): a tiny private record-like class that is what actually gets serialized, rebuilt through the real constructor on the way back. records give you most of item 90 for free. more in [effective java: serialization](/learn/effective-java/serialization).
+</Effective>
+
+<Deep title="what records change, exactly">
+a record's serialized form is just its component values, by name. on read, the stream's values are matched to components by name and passed to the **canonical constructor**, so the compact constructor's checks run (that's the `InvalidObjectException` above). `writeObject`, `readObject` and `serialPersistentFields` are ignored for records, there's no field-by-field reflection into the object, and a record's `serialVersionUID` is `0L` unless you declare one, with the matching check waived. it's a much smaller, safer surface. it doesn't make deserializing untrusted data safe on its own, because the stream can still name *other* classes: you still want a filter.
+</Deep>
+
+<Interview q="what is serialVersionUID for, and what happens if you don't declare it?">
+it's the version stamp written into the stream for each class. on read it must match the class on the reader's side, or you get `InvalidClassException: local class incompatible`. if you don't declare one, java computes it from a hash of the class's structure, so harmless changes (adding a method) or even a different compiler can change it and break old data. declare it explicitly. bonus point: deserialization bypasses constructors, so it's a security boundary. use filters (JEP 290/415), prefer records, and don't deserialize untrusted bytes at all if you can avoid it.
+</Interview>
+
+<Keylines>
+- serialization writes the whole reachable graph: descriptors, field values, back-references for shared objects.
+- `transient` and `static` fields aren't written. constructors don't run on read (records are the exception).
+- declare `serialVersionUID`, or any change to the class can orphan old data.
+- deserializing untrusted bytes runs code from your own classpath. that's the gadget-chain problem.
+- if you can't avoid it: records, plus an allowlist filter. for new formats, use JSON or protobuf.
+</Keylines>

@@ -1,0 +1,306 @@
+import { MockVsSpy } from "@/components/figures/tooling/MockVsSpy";
+
+export const lifecycle = {
+  file: "LifecycleTest.java",
+  source: `import org.junit.jupiter.api.*;
+
+class LifecycleTest {
+    static int instances = 0;
+
+    LifecycleTest() {
+        instances++;
+        log(" new instance #" + instances);
+    }
+
+    @BeforeAll
+    static void beforeAll() {
+        log("@BeforeAll");
+    }
+
+    @BeforeEach
+    void beforeEach() {
+        log("  @BeforeEach");
+    }
+
+    @Test
+    void first() {
+        log("   @Test first");
+    }
+
+    @Test
+    void second() {
+        log("   @Test second");
+    }
+
+    @AfterEach
+    void afterEach() {
+        log("  @AfterEach");
+    }
+
+    @AfterAll
+    static void afterAll() {
+        log("@AfterAll");
+    }
+
+    static void log(String s) { System.out.println(s); }
+}`,
+  steps: [
+    {
+      line: 13,
+      frames: [{ name: "junit engine", locals: {} }, { name: "beforeAll()", locals: {} }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 0 }, tag: "statics" } },
+      stdout: "@BeforeAll\n",
+      note: "no instance exists yet. that's why @BeforeAll has to be static: there's no object to call it on.",
+    },
+    {
+      line: 8,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t1" } } }, { name: "LifecycleTest()", locals: { this: { ref: "t1" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 1 }, tag: "statics" }, t1: { type: "LifecycleTest", fields: {}, state: "new" } },
+      stdout: "@BeforeAll\n new instance #1\n",
+      note: "for the first test method, junit makes a brand new instance of the class.",
+    },
+    {
+      line: 18,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t1" } } }, { name: "beforeEach()", locals: { this: { ref: "t1" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 1 }, tag: "statics" }, t1: { type: "LifecycleTest", fields: {} } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n",
+      note: "@BeforeEach runs on that instance. this is where you set up fresh fixtures.",
+    },
+    {
+      line: 28,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t1" } } }, { name: "second()", locals: { this: { ref: "t1" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 1 }, tag: "statics" }, t1: { type: "LifecycleTest", fields: {} } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n",
+      note: "second() ran before first(). junit's default order is fixed, but it isn't the order you wrote the methods in.",
+    },
+    {
+      line: 33,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t1" } } }, { name: "afterEach()", locals: { this: { ref: "t1" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 1 }, tag: "statics" }, t1: { type: "LifecycleTest", fields: {} } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n  @AfterEach\n",
+      note: "@AfterEach cleans up after it, even if the test failed.",
+    },
+    {
+      line: 8,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t2" } } }, { name: "LifecycleTest()", locals: { this: { ref: "t2" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 2 }, tag: "statics" }, t2: { type: "LifecycleTest", fields: {}, state: "new" } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n  @AfterEach\n new instance #2\n",
+      note: "the next test gets a NEW instance. the old one is garbage. instance fields can't leak from one test into another.",
+    },
+    {
+      line: 18,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t2" } } }, { name: "beforeEach()", locals: { this: { ref: "t2" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 2 }, tag: "statics" }, t2: { type: "LifecycleTest", fields: {} } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n  @AfterEach\n new instance #2\n  @BeforeEach\n",
+      note: "@BeforeEach again, on the new instance.",
+    },
+    {
+      line: 23,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t2" } } }, { name: "first()", locals: { this: { ref: "t2" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 2 }, tag: "statics" }, t2: { type: "LifecycleTest", fields: {} } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n  @AfterEach\n new instance #2\n  @BeforeEach\n   @Test first\n",
+      note: "then first().",
+    },
+    {
+      line: 33,
+      frames: [{ name: "junit engine", locals: { test: { ref: "t2" } } }, { name: "afterEach()", locals: { this: { ref: "t2" } } }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 2 }, tag: "statics" }, t2: { type: "LifecycleTest", fields: {} } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n  @AfterEach\n new instance #2\n  @BeforeEach\n   @Test first\n  @AfterEach\n",
+      note: "@AfterEach.",
+    },
+    {
+      line: 38,
+      frames: [{ name: "junit engine", locals: {} }, { name: "afterAll()", locals: {} }],
+      heap: { cls: { type: "LifecycleTest.class", fields: { instances: 2 }, tag: "statics" } },
+      stdout: "@BeforeAll\n new instance #1\n  @BeforeEach\n   @Test second\n  @AfterEach\n new instance #2\n  @BeforeEach\n   @Test first\n  @AfterEach\n@AfterAll\n",
+      note: "@AfterAll, once, static again. note that static state (instances = 2) DID survive across tests. statics are shared, so keep tests away from them.",
+    },
+  ],
+};
+
+<InShort>
+a test is a method with **`@Test`** on it. **JUnit** finds those methods, runs each one on a **fresh instance** of the test class, and reports what passed. JUnit 6 (september 2025) is the current major version and needs java 17+.
+
+around it sits a small standard toolkit: **AssertJ** for assertions that explain themselves, **Mockito** for fake collaborators, and **Testcontainers** for a real database in docker instead of a fake one.
+</InShort>
+
+## the picture
+
+a test is a tiny experiment. set up a clean lab bench, do one thing, check the result, throw the bench away. the "throw it away" part is the important one: if experiments share a bench, the second one can pass (or fail) because of crumbs the first one left. junit enforces the clean bench for you, by building a new object for every single test method.
+
+## a first test
+
+the code under test, and its test. it's not runnable on this page (junit isn't part of the JDK), so here's what really happened when i ran it with the junit 6.1.3 console launcher on jdk 25.
+
+```java title="Prices.java"
+class Prices {
+    static long withTax(long cents) { return cents + cents * 18 / 100; }
+}
+```
+
+```java title="PricesTest.java"
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+
+class PricesTest {
+
+    @ParameterizedTest(name = "{0} cents → {1}")
+    @CsvSource({
+        "100,  118",
+        "0,    0",
+        "1000, 1180",
+        "99,   117",
+    })
+    void addsTax(long cents, long expected) {
+        assertEquals(expected, Prices.withTax(cents));
+    }
+}
+```
+
+```text title="java -jar junit-platform-console-standalone-6.1.3.jar execute ... --details=tree"
+├─ JUnit Jupiter ✔
+│  └─ PricesTest ✔
+│     └─ addsTax(long, long) ✔
+│        ├─ "100" cents → "118" ✔
+│        ├─ "0" cents → "0" ✔
+│        ├─ "1000" cents → "1180" ✔
+│        └─ "99" cents → "117" ✘ expected: <117> but was: <116>
+```
+
+one method, four tests, and the fourth found a real bug: `99 * 18 / 100` is `17.82`, and integer division throws away the `.82`. a single hand-picked example (100 cents) would have passed forever. that's the case for **parameterized tests**: the cases are data, so adding the nasty ones costs one line each. `@CsvSource`, `@ValueSource`, `@EnumSource` and `@MethodSource` (any method returning a stream of arguments) cover almost everything.
+
+## the lifecycle
+
+here's the order junit calls things in. the output is real, and it has a surprise in it.
+
+<Figure wide caption={<>step through it. a <C k="hot">new instance</C> for each test method, and the old one becomes <C k="dead">garbage</C>. statics live on the class, so they're shared by every test.</>}>
+<MemoryStepper trace={lifecycle} />
+</Figure>
+
+<Predict options={["first, then second", "second, then first", "it changes between runs"]} answer={1}>
+```java
+@Test void first()  { System.out.println("first"); }
+@Test void second() { System.out.println("second"); }
+```
+<Explain>
+on junit 6.1.3 this class ran `second` before `first`, every time. the default method order is deterministic (so builds are reproducible) but intentionally *not* source order, so tests that secretly depend on each other break early. if order truly matters (it usually shouldn't), say so with `@TestMethodOrder(MethodOrderer.OrderAnnotation.class)` and `@Order(1)`.
+</Explain>
+</Predict>
+
+## assertions that explain themselves
+
+when a test fails, the message is the whole bug report. junit's own `assertEquals` tells you the two values. AssertJ's fluent assertions (`assertThat(x).something()`) tell you *how* they differ. here a method meant to return the first three items alphabetically accidentally sorts in reverse. real output from both:
+
+<Compare>
+<Bad label="assertEquals on a list">
+```java
+assertEquals(List.of("apple", "fig", "kiwi"), got);
+```
+```text
+expected: <[apple, fig, kiwi]> but was: <[pear, kiwi, fig]>
+```
+</Bad>
+<Good label="AssertJ">
+```java
+assertThat(got).containsExactly("apple", "fig", "kiwi");
+```
+```text
+Expecting actual:
+  ["pear", "kiwi", "fig"]
+to contain exactly (and in same order):
+  ["apple", "fig", "kiwi"]
+but some elements were not found:
+  ["apple"]
+and others were not expected:
+  ["pear"]
+```
+</Good>
+</Compare>
+
+AssertJ has assertions for almost everything (`containsEntry`, `isCloseTo`, `hasMessageContaining`, `extracting(...)`), and your IDE autocompletes them after `assertThat(x).`, which is most of why people like it.
+
+## mocks and spies
+
+some code talks to things you don't want in a unit test: a payment API, a clock, an email server. a **mock** is a fake stand-in you create in one line, tell what to return, and check afterwards. Mockito is the standard one.
+
+<Figure caption={<>step through the same calls on a mock and a spy. every result is real output from mockito 5.24. the <C k="dead">red</C> one is the classic spy trap.</>} wide>
+<MockVsSpy />
+</Figure>
+
+<Defs>
+<dt>mock</dt><dd>a fake with no real behaviour. unstubbed methods return defaults. use it for collaborators: the thing your code *calls*.</dd>
+<dt>spy</dt><dd>a real object, wrapped. real methods run unless you stub them. use it rarely: usually a smell that a class does too much.</dd>
+<dt>stub</dt><dd>`when(x.call()).thenReturn(v)`: "if asked this, answer that".</dd>
+<dt>verify</dt><dd>`verify(x).call()`: "check my code actually asked this".</dd>
+</Defs>
+
+<Gotcha title="mockito warns on jdk 21+">
+the first test that creates a mock printed this:
+
+```text
+Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (.../byte-buddy-agent-1.17.7.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+```
+
+mockito needs a java agent to mock final classes and static methods, and it used to load itself into the running JVM. java 21 started warning about agents loaded that way ([JEP 451](https://openjdk.org/jeps/451)). the fix is to pass mockito as a real agent: `-javaagent:path/to/mockito-core.jar` in your surefire `argLine` or gradle `jvmArgs`. it's in mockito's docs, and it's a two-line change before it becomes a hard error.
+</Gotcha>
+
+## real dependencies: testcontainers
+
+mocking a database is a trap: your fake happily accepts SQL the real postgres would reject. **Testcontainers** starts a real postgres (or kafka, or redis) in docker for the duration of a test, hands you its address, and deletes it afterwards. this is the 2.0 API (artifact `testcontainers-postgresql`, class in `org.testcontainers.postgresql`):
+
+```java title="UserRepositoryTest.java"
+import org.junit.jupiter.api.Test;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
+@Testcontainers
+class UserRepositoryTest {
+
+    @Container
+    static PostgreSQLContainer db = new PostgreSQLContainer("postgres:17-alpine");
+
+    @Test
+    void savesAndLoads() throws Exception {
+        try (var conn = java.sql.DriverManager.getConnection(
+                db.getJdbcUrl(), db.getUsername(), db.getPassword())) {
+            // run real migrations, real queries, real constraints
+        }
+    }
+}
+```
+
+<Figure caption="hover a stage. a static @Container starts once for the whole class; an instance field one would start per test (slow).">
+<Flow
+  stages={[
+    { label: "@BeforeAll", sub: "testcontainers", note: "pulls the image if needed, starts the container, waits until postgres accepts connections." },
+    { label: "postgres:17", sub: "in docker", note: "a real database on a random free port, so parallel builds don't collide." },
+    { label: "your tests", sub: "jdbc url", note: "getJdbcUrl() points at the container. real SQL, real constraints, real transactions." },
+    { label: "@AfterAll", sub: "cleanup", note: "the container is stopped and removed. a sidecar (ryuk) removes it even if the JVM crashes." },
+  ]}
+/>
+</Figure>
+
+the trade: these tests take seconds instead of milliseconds and need docker on the build machine. that's why most suites are mostly fast unit tests with mocks, plus a smaller layer of these.
+
+<Deep title="what changed in junit 6">
+junit 6.0.0 shipped on september 30, 2025. the big moves: java 17 is the minimum (kotlin 2.2 for kotlin users), the platform, jupiter and vintage artifacts now share one version number (no more "platform 1.13 + jupiter 5.13"), and every module is annotated with JSpecify nullness annotations (more on those in [code quality](/learn/tooling/code-quality)). the vintage engine that runs junit 4 tests is deprecated, so a junit 4 suite should migrate rather than ride along. test code written for junit 5 mostly compiles unchanged: same `org.junit.jupiter.api` package, same annotations.
+</Deep>
+
+<Interview q="why does junit create a new instance of the test class for every test method?">
+isolation. instance fields are reset for every test, so one test can't leave state behind that makes another pass or fail. that's also why `@BeforeAll` and `@AfterAll` must be static: they run when no instance exists. bonus point: you can switch to one instance per class with `@TestInstance(Lifecycle.PER_CLASS)` (then `@BeforeAll` can be non-static), and static fields are always shared, so they're the place leaks come from.
+</Interview>
+
+<Keylines>
+- `@Test` methods, each on a fresh instance. statics are the only thing shared.
+- parameterized tests make the nasty cases cheap. the 99 cents case found the bug.
+- test order is fixed but not source order. tests shouldn't care.
+- AssertJ messages explain the diff. mocks fake collaborators, spies wrap real objects.
+- for databases, test against a real one in docker with Testcontainers.
+</Keylines>

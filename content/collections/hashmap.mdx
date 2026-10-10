@@ -1,0 +1,151 @@
+import { HashMapLab } from "@/components/figures/collections/HashMapLab";
+import { SpreadDemo } from "@/components/figures/collections/SpreadDemo";
+
+<InShort>
+a `HashMap` is an **array of buckets**. `put(key, value)` turns the key's `hashCode()` into an index, and the entry goes in that bucket. two keys in one bucket? a **collision**: they chain. more than 75% full? the array **doubles**.
+
+no searching, just arithmetic. that's why `get` and `put` are O(1) on average.
+</InShort>
+
+## the picture
+
+you know how `map.get(key)` is "instant" even with a million entries, while `list.contains(x)` crawls? the map isn't searching faster. it isn't searching at all.
+
+think of a wall of numbered pigeonholes (the table). when you hand over a parcel, the clerk doesn't look for a free hole. they compute the hole number from the name on the label (the hash), and put it there. to find it later, they compute the same number and look in exactly one hole. if two names compute to the same hole, the parcels just stack up in it (a chain), and the clerk checks each label in that one stack.
+
+<Figure wide caption={<>type any key and watch the bits turn into a bucket, live. <code>put</code> a few, then press <strong>fill until it resizes</strong> to see the 13th entry double the table and split every chain. <code>"Aa"</code> and <code>"BB"</code> collide on purpose. <strong>add a colliding key</strong> nine, ten, eleven times to see what a crowded bucket does. <C k="hot">amber</C> is what just changed, <C k="live">green</C> is what <code>get</code> found.</>}>
+<HashMapLab />
+</Figure>
+
+everything in that lab follows jdk 25's `HashMap.java` line for line. i checked it against the real thing: same table sizes after every put, same moment of treeification, same iteration order.
+
+## from key to bucket
+
+three steps, all visible in the lab's top panel:
+
+1. **`key.hashCode()`**: any `int`. for a `String` it's `s[0]·31^(n-1) + s[1]·31^(n-2) + ... + s[n-1]`, with int overflow. so `"Aa"` is `65·31 + 97 = 2112`.
+2. **spread**: `h ^ (h >>> 16)`. mixes the top 16 bits into the bottom 16.
+3. **index**: `hash & (n - 1)`. the table size `n` is always a power of two, so `n - 1` is a mask of ones, and this keeps the low bits. it's `hash mod n`, without a division and without ever going negative.
+
+```java title="Main.java" run output="3 0 5\n2112 2112"
+void main() {
+    Map<String, Integer> counts = new HashMap<>();
+    for (String w : "the cat and the hat and the bat".split(" ")) {
+        counts.merge(w, 1, Integer::sum);
+    }
+    IO.println(counts.get("the") + " " + counts.getOrDefault("dog", 0) + " " + counts.size());
+    IO.println("Aa".hashCode() + " " + "BB".hashCode());
+}
+```
+
+see that second line? two different strings, one hash code. `'A'` is one less than `'B'`, and `'a'` is 31 more than `'B'`, so the sums land on the same number. it's not a bug, it's arithmetic: there are 2³² possible hash codes and infinitely many strings. collisions are guaranteed, so the map has to handle them.
+
+### why the spread?
+
+the mask only looks at the low bits. if your keys' hash codes differ only in the high bits, they'd all pile into one bucket. the spread step is the cheap fix.
+
+<Figure caption={<>twelve <code>Integer</code> keys that are multiples of 65,536 (an <code>Integer</code>'s hash code is the int itself). flip between the raw hash and the spread one. <C k="dead">red</C> is a chain, <C k="live">green</C> is a key alone in its bucket. checked on jdk 25: the real <code>HashMap</code> puts them in buckets 0 to 11.</>}>
+<SpreadDemo />
+</Figure>
+
+contrived? a bit. but hash codes that only vary up top are real (think floats, or ids that step by a large power of two), and the spread costs one shift and one xor per call.
+
+## collisions, resizing and the 0.75 rule
+
+a bucket holds a chain of nodes. a new key goes on the end of its bucket's chain. a lookup computes the bucket, then walks that chain comparing `hash` first (cheap `int` compare) and `equals` only when the hashes match.
+
+chains stay short as long as the table stays roomy. so the map tracks a **threshold**: `capacity × load factor`, and the default load factor is 0.75. the moment `size` goes past it, the table doubles:
+
+| capacity | threshold | resizes on the |
+| --- | --- | --- |
+| 16 | 12 | 13th put |
+| 32 | 24 | 25th put |
+| 64 | 48 | 49th put |
+
+doubling has a neat property. since the new mask has exactly one more bit, every entry in bucket `j` either stays at `j` or moves to `j + oldCapacity`, decided by that single bit (`hash & oldCapacity`). so java splits each chain in two, keeping the order, without recomputing a single `hashCode()`. that's the amber flash in the lab.
+
+<Note title="presizing">
+know you'll store 100 entries? `new HashMap<>(100)` is a trap: it gives you 128 buckets with a threshold of 96, so it still resizes before you're done. `HashMap.newHashMap(100)` <Since v={19} /> does the load-factor math for you and allocates 256 up front. (both checked on jdk 25.)
+</Note>
+
+### when one bucket gets crowded
+
+if a bucket already holds 8 entries and you add another, the chain is asked to become a red-black tree (`TreeNode`s), so lookups in that bucket go from O(n) to O(log n). but only if the table has at least 64 buckets. smaller tables just resize instead, on the theory that the crowding is probably the table being too small. the lab shows exactly that: the 9th colliding key doubles 16 → 32, the 10th doubles 32 → 64, the 11th finally treeifies.
+
+with a decent `hashCode()`, this basically never happens (the comments in `HashMap.java` put the odds of 8 in one bucket, with random hash codes, at less than one in ten million). it's armour against bad or hostile hash codes. the whole story, with the tree, lives in [HashMap internals](/learn/deep-dives/hashmap-internals).
+
+<Predict options={["[pear, apple, fig, banana, kiwi]", "[apple, banana, fig, kiwi, pear]", "[banana, apple, pear, kiwi, fig]"]} answer={2}>
+```java
+Map<String, Integer> map = new HashMap<>();
+for (String k : List.of("pear", "apple", "fig", "banana", "kiwi")) map.put(k, k.length());
+IO.println(map.keySet());
+```
+<Explain>
+neither insertion order nor sorted. a `HashMap` iterates bucket by bucket, from index 0 up, so the order is whatever the hash codes dictate. it can also change completely when the table resizes. if you need insertion order, use [LinkedHashMap](/learn/collections/linkedhashmap-and-lru). sorted, [TreeMap](/learn/collections/treemap).
+</Explain>
+</Predict>
+
+## the deal you sign with your keys
+
+the map trusts two methods on your keys, and they have to agree (more in [the object methods](/learn/oop/object-methods)):
+
+- equal objects **must** have equal `hashCode()`s. break this and the map looks in the wrong bucket and never finds an entry that's right there.
+- `hashCode()` must not change while the key is in the map.
+
+<Gotcha title="mutating a key after putting it">
+```java title="Main.java" run output="null false 1"
+void main() {
+    List<String> key = new ArrayList<>(List.of("a"));
+    Map<List<String>, Integer> map = new HashMap<>();
+    map.put(key, 1);
+    key.add("b");
+    IO.println(map.get(key) + " " + map.containsKey(List.of("a")) + " " + map.size());
+}
+```
+the entry is still in there (`size` is 1), stored under the old hash. `get(key)` computes the *new* hash and looks in the wrong bucket. `List.of("a")` finds the right bucket but fails `equals`. the entry is unreachable but never collected: a leak with extra steps. use immutable keys: `String`, `Integer`, records of immutable fields.
+</Gotcha>
+
+<Effective item={11} title="always override hashCode when you override equals">
+if two objects are equal by your `equals`, a hash-based collection needs them to land in the same bucket, and only `hashCode` decides that. override one without the other and `HashMap`, `HashSet` and friends quietly break. for a value class, a record gets both right for free.
+</Effective>
+
+a few more things the map promises (or doesn't):
+
+- **one `null` key is fine.** it hashes to 0 and lives in bucket 0. `null` values are fine too, which is why `get` returning `null` is ambiguous: use `containsKey` or `getOrDefault`.
+- **iteration order is not specified** and can change after a resize. never depend on it.
+- **not thread-safe.** two threads putting at once can lose entries or corrupt a chain. use [`ConcurrentHashMap`](/learn/concurrency/concurrent-collections).
+
+<Deep title="why & (n - 1) and not Math.abs(h) % n">
+the mask is faster than `%`, but the real reason it's safer: it can never be negative. hand-rolled hash tables often do `Math.abs(key.hashCode()) % buckets`, and then this happens:
+
+```java title="Main.java" run output="-2147483648 -2147483648 -2 0"
+void main() {
+    int h = "polygenelubricants".hashCode();
+    IO.println(h + " " + Math.abs(h) + " " + Math.abs(h) % 31 + " " + (h & 15));
+}
+```
+
+that string's hash is exactly `Integer.MIN_VALUE`, and `Math.abs(Integer.MIN_VALUE)` is still `Integer.MIN_VALUE` (there's no positive version that fits in an int). so your bucket index is -2 and you get an `ArrayIndexOutOfBoundsException` once in a blue moon. `hash & (n - 1)` just keeps the low bits: always between 0 and n - 1.
+</Deep>
+
+## what everything costs
+
+| operation | average | worst case |
+| --- | --- | --- |
+| `put`, `get`, `remove`, `containsKey` | O(1) | O(log n) in a treeified bucket (O(n) if those keys aren't `Comparable`) |
+| `containsValue` | O(n) | O(n). values aren't hashed, it scans everything |
+| iteration | O(capacity + size) | a huge, mostly empty map is slow to iterate |
+| resize | O(n), amortized away | |
+
+<Interview q="how does HashMap work internally?">
+it's an array of buckets, length a power of two, allocated on the first put (16 by default). `put` computes `hashCode()`, spreads it with `h ^ (h >>> 16)`, and takes `hash & (n - 1)` as the index. collisions chain in a linked list, new entries at the tail. lookups compare the stored hash first, then `equals`. when size passes capacity × 0.75 the table doubles, and each chain splits between `j` and `j + oldCap` based on one bit of the hash. a bucket with more than 8 entries becomes a red-black tree if the table is at least 64 wide, otherwise the table resizes instead. average O(1), and equal keys must have equal hash codes or none of it works.
+</Interview>
+
+<Keylines>
+- a `HashMap` is an array. the hash picks the index, no searching.
+- index = `(h ^ (h >>> 16)) & (n - 1)`. n is always a power of two.
+- collisions chain. past 75% full, the table doubles and chains split in two.
+- more than 8 in one bucket, with a 64+ table: that bucket becomes a tree.
+- keys need consistent `equals` + `hashCode`, and must not change while inside.
+- iteration order is bucket order. if you care about order, use another map.
+</Keylines>

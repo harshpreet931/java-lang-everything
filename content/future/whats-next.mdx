@@ -1,0 +1,148 @@
+import { StatusBoard } from "@/components/figures/future/StatusBoard";
+
+export const board = [
+  { name: "value objects", jep: "JEP 401", status: "integrated", where: "jdk 28, preview", note: "valhalla's first big piece. see the valhalla chapter." },
+  { name: "strict field initialization in the JVM", jep: "JEP 539", status: "integrated", where: "jdk 28, preview", note: "the JVM rule value classes are built on." },
+  { name: "simple JSON API", jep: "JEP 540", status: "integrated", where: "jdk 28, incubator", note: "a small standard API for parsing and generating JSON, in the jdk.incubator.json module." },
+  { name: "ahead-of-time code compilation", jep: "JEP 544", status: "targeted", where: "jdk 28", note: "compiled code in the AOT cache. see the leyden chapter." },
+  { name: "PEM encodings of cryptographic objects", jep: "JEP 542", status: "targeted", where: "jdk 28, final", note: "read and write keys and certificates in the PEM text format with a standard API, after previews in 25, 26 and 27." },
+  { name: "Shenandoah: generational mode by default", jep: "JEP 535", status: "targeted", where: "jdk 28", note: "Shenandoah's generational mode becomes the default when you pick Shenandoah." },
+  { name: "deprecate the macOS/x64 port for removal", jep: "JEP 541", status: "targeted", where: "jdk 28", note: "intel macs: the port is deprecated, with removal planned for a later release." },
+  { name: "structured concurrency, final", jep: "JEP 543", status: "proposed", where: "jdk 28", note: "the jdk 27 API made final without changes. review ends october 13." },
+  { name: "faster startup and warmup with ZGC", jep: "JEP 545", status: "proposed", where: "jdk 28", note: "a tiny initial heap, aggressive growth, concurrent pre-touch, large pages. review ends october 14." },
+  { name: "adaptive heap sizing for ZGC", jep: "JEP 546", status: "proposed", where: "jdk 28", note: "ZGC adjusts the size of its heap based on the resources available, without manual tuning. review ends october 14." },
+  { name: "lazy constants, fourth preview", jep: "JEP 547", status: "candidate", where: "aimed at jdk 28", note: "a candidate that proposes re-previewing the jdk 27 API unchanged. not on the jdk 28 list yet." },
+  { name: "null-restricted and nullable types", jep: "draft 8303099", status: "draft", where: "not targeted", note: "String! and String? style nullness markers. a draft, last updated july 2025." },
+  { name: "final fields that are really final", jep: "JEP 500", status: "final", where: "java 26, warnings", note: "deep reflection that writes a final field warns since 26. a future release makes deny the default; no JEP for that step yet." },
+  { name: "CRaC", status: "exploring", where: "an OpenJDK research project", note: "checkpoint a warmed-up JVM, restore it in milliseconds. not in mainline OpenJDK; available in some vendors' builds, on linux." },
+];
+
+<InShort>
+the next release is **jdk 28**, due march 2027. as of october 10, 2026 its list has **value objects** (preview), a **simple JSON API** (incubator), **AOT code** for faster startup, and **structured concurrency** proposed as final. the next **LTS** is **jdk 29**, planned for september 2027.
+
+further out: **null-restricted types** (drafts), **final fields that can't be changed by reflection** (warnings since 26), and **CRaC** (checkpoint/restore, outside mainline). the chapter ends with how to follow all of it yourself, because this page will be out of date in six months.
+</InShort>
+
+## the picture
+
+you know how java used to change every few years in one big lump, and now there's a release every march and september? the six-month train means there's always a next release with a list of what's on board, and a pipeline of proposals behind it. reading that pipeline is a skill: knowing the difference between "targeted", "proposed" and "draft" tells you what you can plan around and what you can only watch.
+
+think of a train timetable plus a list of passengers with tickets. a JEP that's **targeted** has a ticket for a specific train. **proposed to target** is at the counter buying one. a **candidate** is in the station with no ticket yet. a **draft** is still deciding whether to travel.
+
+## how a feature gets on the train
+
+<Figure caption={<>the states a feature JEP moves through under the JEP 2.0 process. "preview" and "incubator" aren't states: they're how a feature ships, and a preview feature goes through this whole path once per preview round.</>}>
+<Flow
+  stages={[
+    { label: "draft", sub: "written, reviewed", note: "anyone can read it; nothing promised" },
+    { label: "candidate", sub: "on the JDK roadmap", note: "accepted as worth doing, no release yet" },
+    { label: "proposed to target", sub: "a release named", note: "a public review period starts" },
+    { label: "targeted", sub: "the release is set", note: "can still be dropped before rampdown" },
+    { label: "integrated", sub: "code is in", note: "in the early-access builds" },
+    { label: "delivered", sub: "the release ships", note: "closed / delivered" },
+  ]}
+/>
+</Figure>
+
+a few things trip people up: a JEP can be withdrawn at any point (string templates were, see [amber](/learn/future/amber)), targeted isn't the same as shipped, and a feature that previews four times has four JEPs, each one delivered. when a blog says "java 28 will have X", check which state X's JEP is actually in.
+
+## jdk 28, as of october 2026
+
+here's the jdk 28 list from its project page (last updated october 7), plus the main things behind it:
+
+<Figure wide caption={<>jdk 28's list and what's queued behind it, checked on openjdk.org (the jdk 28 project page and each JEP) on october 10, 2026. <C k="hot">amber</C> means it's in a JDK but still changing or not final yet, <C k="live">green</C> is final. click a row.</>}>
+<StatusBoard rows={board} open={2} />
+</Figure>
+
+the JDK hasn't posted jdk 28's rampdown schedule yet, but the cadence puts general availability in march 2027 (jdk 26 shipped on march 17, 2026, and jdk 27 on september 15). jdk 29, in september 2027, is planned to be the next LTS release, two years after 25 (more in [the release timeline](/learn/modern/release-timeline)).
+
+## a JSON API in the JDK
+
+the one that'll touch the most everyday code: java has never had a JSON parser in the JDK, so every project pulls in a library. [JEP 540](https://openjdk.org/jeps/540) adds a small one, as an incubator in jdk 28. it isn't trying to replace the big libraries (no data binding to your classes); it's for reading and writing JSON without a dependency:
+
+```java
+// jdk 28, --add-modules jdk.incubator.json (JEP 540, incubator). illustrative only.
+import jdk.incubator.json.*;
+
+JsonValue json = Json.parse("""
+    { "service" : "web_server", "id" : 3, "tags" : ["blue", "edge"] }
+    """);
+String service = json.get("service").asString();           // "web_server"
+int id = json.get("id").asInt();                           // 3
+String first = json.get("tags").get(0).asString();         // "blue"
+json.tryGet("owner").ifPresent(o -> IO.println(o));        // a member that might not be there
+```
+
+`JsonValue` is a sealed interface (`JsonObject`, `JsonArray`, `JsonString`, `JsonNumber`, `JsonBoolean`, `JsonNull`), so you can also `switch` over it with patterns. a missing member or a wrong type throws `JsonValueException` with a message that says what was expected.
+
+<Predict options={["the input, unchanged", '{"service":"web_server","id":3}', "{service=web_server, id=3}"]} answer={1} question="jdk 28, per JEP 540: what does this print?">
+```java
+JsonValue json = Json.parse("""
+  {
+    "service" : "web_server",
+    "id" : 3
+  }
+  """);
+IO.println(json.toString());
+```
+<Explain>
+`{"service":"web_server","id":3}`: `toString()` produces compact JSON, with all the whitespace from the input gone (this exact example and output are in JEP 540). for something readable there's `Json.toDisplayString(json, "  ")`. the third option is what a `Map` prints, which a `JsonObject` isn't.
+</Explain>
+</Predict>
+
+## final will mean final
+
+`final` fields can still be changed today, by deep reflection (`Field.setAccessible(true)` then `set`). serialization libraries and some frameworks rely on that, and it means the JVM can't fully trust `final`, which limits optimizations like treating a final field as a constant. [JEP 500](https://openjdk.org/jeps/500) (java 26) starts closing that door: such writes now print a warning, and a future release will make them fail unless you opt in with `--enable-final-field-mutation`. you can test your code against the future today on 26 or later:
+
+```bash
+# jdk 26+: make illegal final field writes throw now, instead of in some future release
+java --illegal-final-field-mutation=deny -jar app.jar
+```
+
+it's the same pattern as [JEP 472](/learn/future/panama-and-babylon) for native access: warn for a while, then require opt-in. if your app passes with `deny`, it's ready.
+
+## CRaC: snapshot a warm JVM
+
+**Coordinated Restore at Checkpoint** takes a different route to fast startup than [Leyden](/learn/future/leyden). instead of caching what a training run learned, it freezes the whole running process (heap, JIT-compiled code, threads) to disk once it's warm, and later restores it in milliseconds, already at peak speed.
+
+<Figure caption={<>CRaC's lifecycle. the "coordinated" part is the middle: the app is told before the checkpoint and after the restore, so it can close and reopen what can't be frozen.</>}>
+<Flow
+  stages={[
+    { label: "start + warm up", sub: "-XX:CRaCCheckpointTo=dir", note: "run until the JIT has done its work" },
+    { label: "beforeCheckpoint()", sub: "org.crac Resource", note: "close sockets, files, connection pools" },
+    { label: "checkpoint", sub: "jcmd <pid> JDK.checkpoint", note: "the process image goes to disk" },
+    { label: "restore", sub: "-XX:CRaCRestoreFrom=dir", note: "back in milliseconds, already warm" },
+    { label: "afterRestore()", sub: "reopen, re-read config", note: "and refresh anything time- or host-specific" },
+  ]}
+/>
+</Figure>
+
+the catch is the status. CRaC is an OpenJDK research project, not part of mainline OpenJDK, and there's no JEP. you get it from vendors that ship CRaC builds (Azul and BellSoft do), real checkpoints need linux (on macOS and windows, Azul's builds only simulate them, for testing your callbacks), and an image contains everything that was in memory, secrets included. Leyden ships in every JDK and gives up very little; CRaC restores faster but asks more of your app and your platform.
+
+## how to follow along
+
+this chapter is a snapshot of october 2026. here's how to check it yourself, which is what was done for every status on this page:
+
+- **openjdk.org/jeps/0** is the index of every JEP, with its current state. each JEP page has a status and, once targeted, a release.
+- **openjdk.org/projects/jdk/28** (and so on) lists exactly what's targeted to that release, and the schedule once it's posted.
+- **project pages** (valhalla, leyden, amber, loom, panama, babylon under openjdk.org/projects) list each project's JEPs, design notes and early-access builds.
+- **jdk.java.net/28** has early-access builds: download one and try the previews yourself, months before release.
+- **the jdk-dev mailing list** is where new candidates and "proposed to target" announcements go, each with a review deadline.
+- **inside.java**, run by Oracle's java team, collects the newscasts, articles and talks that explain what's coming.
+
+<Gotcha title="'java 28 will have X' is a claim about a JEP's state">
+until a release ships, its list can change: a proposed JEP can fail review, a targeted one can be dropped before rampdown, a preview can be withdrawn later. so when you read a roadmap (including this page), look for the JEP number and check its state yourself. and remember the difference between *shipping* and *being final*: value objects ship in jdk 28 as a preview, which is very different from being something your production code can rely on.
+</Gotcha>
+
+<Interview q="how do new features get into java, and how would you find out what's coming in the next release?">
+through JEPs: a proposal is drafted, becomes a candidate on the roadmap, is proposed to target a specific release (with a public review), targeted, integrated into the mainline, and delivered when the release ships. big features usually ship first as previews (needing --enable-preview) or incubator modules, and can change or be withdrawn before going final. releases come every six months, march and september, with an LTS every two years (25 now, 29 planned for september 2027). to see what's coming, look at the next release's page on openjdk.org (it lists every targeted JEP), the JEP index, project pages for longer-term work, and early-access builds on jdk.java.net to try features yourself.
+</Interview>
+
+<Keylines>
+- jdk 28 is due march 2027. its list (october 2026): value objects (preview), JSON (incubator), AOT code, PEM final, and structured concurrency proposed final.
+- jdk 29, september 2027, is planned to be the next LTS.
+- draft, candidate, proposed, targeted, integrated, delivered: only the last one is a promise.
+- JEP 500 warns about reflection writing final fields since 26. test with `--illegal-final-field-mutation=deny`.
+- CRaC restores a warm JVM in milliseconds, but it's vendor builds on linux, not mainline.
+- check openjdk.org yourself: every status here is a snapshot of october 2026 :)
+</Keylines>

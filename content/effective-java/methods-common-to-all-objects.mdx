@@ -1,0 +1,216 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { EqualsMatrix } from "@/components/figures/effective-java/EqualsMatrix";
+import { LostInBucket } from "@/components/figures/effective-java/LostInBucket";
+
+<InShort>
+every class inherits `equals`, `hashCode` and `toString` from `Object`, and every collection trusts them. override **equals** and you've signed a contract (five rules); break it and sets and lists quietly lie to you. override **hashCode** with it, always. and since java 16, a **record** writes all three correctly for you.
+</InShort>
+
+<Figure caption={<>items 10 to 14. <C k="hot">amber</C> marks what modern java changed, mostly thanks to records.</>}>
+<ItemMap
+  items={[
+    { n: 10, t: "equals has a contract, keep it", lens: "records, instanceof patterns" },
+    { n: 11, t: "equals and hashCode travel together", lens: "records" },
+    { n: 12, t: "give every class a useful toString", lens: "records" },
+    { n: 13, t: "stay away from clone", lens: "copy factories, List.copyOf" },
+    { n: 14, t: "natural orders: implement Comparable", lens: "Comparator.comparing chains" },
+  ]}
+/>
+</Figure>
+
+## equals and hashCode
+
+### item 10 · equals has a contract, keep it
+
+don't override `equals` at all if identity is what you mean (threads, streams, most services). override it for value-like classes, and then it must be:
+
+<Defs>
+<dt>reflexive</dt><dd>`x.equals(x)` is true.</dd>
+<dt>symmetric</dt><dd>`x.equals(y)` exactly when `y.equals(x)`.</dd>
+<dt>transitive</dt><dd>`x = y` and `y = z` means `x = z`.</dd>
+<dt>consistent</dt><dd>same answer every time, unless the objects change.</dd>
+<dt>non-null</dt><dd>`x.equals(null)` is false, never an exception.</dd>
+</Defs>
+
+the classic way to break it: extend a class that has `equals` and add a field that should matter. there's no way to write the subclass's `equals` that keeps every rule. try them all:
+
+<Figure wide caption={<>pick a strategy. the table is <code>row.equals(column)</code>, computed live. <C k="dead">red</C> cells break a rule. only composition survives.</>}>
+<EqualsMatrix />
+</Figure>
+
+the "strict" version even breaks collections, depending on which side of the call your object is on:
+
+```java title="Main.java" run output="true\nfalse"
+class Coin {
+    final int cents;
+    Coin(int cents) { this.cents = cents; }
+    @Override public boolean equals(Object o) {
+        return o instanceof Coin c && c.cents == cents;
+    }
+    @Override public int hashCode() { return Integer.hashCode(cents); }
+}
+
+class RareCoin extends Coin {
+    final int year;
+    RareCoin(int cents, int year) { super(cents); this.year = year; }
+    @Override public boolean equals(Object o) {
+        return o instanceof RareCoin r && r.cents == cents && r.year == year;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        Coin plain = new Coin(50);
+        Coin rare = new RareCoin(50, 1933);
+        System.out.println(java.util.List.of(rare).contains(plain));  // plain.equals(rare)
+        System.out.println(java.util.List.of(plain).contains(rare));  // rare.equals(plain)
+    }
+}
+```
+
+the recipe for a hand-written `equals`: check the type with a pattern, compare the significant fields (`==` for primitives except `float`/`double`, which use `Float.compare`/`Double.compare`; `Objects.equals` for references that can be null), and make the class `final` if you can.
+
+<Lens v={16}>records are final and their `equals` compares every component, so this whole item mostly disappears for data classes. `o instanceof Coin c` (pattern matching for instanceof, also 16) replaced the old cast dance. deeper traps (mutable keys, `getClass()` vs `instanceof`) are in [equals and hashCode traps](/learn/deep-dives/equals-and-hashcode-traps).</Lens>
+
+### item 11 · equals and hashCode travel together
+
+the rule: equal objects must have equal hash codes. forget to override `hashCode` and you keep `Object`'s version, a per-object number that knows nothing about your fields. hash-based collections look in the bucket the hash points to, and only then call `equals`.
+
+<Figure wide caption={<>step through both versions. with <C k="dead">Object's hashCode</C> two equal keys land in different buckets, and <code>equals</code> never gets a chance to say they're equal.</>}>
+<LostInBucket />
+</Figure>
+
+```java title="Main.java" run output="true\nfalse"
+class Key {
+    final String name;
+    Key(String name) { this.name = name; }
+    @Override public boolean equals(Object o) {
+        return o instanceof Key k && k.name.equals(name);
+    }
+    // no hashCode: inherits Object's
+}
+
+void main() {
+    var set = new HashSet<Key>();
+    set.add(new Key("ada"));
+    IO.println(new Key("ada").equals(new Key("ada")));
+    IO.println(set.contains(new Key("ada")));
+}
+```
+
+a good `hashCode` mixes every field `equals` uses, the usual way being `31 * result + field.hashCode()`. `Objects.hash(a, b, c)` is a one-liner, but it boxes and allocates an array on every call, so keep it out of hot paths. and never leave a field out of the hash to "make it faster": you'll pile everything into a few buckets. why buckets work at all is in [HashMap](/learn/collections/hashmap).
+
+<Lens v={16}>a record's `hashCode` is generated from its components, consistent with its `equals`, by the JVM (an `invokedynamic` into `ObjectMethods`). three lines become zero.</Lens>
+
+### item 12 · give every class a useful toString
+
+`Object.toString()` prints the class name, an `@`, and the hash in hex. nobody wants that in a log line or a test failure. print the fields that matter, and decide whether the format is a promise (if you document it, people will parse it).
+
+<Compare>
+<Bad label="the default">
+```text
+Coin@1b6d3586
+```
+</Bad>
+<Good label="what you'd want in a log">
+```text
+Coin[cents=50]
+```
+</Good>
+</Compare>
+
+<Lens v={16}>records print exactly that: `Coin[cents=50]`, for free. for everything else, the IDE generates it, which beats the default.</Lens>
+
+## copying and comparing
+
+### item 13 · stay away from clone
+
+`Cloneable` is an odd interface: it has no methods, it changes how a protected method in `Object` behaves, `clone()` throws a checked exception you must swallow, and the copy is shallow. mutable fields like arrays end up shared between the "copies":
+
+```java title="Main.java" run output="remix\ntrue"
+class Playlist implements Cloneable {
+    String[] songs = {"intro", "outro"};
+
+    @Override public Playlist clone() {
+        try {
+            return (Playlist) super.clone(); // copies the fields, not the array
+        } catch (CloneNotSupportedException e) {
+            throw new AssertionError(e);
+        }
+    }
+}
+
+void main() {
+    Playlist a = new Playlist();
+    Playlist b = a.clone();
+    b.songs[0] = "remix";
+    IO.println(a.songs[0]);         // a changed too
+    IO.println(a.songs == b.songs); // one array, two playlists
+}
+```
+
+<Compare>
+<Bad label="implements Cloneable">
+```java
+Playlist b = a.clone();
+```
+</Bad>
+<Good label="a copy constructor or factory">
+```java
+Playlist(Playlist other) {
+    songs = other.songs.clone();
+}
+static Playlist copyOf(Playlist p) {
+    return new Playlist(p);
+}
+```
+</Good>
+</Compare>
+
+a copy constructor can take an interface type (`new ArrayList<>(anyCollection)`), has no checked exception, and works with `final` fields. the one place `clone()` is fine: arrays. `arr.clone()` is the fastest way to copy one.
+
+<Lens v={10}>`List.copyOf`, `Set.copyOf`, `Map.copyOf` (java 10) make immutable copies, and an immutable object never needs copying at all ([immutability](/learn/oop/immutability)).</Lens>
+
+### item 14 · natural orders: implement Comparable
+
+if a class has an obvious order (numbers, dates, versions), implement `Comparable<T>` so it works with `sort`, `TreeSet`, `TreeMap`, `Collections.max` and friends. the contract mirrors `equals`: sign-symmetric, transitive, and ideally `compareTo == 0` exactly when `equals` is true.
+
+<Predict options={["[-2000000000, 1, 3, 2000000000]", "[1, 2000000000, -2000000000, 3]", "it throws"]} answer={1}>
+```java
+List<Integer> xs = new ArrayList<>(List.of(3, -2_000_000_000, 2_000_000_000, 1));
+xs.sort((a, b) -> a - b);
+IO.println(xs);
+```
+<Explain>
+`a - b` overflows. `2_000_000_000 - (-2_000_000_000)` is 4 billion, which doesn't fit in an `int` and wraps to a negative number, so the comparator says the big positive number is *smaller*. the sort trusts it and produces garbage. never compare by subtraction: use `Integer.compare(a, b)`, or a `Comparator` built with `comparingInt`.
+</Explain>
+</Predict>
+
+the modern way to write the order is a static comparator built from key extractors, read top to bottom like a sentence:
+
+```java title="Main.java" run output="[Version[major=0, minor=9], Version[major=1, minor=2], Version[major=1, minor=10]]"
+record Version(int major, int minor) implements Comparable<Version> {
+    private static final Comparator<Version> ORDER =
+        Comparator.comparingInt(Version::major).thenComparingInt(Version::minor);
+
+    @Override public int compareTo(Version other) { return ORDER.compare(this, other); }
+}
+
+void main() {
+    IO.println(new TreeSet<>(List.of(new Version(1, 10), new Version(1, 2), new Version(0, 9))));
+}
+```
+
+see? "1.10" sorts after "1.2", which string comparison would get wrong. more patterns (`reversed()`, `nullsFirst`, multi-key sorts) in [sorting and comparators](/learn/collections/sorting-and-comparators).
+
+<Lens v={8}>`Comparator.comparing` and `thenComparing` arrived with lambdas in java 8 and made hand-written `compareTo` bodies (with their subtraction bugs) mostly unnecessary. a little slower than a hand-written chain, which almost never matters.</Lens>
+
+<Keylines>
+- equals is a contract: reflexive, symmetric, transitive, consistent, false for null.
+- you can't extend a value class, add a field, and keep equals honest. compose instead.
+- override hashCode whenever you override equals, or hash collections can't find your keys.
+- clone is broken by design. copy constructors and factories, or just be immutable.
+- compare with `Integer.compare` or `Comparator.comparing`, never by subtracting.
+- records write equals, hashCode and toString for you. use them for data.
+</Keylines>

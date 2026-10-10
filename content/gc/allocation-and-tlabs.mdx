@@ -1,0 +1,135 @@
+import { TlabSim } from "@/components/figures/gc/TlabSim";
+
+<InShort>
+each thread gets a private chunk of eden called a **TLAB** (thread-local allocation buffer). allocating an object is just bumping that thread's `top` pointer by the object's size: no lock, no CAS, a handful of instructions.
+
+that's why `new` costs a couple of nanoseconds in java, and why allocating short-lived objects is way cheaper than people think.
+</InShort>
+
+## the picture
+
+you know the folklore: "allocation is expensive, reuse your objects, pool everything." that was true-ish in 1998. in a modern JVM, `new Point(1, 2)` is cheaper than most method calls you'd write to avoid it.
+
+think of eden (the part of the heap where new objects are born) as one long roll of paper. if every thread had to grab the roll to tear off a strip, they'd be fighting over it all day. so instead each thread tears off a big piece once, keeps it on its own desk, and cuts little strips from that whenever it needs one. the big piece is the TLAB. cutting a strip is moving a pencil mark to the right (bumping a pointer). only when your piece runs out do you go back to the shared roll.
+
+<Figure wide caption={<>press allocate a few times, then let it run. watch the <C k="meta">top</C> pointers: almost every allocation just moves one of them right. only a full TLAB sends a thread back to eden's shared top, and only a full eden stops everyone for a GC. try <code>new byte[big]</code> too.</>}>
+<TlabSim />
+</Figure>
+
+see the ratio? nearly everything is the fast path. the shared pointer (the only place threads could fight) gets touched once per TLAB, not once per object.
+
+## why `new` is so cheap
+
+here's what the JIT inlines at every `new Point(x, y)`, written out as pseudo-code. no function call, no lock:
+
+```text title="the allocation fast path" nolines
+obj    = thread.tlab.top            // where the object goes
+newTop = obj + 24                   // a Point is 24 bytes, known at compile time
+if (newTop > thread.tlab.end)       // doesn't fit? rare
+    goto slowPath
+thread.tlab.top = newTop            // claim it. nobody else uses this TLAB
+obj.header = <unlocked, age 0>      // mark word
+obj.klass  = Point                  // class pointer
+obj.x = 0; obj.y = 0                // zero the fields (why an unset int field is 0)
+// ...then the constructor runs
+```
+
+a load, an add, a compare, a store, and writing the header. that's the whole allocation. the object's size is a constant, the TLAB belongs to the current thread, and the thread pointer is sitting in a register.
+
+the only reason this works is that eden is one contiguous, empty block. after a young GC, every survivor has been copied out, so the space is clean and you can hand it out in order. that's the deal: bump allocation is cheap **because** the collector compacts.
+
+i measured it (jdk 25, an arm mac). a loop doing `ring[i & 1023] = new Point(i, i)` 200 million times, GC included:
+
+<Figure caption={<>nanoseconds per <code>new Point(i, i)</code>, lower is better. with four threads and no TLABs, every allocation is a CAS on one shared pointer and they spend their time fighting over it. measured with a plain loop, not JMH, but a 100× gap doesn't need error bars.</>}>
+<Bars
+  unit="ns"
+  log
+  data={[
+    { label: "1 thread, TLAB", value: 2.6, tone: "live" },
+    { label: "4 threads, TLAB", value: 3.0, tone: "live" },
+    { label: "1 thread, -XX:-UseTLAB", value: 47, tone: "dead" },
+    { label: "4 threads, -XX:-UseTLAB", value: 385, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+```java title="Alloc.java" run
+public class Alloc {
+    record Point(int x, int y) {}
+    static final Object[] ring = new Object[1024];
+
+    public static void main(String[] args) {
+        for (int round = 0; round < 5; round++) {
+            long n = 200_000_000L;
+            long t0 = System.nanoTime();
+            for (int i = 0; i < n; i++) ring[i & 1023] = new Point(i, i);
+            long t1 = System.nanoTime();
+            System.out.printf("%.2f ns per new Point%n", (t1 - t0) / (double) n);
+        }
+    }
+}
+```
+
+the `ring` matters: it makes each `Point` escape, so the JIT can't optimize the allocation away (more on that below). run it with `-XX:-UseTLAB` to see the slow version.
+
+<Quiz question="why does each thread get its own TLAB?" options={["so the GC knows which thread owns which object", "so allocating needs no lock and no CAS", "so other threads can't read those objects"]} answer={1}>
+<Explain>
+a TLAB is only about **allocation**. once an object exists it's an ordinary heap object: any thread holding a reference can read and write it, and the GC doesn't care which TLAB it was born in. the point is that two threads never compete for the same `top` pointer, so the fast path needs no synchronization at all.
+</Explain>
+</Quiz>
+
+## when it doesn't fit
+
+the fast path fails maybe once every few thousand objects. then it gets more expensive, one step at a time:
+
+<Figure caption="hover a stage. each one is rarer and slower than the one before it.">
+<Flow
+  stages={[
+    { label: "bump in TLAB", sub: "almost always", note: "inline in compiled code. a few instructions, no synchronization." },
+    { label: "new TLAB", sub: "one CAS", note: "the TLAB is full: pad what's left with a filler object, then claim a fresh TLAB from eden with a compare-and-swap on eden's shared top." },
+    { label: "outside TLAB", sub: "one CAS", note: "the object doesn't fit, but the TLAB still has too much room to throw away. allocate just this object in eden directly, keep the TLAB." },
+    { label: "young GC", sub: "stop the world", note: "eden itself is full. the threads stop, survivors get copied out, eden is empty again. retry." },
+    { label: "OutOfMemoryError", sub: "game over", note: "even a full GC couldn't make enough room. the allocation throws." },
+  ]}
+/>
+</Figure>
+
+TLABs aren't a fixed size either. the JVM resizes each thread's TLAB based on how much that thread allocates between GCs, so a busy thread gets a big one and an idle thread doesn't hog eden. you can watch it happen with `-Xlog:gc+tlab=trace`. here's a slice of a real run (three threads making `byte[64]`s, jdk 25, G1):
+
+```text title="-Xlog:gc+tlab=trace" nolines
+TLAB: fill thread: 0x00000079590a6800 [id: 43267] desired_size: 512KB slow allocs: 0  refill waste: 8192B ...
+TLAB: fill thread: 0x00000079590a7000 [id: 43011] desired_size: 512KB slow allocs: 0  refill waste: 8192B ...
+```
+
+and the summary it prints at every GC (`-Xlog:gc+tlab=debug`):
+
+```text nolines
+GC(3) TLAB totals: thrds: 3  refills: 304 max: 118 slow allocs: 0 max 0 waste:  0.2% ...
+GC(3) Pause Young (Normal) (G1 Evacuation Pause) 153M->1M(256M) 0.408ms
+```
+
+read it: each thread's TLAB was 512 KB. a TLAB gets retired when less than 8 KB (1/64 of it) is left, otherwise the odd object goes outside it. 304 refills between two GCs, 0.2% of eden wasted on fillers. and then the GC: 153 MB of eden in, 1 MB survived, 0.4 ms. that last line is [generational collection](/learn/gc/generational-gc) in miniature: almost nothing survives.
+
+## big objects skip all of this
+
+an object bigger than a TLAB can't go in one, so it takes the CAS path into eden. in G1 (the default collector) it goes further: anything at least **half a region** is **humongous** and gets its own run of contiguous regions, outside eden entirely. regions are 1 to 32 MB depending on heap size (1 MB for a 256 MB heap, 4 MB for 6 GB).
+
+<Gotcha title="the array that's one byte too big">
+an array also has a 16-byte header. so with 1 MB regions, `new byte[1024 * 1024]` is 1 MB plus 16 bytes, needs **two** humongous regions, and wastes nearly 1 MB in the second one. lots of "round number" buffers do exactly this. if `-Xlog:gc+heap` shows humongous regions climbing, check your buffer sizes, or raise the region size with `-XX:G1HeapRegionSize`. more in [G1](/learn/gc/g1).
+</Gotcha>
+
+<Deep title="the cheapest allocation is the one that never happens">
+if the JIT can prove an object never escapes the method (never stored in a field, never returned, never passed somewhere that keeps it), C2's escape analysis can replace it with its fields in registers. no TLAB bump, no header, no garbage. that's why benchmarks of "allocation in a loop" often measure nothing, and why the measurement above stores every `Point` into an array. see [JIT optimizations](/learn/jvm/jit-optimizations).
+</Deep>
+
+<Interview q="is object allocation expensive in java?">
+the allocation itself, no. it's a pointer bump in a thread-local buffer, a few nanoseconds. what costs something is what happens later: a higher allocation rate fills eden faster, so young GCs run more often, and each young GC costs roughly in proportion to what **survives**, not to what was allocated. short-lived garbage is nearly free. objects that live just long enough to be copied a few times are the expensive kind. object pools usually make things worse: they keep objects alive into the old generation and add work to every reference store.
+</Interview>
+
+<Keylines>
+- each thread allocates in its own TLAB, a private slice of eden.
+- `new` is a pointer bump: check, add, store, write the header. no locks.
+- the shared eden pointer is only touched once per TLAB, with a CAS.
+- bump allocation only works because the GC keeps eden empty and contiguous.
+- big objects skip TLABs. in G1, half a region or more is humongous.
+</Keylines>

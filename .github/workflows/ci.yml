@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - run: pnpm install --frozen-lockfile
+      - name: chapters compile and follow the voice rules
+        run: pnpm check
+      - name: every runnable snippet runs on jdk 25
+        run: pnpm java-check content
+      - run: pnpm typecheck
+      - name: static build + search index
+        run: pnpm build

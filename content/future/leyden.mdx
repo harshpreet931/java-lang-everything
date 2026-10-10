@@ -1,0 +1,96 @@
+import { Spectrum } from "@/components/figures/future/Spectrum";
+import { StatusBoard } from "@/components/figures/future/StatusBoard";
+
+export const board = [
+  { name: "ahead-of-time class loading and linking", jep: "JEP 483", status: "final", where: "java 24", note: "the first AOT cache: classes already loaded and linked, constant pool entries resolved, lambdas included. a training run records, a second step builds the cache." },
+  { name: "ahead-of-time command-line ergonomics", jep: "JEP 514", status: "final", where: "java 25", note: "one command instead of two: -XX:AOTCacheOutput=app.aot runs the training and builds the cache in one go." },
+  { name: "ahead-of-time method profiling", jep: "JEP 515", status: "final", where: "java 25", note: "the training run's method profiles go into the cache, so C2 can compile hot methods with real data right after startup." },
+  { name: "ahead-of-time object caching with any GC", jep: "JEP 516", status: "final", where: "java 26", note: "pre-built heap objects in the cache become loadable by every collector, ZGC included. on 25 a cache built under G1 was useless to ZGC." },
+  { name: "ahead-of-time code compilation", jep: "JEP 544", status: "targeted", where: "jdk 28", note: "compiled C1 and C2 code for hot methods goes into the cache too. same commands as on 25. aarch64 and x64 only at first, and the code is GC-specific." },
+  { name: "premain", status: "exploring", where: "leyden repository", note: "the branch where the next pieces get prototyped. the leyden project page says most current work is in its premain2 branch, with early-access builds now and then." },
+  { name: "condensers", status: "exploring", where: "design note, 2023", note: "composable transformations that shift computation earlier in exchange for constraints you choose. the long-term model for leyden; no JEP yet." },
+  { name: "faster startup and warmup with ZGC", jep: "JEP 545", status: "proposed", where: "jdk 28", note: "not a leyden JEP, but the same goal for ZGC users: a 2 MB initial heap, aggressive expansion, concurrent pre-touch and large pages. proposed to target 28, review ends october 14." },
+];
+
+<InShort>
+**Project Leyden** makes java start and warm up faster by **shifting work in time**: things every run used to redo (loading and linking classes, profiling, now compiling) happen once, in a **training run**, and get saved in an **AOT cache** that later runs map in.
+
+as of october 2026, the cache holds loaded and linked classes (java 24), method profiles (25) and heap objects for any GC (26). **compiled code** ([JEP 544](https://openjdk.org/jeps/544)) is targeted to jdk 28. the long-term idea, **condensers**, is still a design note.
+</InShort>
+
+## the picture
+
+you know how a JVM gets faster the longer it runs, and the first minute is the slow part? that's the JVM rediscovering, every single time, what your app needs: which classes, linked how, which methods are hot, and what to compile them into. the [AOT and Leyden](/learn/jvm/aot-and-leyden) chapter shows how to use what exists today, with measurements. this one is about where it's headed.
+
+think of a theatre. a touring show that builds its sets from planks every night before the curtain goes up spends most of the evening building. Leyden is a dress rehearsal (the training run) where the crew builds everything once and loads it onto the truck (the cache). every show after that just wheels the sets out. each java release lets the crew pre-build one more kind of thing.
+
+## a spectrum, not a switch
+
+java's startup story used to be two extremes: the fully dynamic JVM (slow to start, fast at peak, everything works) and a native image (instant start, a closed world). Leyden's bet is that you shouldn't have to pick an end. you should be able to move along the line, shifting more work earlier and accepting only the constraints you actually need.
+
+<Figure wide caption={<>click a stop. left is everything at run time, right is everything at build time. each stop says what moved earlier and what it costs. <C k="live">green</C> ships today, <C k="hot">amber</C> is targeted to jdk 28 (as of october 2026), the rest are a design and a separate toolchain.</>}>
+<Spectrum />
+</Figure>
+
+notice what every stop up to AOT code has in common: you give up almost nothing. reflection, dynamic class loading, agents, all of it still works, because the cache is a head start, not a contract. if the cache doesn't fit the run (wrong JDK, different classpath, a class that changed), the JVM just does the work itself. that's the difference from a native image, and it's why Leyden can ship in pieces.
+
+## what jdk 28 adds
+
+if JEP 544 lands as targeted, the commands don't change at all. same training run, same flag in production, and the cache now also carries machine code:
+
+```bash
+# jdk 28 (JEP 544, targeted). illustrative: the same two commands as on jdk 25
+java -XX:AOTCacheOutput=app.aot -jar app.jar     # training run, then the cache is assembled
+java -XX:AOTCache=app.aot -jar app.jar           # production: hot methods start out compiled
+```
+
+<Figure caption={<>what goes into the cache by jdk 28, and where each piece comes from. every piece is optional at run time: whatever doesn't match is skipped and done the normal way.</>}>
+<Flow
+  stages={[
+    { label: "training run", sub: "your app, real workload", note: "records what it loads, links, profiles and compiles" },
+    { label: "AOT cache", sub: "classes · profiles · objects · code", note: "one file, tied to the JDK, OS and CPU architecture" },
+    { label: "production runs", sub: "-XX:AOTCache=app.aot", note: "map it in and start where training left off" },
+  ]}
+/>
+</Figure>
+
+JEP 544's own measurements (jdk 28 early access, a two-core linux x64 machine, so treat them as the authors' numbers, not yours):
+
+| benchmark | AOT cache alone | cache + AOT code |
+| --- | --- | --- |
+| startup, five framework benchmarks | about 50 to 70% faster | about 65 to 80% faster |
+| warmup, javac, first of 20 iterations | about 30% faster | about 75% faster, near steady state by the 4th |
+
+AOT code doesn't replace the JIT. it's a starting point: if a method later turns out to need different optimizations (the code was compiled for what training saw), it's deoptimized and the JIT takes over as usual. and the code is only used where it fits: the JEP supports aarch64 and x64 at first, needs the same CPU features as training, and needs the same garbage collector, because compiled code has the collector's barriers baked in.
+
+<Quiz question="jdk 28: the cache was trained with the default G1, and production runs with -XX:+UseZGC. what happens to the AOT code?" options={["the JVM refuses to start", "code skipped, rest of cache used", "it runs, ZGC adapts the barriers", "the whole cache is ignored"]} answer={1}>
+<Explain>
+per JEP 544, a mismatch (CPU or GC) produces a warning and HotSpot skips the AOT code, but it still uses the cached classes and profiles. compiled code contains GC-specific read and write barriers, so G1 code can't run under ZGC. compare that with jdk 25, where a G1-built cache couldn't be used by ZGC at all (shown in [AOT and Leyden](/learn/jvm/aot-and-leyden)); JEP 516 fixed the object part in 26. the lesson stays the same: train with the same GC and flags as production.
+</Explain>
+</Quiz>
+
+## condensers: the long game
+
+the leyden project's design note "Toward Condensers" (2023) describes where this goes. a **condenser** is a transformation you run on your application ahead of time. it can shift computation earlier (precompute, preinitialize, compile), and it can do more if you let it constrain the program: promise that no new classes appear at run time, say, and a condenser can specialize much harder. condensers compose, and the output of each is still a normal java application, so you can stop at whatever point on the spectrum you're comfortable with.
+
+the AOT cache is the first practical piece of that idea (its "transformation" is a training run). as of october 2026 there's no condenser JEP and no API, just the design and the premain branch where prototypes happen.
+
+<Figure caption={<>leyden's JEPs and plans, plus one startup JEP for ZGC, checked against the JEP pages and the leyden project page (october 2026). click a row.</>}>
+<StatusBoard rows={board} open={4} />
+</Figure>
+
+<Gotcha title="the training run is now part of your build">
+with profiles (25) and compiled code (28) in the cache, the training run doesn't just decide which classes are ready, it decides what the hot code is optimized for. a training run that only hits a health check produces a cache that's tuned for health checks. run something that looks like production traffic, rebuild the cache whenever the JDK, the app or the flags change, and use `-XX:AOTMode=on` in CI so a cache that can't be used fails loudly instead of quietly running slow.
+</Gotcha>
+
+<Interview q="what is project leyden, and how is it different from GraalVM native image?">
+leyden improves startup, warmup and footprint of normal java by shifting work from every run to an earlier phase. today that's the AOT cache: a training run records loaded and linked classes (java 24), method profiles (25) and heap objects (26), and production runs map them in; jdk 28 targets adding compiled code (JEP 544). nothing about the language or its dynamic features is restricted: if the cache doesn't match, the JVM does the work itself. a native image compiles everything at build time under a closed-world assumption, which starts faster but gives up dynamic class loading and needs configuration for reflection. leyden's longer-term idea, condensers, is a spectrum between the two where you opt into constraints in exchange for more precomputation.
+</Interview>
+
+<Keylines>
+- leyden = shift work from every run to a training run, and save it in an AOT cache.
+- shipped: loaded + linked classes (24), one-step training and profiles (25), objects for any GC (26).
+- targeted for jdk 28: compiled code in the cache (JEP 544). same commands, needs the same CPU and GC.
+- every piece is a head start, not a contract: if it doesn't match, the JVM does the work itself.
+- the endgame is condensers: a spectrum of opt-in constraints. as of october 2026, still a design note.
+</Keylines>

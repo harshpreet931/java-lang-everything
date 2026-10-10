@@ -1,0 +1,112 @@
+import { GcLab } from "@/components/figures/gc/GcLab";
+import { TriColor } from "@/components/figures/gc/TriColor";
+
+<InShort>
+every java collector does two jobs: **mark** (find everything reachable from the roots) and reclaim the rest. there are three ways to reclaim: **sweep** (free the dead in place), **compact** (slide the living together), **copy** (evacuate the living to empty space). real collectors mix and match.
+
+and doing any of it while your app keeps running needs one more trick: **write barriers**.
+</InShort>
+
+## the picture
+
+you know how there are two kinds of people when it comes to cleaning a room? the ones who throw out the junk and leave everything else where it is, and the ones who push all the furniture against one wall so there's one big empty space. garbage collectors are like that, plus a third kind: the person who moves everything worth keeping into a fresh, empty apartment and just walks away from the old one.
+
+- **sweep**: throw out the junk, leave the furniture. quick, but now there are gaps everywhere (fragmentation).
+- **compact**: push everything together. one big free space, but you lifted every piece of furniture you kept.
+- **copy**: move the keepers to a new place. you only lift what you keep, but you're paying rent on two apartments.
+
+here's all three on the exact same heap. same objects, same two roots, same garbage cycle (H and I point at each other).
+
+<Figure wide caption={<>pick an algorithm and step through it. mark-sweep runs the full mark first, then sweeps. watch the last step of each: sweep leaves <C k="meta">free</C> holes that a 3-cell object can't fit in, compact leaves one big hole, copying never touches the <C k="dead">garbage</C> at all.</>}>
+<GcLab />
+</Figure>
+
+## mark: the part they share
+
+all three start the same way, the way the [previous chapter](/learn/gc/reachability-and-references) showed: start at the roots, follow every reference, mark everything you reach. what's left unmarked is garbage. the mark costs time proportional to the **live** objects (and the references between them). garbage is never visited during marking. it's just whatever didn't get a mark.
+
+<Deep title="where do the mark bits go?">
+two options. put a bit in each object's header (the mark word, see [object layout](/learn/jvm/object-layout)), or keep a separate bitmap with one bit per 8 bytes of heap: 1/64th of the heap's size. Serial's full GC marks in the header. the concurrent collectors keep mark bits in side bitmaps, so the GC can mark without writing into objects the app is busy using. that bitmap is part of the "GC structures" from [the memory map](/learn/gc/runtime-data-areas): for a 512 MB heap, 8 MB of bitmap.
+</Deep>
+
+## three ways to reclaim
+
+**sweep** walks the whole heap, live and dead, and puts every dead object's space on a free list. nothing moves, which is simple and safe. but the free space ends up chopped into holes between survivors, and allocation becomes "search the free list for a hole that fits". in the figure, 8 cells are free and a 3-cell object still can't be placed. that's **fragmentation**, and the cure is to move things.
+
+**compact** slides every live object down to one end of the heap. it takes three passes: work out where each object will land (its forwarding address), rewrite every reference to the new addresses, then move. the objects keep their order, and afterwards the free space is one block: allocation is a [pointer bump](/learn/gc/allocation-and-tlabs) again. the price is touching every live object several times.
+
+**copy** splits memory into two halves. it copies each live object from the current half (from-space) to the empty one (to-space) the moment it finds it, leaving a forwarding address behind so later references get fixed up. the to-space itself is the work queue: a `scan` pointer chases a `free` pointer, and when it catches up, everything live has been copied. dead objects are **never looked at**. then the whole old half is thrown away in one go.
+
+| | mark-sweep | mark-compact | copying |
+| --- | --- | --- | --- |
+| work done | mark live, sweep the whole heap | mark live, move live (3 passes) | copy live only |
+| moves objects | no | yes, slides them | yes, evacuates them |
+| fragmentation | yes | no | no |
+| allocating afterwards | search a free list | bump a pointer | bump a pointer |
+| memory overhead | none | none | half the space sits empty |
+| where java uses it | CMS's old gen (removed in java 14) | Serial and Parallel full GCs, G1's full GC | every young gen; G1, ZGC and Shenandoah evacuate regions |
+
+see that last row? copying wins wherever most objects are dead, because its cost only depends on what survives. that's exactly the situation in a young generation (most objects [die young](/learn/gc/generational-gc)). the "half the space sits empty" price gets paid in a smart way too: young gens copy into small survivor spaces, and region-based collectors like [G1](/learn/gc/g1) copy into whichever regions happen to be free.
+
+<Quiz question="a 4 GB heap holds 100 MB of live objects. which approach does the least work to reclaim the rest?" options={["mark-sweep", "mark-compact", "copying"]} answer={2}>
+<Explain>
+copying only touches the 100 MB that's alive. mark-sweep marks the same 100 MB but then walks all 4 GB to find the dead space. mark-compact marks, then moves the 100 MB in several passes. the less survives, the better copying looks. (the catch: copying needs empty space to copy into.)
+</Explain>
+</Quiz>
+
+<Gotcha title="pauses scale with what lives, not with what dies">
+people expect a GC to be slow when there's lots of garbage. it's the other way around. in the [TLAB chapter](/learn/gc/allocation-and-tlabs)'s run, each young GC turned 153 MB of eden into 1 MB of survivors in 0.4 ms. 152 MB of garbage cost nothing, because a copying collector never visits it. what makes pauses long is a big **live** set, lots of roots (thousands of threads with deep stacks), or survivors that get copied again and again.
+</Gotcha>
+
+## doing it while the app runs
+
+everything so far assumed the app is frozen while the GC works: a **stop-the-world** pause. the JVM brings every thread to a [safepoint](/learn/jvm/safepoints), does the work, lets them go. simple and correct, but the pause grows with the live set. mark a 10 GB live set with every thread stopped and your p99 latency is gone.
+
+so modern collectors mark **concurrently**, on GC threads, while the app keeps running and keeps changing references. that breaks something. the classic way to think about it is **tri-color marking**:
+
+- **white**: not seen yet. at the end, white means garbage.
+- **grey**: seen, but its fields haven't been scanned yet. this is the to-do list.
+- **black**: seen and scanned. the GC is done with it and won't look again.
+
+marking is done when there's no grey left. the danger is the app moving a reference behind the GC's back.
+
+<Figure wide caption={<>step through it with no barrier first, and watch C at the end. then switch to <C k="meta">SATB</C> or incremental update and step again: same app, same timing, C survives.</>}>
+<TriColor />
+</Figure>
+
+an object only gets lost when **both** of these happen during marking:
+
+1. the app stores a reference to a white object into a black object (black never gets rescanned, so the GC misses it).
+2. the app destroys every path from a grey object to that white object (so the GC can't find it the normal way either).
+
+a **write barrier** is a few instructions the JIT adds around reference stores, and each style of barrier breaks one of the two conditions:
+
+- **incremental update** breaks (1): when you store a reference into a black object, grey the target. CMS used a variant of this.
+- **snapshot at the beginning (SATB)** breaks (2): before you overwrite a reference, log the old value. everything reachable when marking started gets marked. G1 and Shenandoah do this.
+
+```text title="an SATB pre-write barrier, for obj.f = v" nolines
+if (marking_is_active) {           // a thread-local flag, cheap to check
+    old = obj.f
+    if (old != null)
+        satb_queue.add(old)        // "this was reachable at the start, keep it"
+}
+obj.f = v                          // the store you actually wrote
+```
+
+that's the deal every concurrent collector makes: a little bit of cost on every reference store (and, for [ZGC](/learn/gc/zgc) and [Shenandoah](/learn/gc/shenandoah), on reference loads too) in exchange for not stopping the world for the long part.
+
+<Deep title="how does the GC know which stack slots are references?">
+a moving collector has to update every pointer to an object it moves, so it must know **exactly** which values are references. an `int` that happens to look like an address must not be "updated". java's collectors are precise: at every safepoint, the JIT records an **oop map** saying which registers and stack slots hold references right now, and the interpreter can compute the same thing from the bytecode. that's a big reason threads have to reach a safepoint before a GC: it's only there that the JVM has a map of their frames. collectors without that information (some C/C++ GCs) have to be conservative, and conservative collectors can't move objects.
+</Deep>
+
+<Interview q="what's a write barrier, and why does a concurrent collector need one?">
+a write barrier is code the JVM runs on every reference store (`obj.field = value`). a concurrent marker scans the heap while the app is changing it, and the app can hide a live object from it: move the only reference to it from a not-yet-scanned object into an already-scanned one. then the object stays unmarked and gets freed while still in use. the barrier tells the GC about the store, either by greying the newly referenced object (incremental update) or by recording the overwritten reference (SATB, what G1 and Shenandoah use). generational collectors also use a store barrier for a different reason: to track old-to-young references in a card table.
+</Interview>
+
+<Keylines>
+- every collector marks from the roots. marking costs time per live object, never per dead one.
+- sweep frees in place and fragments. compact slides and stays tidy. copy only touches survivors but needs spare space.
+- copying is perfect when most objects are dead: that's every young generation.
+- pauses grow with the live set, not with the amount of garbage.
+- concurrent marking needs a write barrier, or the app can hide a live object from the GC.
+</Keylines>

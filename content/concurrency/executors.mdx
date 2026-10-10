@@ -1,0 +1,182 @@
+import { PoolSimulator } from "@/components/figures/concurrency/PoolSimulator";
+import { ExecuteFlow } from "@/components/figures/concurrency/ExecuteFlow";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const shutdown = [
+  { mem: { queue: "[#3, #4]" }, ops: [null, "running #1", "running #2"], note: "two threads busy, two tasks queued." },
+  { ops: [{ t: "shutdown()", k: "hot" }, "running #1", "running #2"], note: "shutdown() returns immediately. it doesn't stop or interrupt anything. it just closes the door to new work." },
+  { ops: [{ t: "execute(#5): rejected", k: "dead" }, "running #1", "running #2"], note: "anything submitted after shutdown() is rejected." },
+  { ops: [null, "#1 done, takes #3", "running #2"], mem: { queue: "[#4]" }, note: "queued tasks still run. shutdown() promises to finish everything that was already accepted." },
+  { ops: [null, "running #3", "#2 done, takes #4"], mem: { queue: "[ ]" } },
+  { ops: [null, { t: "#3 done, exits", k: "mute" }, { t: "#4 done, exits", k: "mute" }], note: "with the queue empty and the pool shut down, the workers exit instead of waiting for more." },
+  { ops: [{ t: "awaitTermination → true", k: "live" }, null, null], note: "awaitTermination (or close()) returns once every worker is gone. shutdownNow() would instead have interrupted #1 and #2, and handed back [#3, #4] without running them." },
+];
+
+<InShort>
+an **executor** separates *what* to run (a task) from *how* it runs (which thread, when). a **`ThreadPoolExecutor`** keeps a set of threads alive and feeds them tasks from a queue. its rule for a new task is the counterintuitive part: **core threads first, then the queue, then extra threads, then rejection**. extra threads only appear once the queue is full.
+</InShort>
+
+## the picture
+
+a restaurant kitchen. there are a few cooks on permanent staff (the **core** threads), a ticket rail where orders wait (the **queue**), and a phone number for temp cooks (threads up to **maximumPoolSize**). a new order goes to a free permanent cook if the kitchen is still hiring permanent staff. otherwise it goes on the rail. only when the rail is completely full does the manager call a temp, who takes the *newest* order straight away while older tickets keep waiting. and when the rail is full and every temp is busy, the door gets a "sorry, we're full" sign (the **rejection policy**). temps who stand around idle for too long get sent home (**keepAliveTime**).
+
+## why not just new Thread()
+
+[platform threads](/learn/concurrency/threads) are expensive to create and each one reserves a stack. starting one per request means thread creation on every request and no upper bound when traffic spikes. a pool fixes both: threads are reused, and the number of them is capped.
+
+the API is three interfaces deep:
+
+```java title="Pools.java"
+Executor e = command -> new Thread(command).start();   // just "run this, somehow"
+
+ExecutorService pool = Executors.newFixedThreadPool(4); // + lifecycle and results
+Future<Integer> f = pool.submit(() -> 6 * 7);           // Callable in, Future out
+int answer = f.get();                                    // blocks until it's done
+pool.close();                                            // java 19+: shutdown, then wait
+```
+
+`Executor` just runs `Runnable`s. `ExecutorService` adds `submit` (returns a `Future`), `invokeAll`/`invokeAny`, and shutdown. `ScheduledExecutorService` adds delays and repeats. `ThreadPoolExecutor` is the class behind almost all of them.
+
+## the execute() decision
+
+every task handed to a `ThreadPoolExecutor` goes through exactly this, in this order:
+
+<Figure caption={<>the order that surprises everyone: the queue comes <em>before</em> the extra threads. so extra threads are created only when the queue is full, and they run the <C k="hot">newest</C> task, not the oldest.</>}>
+<ExecuteFlow />
+</Figure>
+
+here it is for real: core 2, max 4, a queue of 2, and seven tasks that all block, so nothing finishes while we watch:
+
+```java title="Main.java" run output="task 1: threads=1 queued=0\ntask 2: threads=2 queued=0\ntask 3: threads=2 queued=1\ntask 4: threads=2 queued=2\ntask 5: threads=3 queued=2\ntask 6: threads=4 queued=2\ntask 7: rejected"
+import java.util.concurrent.*;
+
+void main() throws InterruptedException {
+    CountDownLatch release = new CountDownLatch(1);    // keeps every task busy
+    ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            2, 4,                                       // core 2, max 4
+            30, TimeUnit.SECONDS,                       // extra threads idle out after 30 s
+            new ArrayBlockingQueue<>(2));               // the queue holds 2
+    for (int task = 1; task <= 7; task++) {
+        try {
+            pool.execute(() -> {
+                try { release.await(); } catch (InterruptedException e) { }
+            });
+            IO.println("task " + task + ": threads=" + pool.getPoolSize()
+                    + " queued=" + pool.getQueue().size());
+        } catch (RejectedExecutionException e) {
+            IO.println("task " + task + ": rejected");
+        }
+    }
+    release.countDown();
+    pool.shutdown();
+}
+```
+
+tasks 1 and 2 get core threads. 3 and 4 wait in the queue. 5 and 6 get brand-new threads and start running *before* 3 and 4, which arrived earlier. task 7 finds a full queue and a maxed-out pool, and the default `AbortPolicy` throws `RejectedExecutionException`.
+
+## play with a pool
+
+<Figure wide caption={<>press <strong>submit 10 at once</strong> on the defaults and watch tasks 5 and 6 jump the queue onto extra (dashed) threads while 3 and 4 wait, and 7 to 10 get <C k="dead">rejected</C>. then start arrivals, slow the tasks down, and push the arrival rate past what the pool can do. finally set the queue to ∞: max pool size stops mattering, and the queue just grows.</>}>
+<PoolSimulator />
+</Figure>
+
+<Quiz question="core 2, max 10, and an unbounded LinkedBlockingQueue. tasks arrive far faster than 2 threads can handle. how many threads will the pool have?" options={["10, it scales up under load", "2, forever", "it depends on keepAliveTime"]} answer={1}>
+<Explain>
+2. step 2 of execute() always succeeds on an unbounded queue, so step 3 (create an extra thread) is never reached. maximumPoolSize is ignored, and the queue grows until the heap runs out. this is exactly the configuration `newFixedThreadPool` uses.
+</Explain>
+</Quiz>
+
+## the Executors factories
+
+`Executors` has static factories for the common shapes. they're convenient, and most of them hide a decision you should make yourself:
+
+| factory | core / max | queue | the catch |
+| --- | --- | --- | --- |
+| `newFixedThreadPool(n)` | n / n | `LinkedBlockingQueue`, unbounded | never rejects; under overload the queue grows without limit |
+| `newSingleThreadExecutor()` | 1 / 1 | unbounded | same, plus everything runs in order on one thread |
+| `newCachedThreadPool()` | 0 / `Integer.MAX_VALUE` | `SynchronousQueue` (holds nothing) | never queues, so every burst creates threads, without limit; idle ones die after 60 s |
+| `newScheduledThreadPool(n)` | n | a delay queue, unbounded | for "run later" and "run every 5 s" |
+| `newWorkStealingPool()` | a `ForkJoinPool` | per-thread deques | see [fork/join](/learn/concurrency/fork-join) |
+| `newVirtualThreadPerTaskExecutor()` | no pool at all | none | one new [virtual thread](/learn/concurrency/virtual-threads) per task <Since v={21} /> |
+
+<Gotcha title="the unbounded queue is the default">
+a fixed pool with an unbounded queue doesn't fail when it's overloaded. it accepts every task, latency climbs as the queue grows, and eventually you get `OutOfMemoryError` from a queue full of requests nobody will ever answer in time. for anything that takes outside traffic, build the `ThreadPoolExecutor` yourself with a **bounded** queue and decide what rejection should mean.
+</Gotcha>
+
+## when the pool is full: rejection policies
+
+| policy | what happens to the task |
+| --- | --- |
+| `AbortPolicy` (default) | `execute` throws `RejectedExecutionException` at the caller |
+| `CallerRunsPolicy` | the calling thread runs the task itself. it's busy, so it stops submitting: natural backpressure |
+| `DiscardPolicy` | silently dropped |
+| `DiscardOldestPolicy` | the oldest queued task is silently dropped, and this one is queued instead |
+
+`CallerRunsPolicy` is the underrated one: instead of failing, it slows the producer down to the pool's speed. try it in the simulator with a high arrival rate: the caller gets stuck running tasks and arrivals stop. the two discard policies lose work without telling anyone, so only use them when that's genuinely fine (sampling, metrics).
+
+## futures, and where exceptions go
+
+`execute(runnable)` and `submit(task)` look interchangeable. they handle failure very differently:
+
+```java title="Main.java" run output="get() threw: java.lang.IllegalStateException: from submit\npool closed"
+import java.util.concurrent.*;
+
+void main() throws InterruptedException {
+    try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+        pool.execute(() -> { throw new IllegalStateException("from execute"); });
+        Future<?> f = pool.submit(() -> { throw new IllegalStateException("from submit"); });
+        try {
+            f.get();
+        } catch (ExecutionException e) {
+            IO.println("get() threw: " + e.getCause());
+        }
+    }
+    IO.println("pool closed");
+}
+```
+
+the `execute` one kills its worker thread with a stack trace on stderr (`Exception in thread "pool-1-thread-1" java.lang.IllegalStateException: from execute`), and the pool quietly starts a replacement. the `submit` one is captured inside the `Future` and only comes out, wrapped in `ExecutionException`, when someone calls `get()`. if nobody ever calls `get()`, that exception is gone. no log, nothing.
+
+<Gotcha title="fire-and-forget submit swallows errors">
+`pool.submit(() -> doWork())` with the `Future` thrown away is the classic "it just stopped working and there's nothing in the logs". either keep the future and check it, use `execute` (so the thread's uncaught exception handler sees it), or catch and log inside the task.
+</Gotcha>
+
+## shutting down
+
+pool threads are non-daemon, so a pool you forget to shut down keeps the JVM alive after `main` returns. the program just never exits.
+
+<Figure wide caption={<>a graceful <code>shutdown()</code>: the door closes to <C k="dead">new tasks</C>, but everything already queued still runs, and then the threads exit.</>}>
+<Lanes threads={["main", "thread-1", "thread-2"]} cells={["queue"]} steps={shutdown} />
+</Figure>
+
+- `shutdown()`: stop accepting new tasks, finish everything already submitted (queued ones too), then let the threads die.
+- `shutdownNow()`: stop accepting, interrupt running tasks, and return the queued ones as a list without running them. tasks that ignore interrupts keep running.
+- `awaitTermination(timeout)`: block until everything has finished, or the timeout passes.
+- `close()` <Since v={19} />: `shutdown()` then wait until done. it's why `ExecutorService` works in try-with-resources, as above.
+
+## how many threads?
+
+- **CPU-bound work** (compression, hashing, number crunching): about one thread per core. more just adds context switching. `Runtime.getRuntime().availableProcessors()` tells you how many.
+- **I/O-bound work** (calling databases, HTTP): more threads than cores, roughly cores × (1 + wait time / compute time), since most threads are waiting at any moment.
+- **lots of blocking I/O**: skip the sizing math and use [virtual threads](/learn/concurrency/virtual-threads), which make "one thread per task" cheap again. pools still make sense for limiting how many tasks hit a slow downstream at once, but a `Semaphore` does that more directly.
+
+<Effective item={80} title="prefer executors, tasks, and streams to threads">
+think in tasks, and let the executor framework decide how they run. the separation means you can change the execution policy (pool size, queue, virtual threads) without touching the code that defines the work.
+</Effective>
+
+<Deep title="how the pool tracks its state">
+`ThreadPoolExecutor` packs two things into one `AtomicInteger` called `ctl`: the top 3 bits are the run state (RUNNING, SHUTDOWN, STOP, TIDYING, TERMINATED) and the low 29 bits are the worker count. so "is it running, and how many threads are there" can be read and CASed in one step. each worker is a small AQS lock wrapped around a thread, which is how `shutdown()` can tell idle workers (lock free) from busy ones. the whole walk-through is in [ThreadPoolExecutor internals](/learn/deep-dives/threadpoolexecutor-internals).
+</Deep>
+
+<Interview q="what happens when you submit a task to a ThreadPoolExecutor?">
+if fewer than corePoolSize threads exist, a new thread is started with that task. otherwise it's offered to the work queue. if the queue is full and there are fewer than maximumPoolSize threads, an extra thread is started with that task. otherwise the RejectedExecutionHandler runs (by default it throws RejectedExecutionException). the consequence: with an unbounded queue the pool never grows past corePoolSize, and extra threads run the newest task ahead of older queued ones.
+</Interview>
+
+<Keylines>
+- a pool reuses threads and caps how many there are. you submit tasks, not threads.
+- execute(): core threads, then the queue, then extra threads, then rejection. in that order.
+- an unbounded queue means maximumPoolSize never matters and overload becomes OOM.
+- pick a rejection policy on purpose. CallerRunsPolicy is backpressure for free.
+- `submit` hides exceptions in the `Future` until someone calls `get()`.
+- shut pools down (or try-with-resources them), or the JVM never exits.
+</Keylines>

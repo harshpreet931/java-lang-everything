@@ -1,0 +1,98 @@
+import { ForwardingPtr } from "@/components/figures/gc/ForwardingPtr";
+import { ShenandoahCycle } from "@/components/figures/gc/cycles";
+
+<InShort>
+Shenandoah is the other collector that moves objects while your app runs. it's region-based like G1, but it **evacuates concurrently**: GC threads copy live objects out, leave a **forwarding pointer** in the old copy's header, and a **load reference barrier** makes sure the app only ever sees the new copy.
+
+its four pauses don't grow with the heap: in the cycle below they're between 2 and 142 microseconds. generational mode became a product feature in java 25.
+</InShort>
+
+## the picture
+
+you know how [ZGC](/learn/gc/zgc) tracks moved objects in a forwarding table off to the side, and keeps state in the pointer's color? Shenandoah solves the same problem the other way around: the pointer stays a plain address, and the moved-from object itself says where it went.
+
+think of moving house and leaving a note on the old front door: "we live at 42 elm street now". anyone who turns up at the old address reads the note and goes to the new one. and if they're helpful, they update their address book on the way. once everyone's address book has been updated, the old house can be torn down.
+
+the note on the door is the **forwarding pointer**. reading the note before walking in is the **load reference barrier** (LRB).
+
+<Figure wide caption={<>step through one evacuation. the <C k="meta">forwarding pointer</C> replaces the old copy's header. step 5 is the interesting one: an app thread and a GC thread both copy Y at the same time, and a single CAS decides whose copy wins.</>}>
+<ForwardingPtr />
+</Figure>
+
+see what makes this safe? every object has exactly one canonical address at any moment: the one its header points to, or itself if it hasn't moved. the barrier always follows that. copies that lose the race are just thrown away.
+
+## the barrier
+
+since java 13, every reference loaded from the heap passes through the LRB:
+
+```text title="the load reference barrier, roughly" nolines
+p = obj.field                      // a plain address
+if (gc_is_evacuating && in_collection_set(p)) {   // a thread-local flag + a region check
+    q = forwardee(p)               // read p's header. forwarded? use the new address
+    if (q == p) q = evacuate(p)    // not copied yet: copy it now, CAS the header
+    obj.field = q                  // heal the field
+    p = q
+}
+```
+
+outside of evacuation, it's a test of a thread-local flag that's almost always false. Shenandoah also has the SATB barrier from [how GC works](/learn/gc/gc-fundamentals) for concurrent marking. before java 13 it used a separate forwarding word in every object (the Brooks pointer) and a barrier on writes too. moving the forwarding pointer into the header of the old copy, which is dead weight once it's been copied anyway, cut that word and made Shenandoah's object footprint the same as everyone else's.
+
+## a real cycle
+
+the same toy service as the [previous chapters](/learn/gc/serial-and-parallel), `-XX:+UseShenandoahGC -Xmx256m`, one cycle from `-Xlog:gc`:
+
+<Figure wide caption={<>four <C k="hot">pauses</C>: init mark (11 µs), final mark (142 µs), init update refs (2 µs), final update refs (29 µs). everything else, including moving the objects and fixing every pointer to them, is <C k="meta">concurrent</C>.</>}>
+<ShenandoahCycle />
+</Figure>
+
+the phases, in order:
+
+1. **init mark** (pause): start marking, scan the roots.
+2. **concurrent marking**: trace the heap with SATB, while the app runs.
+3. **final mark** (pause): finish marking, pick the collection set (regions with the most garbage).
+4. **concurrent evacuation**: copy live objects out of the collection set, install forwarding pointers. the LRB covers the app.
+5. **init update refs** (pause): a tiny handover.
+6. **concurrent update references**: walk the heap, replace every pointer to an old copy with the new one.
+7. **final update refs** (pause): fix the roots, then the collection set's regions are free.
+
+across three runs (median), all of Shenandoah's pauses added up to 49 ms. G1 on the same program: 515 ms. its longest pause was 5 ms, though: a final mark that got stretched because the laptop was busy with other work. on a quiet run, the same program's longest pause was 0.29 ms. concurrent collectors need spare CPU to stay ahead, and short pauses still need every thread to reach a safepoint quickly.
+
+<Quiz question="why does Shenandoah need an 'update references' phase, when ZGC doesn't have one?" options={["Shenandoah doesn't heal fields in its barrier", "with no color in the pointer, it can't tell a stale pointer from a good one without checking the object, so it fixes them all before freeing the old regions", "ZGC never moves objects"]} answer={1}>
+<Explain>
+a Shenandoah pointer is just an address. to know it's stale you have to look at the object (is it in the collection set, is it forwarded?). the from-space regions can only be reused once nothing points into them, so Shenandoah walks the heap and fixes every remaining pointer first. ZGC can reuse a page right after evacuating it, because its forwarding table and its pointer colors let it fix stale pointers whenever they're used, even much later, and the next marking cycle remaps any that are left.
+</Explain>
+</Quiz>
+
+## Shenandoah or ZGC?
+
+| | Shenandoah | ZGC |
+| --- | --- | --- |
+| moves objects concurrently | yes | yes |
+| where "it moved" is kept | the old copy's header | a per-page forwarding table |
+| pointer format | a plain (compressed) address | colored, 16 metadata bits |
+| compressed oops | yes, smaller heaps stay compact | no |
+| barriers | SATB + load reference barrier | load + store barriers |
+| generational | product in 25, default targeted for 28 | always, since 24 |
+| where to get it | most OpenJDK builds (Temurin, Corretto, Red Hat) | every JDK |
+
+both get you sub-millisecond pauses. in practice: check that your JDK build has Shenandoah (Oracle's own builds have historically left it out), then try both under real load and read the logs. differences in throughput and footprint depend on the workload more than on the table.
+
+<Gotcha title="degenerated GC">
+concurrent collectors only work if they finish before the app runs out of memory. when Shenandoah can't keep up with the allocation rate, it stops being concurrent: the log shows `Pause Degenerated GC`, which finishes the current cycle with every thread stopped, and in the worst case `Pause Full`. that's your signal to give it more heap or lower the allocation rate. turning the pause target down won't help, there isn't one: Shenandoah's heuristics decide when to start a cycle from the free memory and the allocation rate it observes.
+</Gotcha>
+
+<Deep title="generational Shenandoah">
+like generational ZGC, generational Shenandoah splits the regions into young and old and collects the young ones far more often, with a card table and remembered set scanning for old-to-young pointers (you'll see `Concurrent remembered set scanning` in its log). it was experimental in java 24 (JEP 404), became a product feature in 25 (JEP 521, `-XX:+UseShenandoahGC -XX:ShenandoahGCMode=generational`), and JEP 535 is targeted to make it the default mode in 28, with the single-generation mode deprecated.
+</Deep>
+
+<Interview q="how does Shenandoah move objects without stopping the application?">
+the GC copies a live object to a new region and then CASes a forwarding pointer into the old copy's header. every reference the application loads goes through a load reference barrier: if the referenced object is in the collection set, the barrier reads its header and returns the new copy (or evacuates the object itself if nobody has yet). if two threads copy the same object at once, only one CAS wins and the other copy is discarded. a later concurrent phase rewrites all remaining references to old copies, after which the old regions are freed.
+</Interview>
+
+<Keylines>
+- Shenandoah evacuates concurrently, like ZGC, with four short pauses per cycle.
+- the forwarding pointer lives in the old copy's header. no extra word per object since java 13.
+- the load reference barrier always hands the app the current copy, and heals the field.
+- racing copies are settled by one CAS on the header. losers throw their copy away.
+- generational mode is a product feature in 25, targeted to be the default in 28.
+</Keylines>

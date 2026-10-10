@@ -1,0 +1,156 @@
+import { MethodAnatomy } from "@/components/figures/basics/MethodAnatomy";
+import { OverloadResolver } from "@/components/figures/basics/OverloadResolver";
+
+export const calls = {
+  file: "Main.java",
+  source: `public class Main {
+    static int square(int x) {
+        return x * x;
+    }
+
+    static int sumOfSquares(int a, int b) {
+        int s = square(a) + square(b);
+        return s;
+    }
+
+    public static void main(String[] args) {
+        int r = sumOfSquares(3, 4);
+        System.out.println(r);
+    }
+}`,
+  steps: [
+    {"line": 12, "frames": [{"name": "main", "locals": {}}], "heap": {}, "note": "main is about to call sumOfSquares(3, 4)."},
+    {"line": 7, "frames": [{"name": "main", "locals": {}}, {"name": "sumOfSquares", "locals": {"a": 3, "b": 4}}], "heap": {}, "note": "a new frame for sumOfSquares. the parameters a and b are fresh variables, filled with copies of the arguments 3 and 4."},
+    {"line": 3, "frames": [{"name": "main", "locals": {}}, {"name": "sumOfSquares", "locals": {"a": 3, "b": 4}}, {"name": "square", "locals": {"x": 3}}], "heap": {}, "note": "square(a) pushes another frame. x gets a copy of a's value: 3."},
+    {"line": 7, "frames": [{"name": "main", "locals": {}}, {"name": "sumOfSquares", "locals": {"a": 3, "b": 4}}], "heap": {}, "note": "square returned 9 and its frame is gone. the 9 is held while java evaluates the right side, square(b)."},
+    {"line": 3, "frames": [{"name": "main", "locals": {}}, {"name": "sumOfSquares", "locals": {"a": 3, "b": 4}}, {"name": "square", "locals": {"x": 4}}], "heap": {}, "note": "a second, separate call to square. same code, brand new frame, x is 4 this time."},
+    {"line": 7, "frames": [{"name": "main", "locals": {}}, {"name": "sumOfSquares", "locals": {"a": 3, "b": 4}}], "heap": {}, "note": "returned 16. now 9 + 16 can be computed."},
+    {"line": 8, "frames": [{"name": "main", "locals": {}}, {"name": "sumOfSquares", "locals": {"a": 3, "b": 4, "s": 25}}], "heap": {}, "note": "s is 25. return s hands the value back to whoever called."},
+    {"line": 12, "frames": [{"name": "main", "locals": {}}], "heap": {}, "note": "sumOfSquares's frame is popped. a, b and s no longer exist anywhere. main receives 25."},
+    {"line": 13, "frames": [{"name": "main", "locals": {"r": 25}}], "heap": {}, "note": "r holds the returned value."},
+    {"line": 14, "frames": [{"name": "main", "locals": {"r": 25}}], "heap": {}, "stdout": "25\n", "note": "printed."},
+  ],
+};
+
+<InShort>
+a **method** is a named block of code with **parameters** (inputs) and a **return type** (the one value it hands back). every call gets a fresh **frame** with fresh copies of the arguments. several methods can share a name if their parameter lists differ (**overloading**), and **varargs** (`int... xs`) lets one take any number of arguments, delivered as an array.
+</InShort>
+
+## the picture
+
+a method is a recipe card. the name is the title, the parameters are the ingredient list ("2 eggs, 1 cup flour"), the body is the instructions, and the return value is the dish you hand back. every time someone cooks from the card, they start with their own fresh ingredients (a new frame) and the card itself never changes.
+
+<Figure caption={<>click any part of the declaration. toggle the signature: the <C k="meta">name plus parameter types</C> is what java uses to tell methods apart. the return type isn't part of it.</>}>
+<MethodAnatomy />
+</Figure>
+
+```java title="Main.java" run output="7 -2"
+public class Main {
+    static int max(int a, int b) {
+        int bigger = a > b ? a : b;
+        return bigger;
+    }
+
+    public static void main(String[] args) {
+        IO.println(max(3, 7) + " " + max(-2, -9));
+    }
+}
+```
+
+## what a call actually does
+
+calling a method pushes a new frame onto the [call stack](/learn/basics/call-stack-and-recursion), copies each argument into the matching parameter, runs the body, and when it hits `return`, pops the frame and hands the value back to the caller, right in the middle of whatever expression made the call.
+
+<Figure wide caption={<>a real recording from the JVM. step through and watch frames appear and disappear on the stack. <code>square</code> runs twice, and each call gets its own frame with its own <code>x</code>.</>}>
+<MemoryStepper trace={calls} />
+</Figure>
+
+two things worth noticing. parameters are **copies**: `square` changing its `x` could never touch `a` in the caller (that's [pass-by-value](/learn/basics/pass-by-value), and it holds for objects too, in a way that surprises people). and locals are gone the instant the method returns, which is why a method can't hand you a reference to its local `int`, only the value.
+
+<Gotcha title="every path must return">
+```java title="Main.java"
+int sign(int x) {
+    if (x > 0) return 1;
+    else if (x < 0) return -1;
+} // [!code error]
+```
+
+`error: missing return statement`. you know `x` is either positive, negative or zero, but the compiler only sees that the zero case falls off the end without returning anything. add the last case (`return 0;`).
+</Gotcha>
+
+## overloading
+
+two methods can have the same name as long as their parameter lists differ: `println(int)`, `println(String)`, `println(double)`... that's why one `println` can print anything. the compiler picks which one to call from the **types of the arguments**, at compile time.
+
+when more than one could fit, java searches in three rounds and stops at the first round that finds a match:
+
+1. **phase 1:** exact types, widening (`int` → `long`), subclasses. no boxing, no varargs.
+2. **phase 2:** also allow boxing and unboxing (`int` ↔ `Integer`).
+3. **phase 3:** also allow varargs.
+
+within a round, the most specific candidate wins (`int` beats `long` beats `double`, `Integer` beats `Object`).
+
+<Figure wide caption={<>toggle which overloads exist and which call to make. every combination here (63 sets of overloads × 9 calls) was actually compiled and run on jdk 25, so the <C k="live">pick</C> and the <C k="dead">errors</C> are javac's own answers.</>}>
+<OverloadResolver />
+</Figure>
+
+<Predict options={["m(long)", "m(Integer)", "compile error: ambiguous"]} answer={0}>
+```java
+static String m(long x)    { return "long"; }
+static String m(Integer x) { return "Integer"; }
+
+IO.println(m(5));
+```
+<Explain>
+`m(long)`. `5` is an `int`. widening it to `long` is allowed in phase 1, while turning it into an `Integer` needs boxing, which only phase 2 allows. phase 1 already found a match, so phase 2 never runs. widening beats boxing. (the rule exists so that code written before autoboxing in java 5 kept calling the same methods.)
+</Explain>
+</Predict>
+
+the return type plays no part in choosing, which is why you can't overload on it:
+
+```java
+int f(int a) { return 1; }
+long f(int a) { return 2; } // [!code error]
+```
+
+`error: method f(int) is already defined`. same name, same parameter types, same signature, whatever they return.
+
+## varargs
+
+put `...` after the last parameter's type and the method accepts any number of arguments of that type, including zero. inside the method, it's simply an array:
+
+```java title="Main.java" run output="0 5 6 9"
+void main() {
+    IO.println(sum() + " " + sum(5) + " " + sum(1, 2, 3) + " " + sum(new int[] {4, 5}));
+}
+
+int sum(int... nums) {
+    int total = 0;
+    for (int n : nums) total += n;
+    return total;
+}
+```
+
+<Figure caption={<>during <code>sum(1, 2, 3)</code>: the compiler wrapped the three arguments in a new <code>int[]</code>, and <code>nums</code> is a <C k="ref">reference</C> to it. <code>sum()</code> gets an empty array, never <code>null</code>.</>}>
+<Memory
+  frames={[
+    { name: "main", locals: {} },
+    { name: "sum(1, 2, 3)", locals: { nums: { ref: "v1" }, total: 0 } },
+  ]}
+  heap={{ v1: { type: "int[]", items: [1, 2, 3] } }}
+/>
+</Figure>
+
+only the **last** parameter can be varargs, and there can be just one. `String.format(String format, Object... args)` and `List.of(E... elements)` are the varargs methods you'll meet most.
+
+<Interview q="what's the difference between overloading and overriding?">
+overloading is several methods with the same name and different parameter lists, usually in the same class; the compiler picks one at **compile time** from the argument types. overriding is a subclass replacing an inherited method with the same signature; the JVM picks one at **run time** from the object's actual class. overloading is resolved by declared types, overriding by runtime types, which is the root of a lot of interview trick questions. more in [polymorphism](/learn/oop/polymorphism).
+</Interview>
+
+<Keylines>
+- a method: modifiers, return type, name, parameters, body. `void` returns nothing.
+- every call gets a new frame with fresh copies of the arguments. locals die on return.
+- the signature is name + parameter types. you can't overload on return type alone.
+- overload resolution: exact or widening first, then boxing, then varargs. most specific wins.
+- varargs `T...` arrives as an array (empty when there are no arguments). last parameter only.
+</Keylines>

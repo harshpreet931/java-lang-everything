@@ -1,0 +1,124 @@
+import { WithSteps } from "@/components/figures/future/WithSteps";
+import { Exactness } from "@/components/figures/future/Exactness";
+import { StatusBoard } from "@/components/figures/future/StatusBoard";
+
+export const board = [
+  { name: "derived record creation", jep: "JEP 468", status: "candidate", where: "not targeted", note: "the with expression for records. a candidate since late 2023, last updated in april 2024, and not targeted to any release." },
+  { name: "string templates", jep: "JEP 465", status: "withdrawn", where: "previewed in 21 and 22", note: "STR.\"Hello \\{name}\". previewed twice (JEPs 430 and 459), proposed final as JEP 465, then withdrawn in 2024 and removed from jdk 23. no replacement JEP as of october 2026." },
+  { name: "primitive types in patterns", jep: "JEP 532", status: "preview", where: "jdk 27, fifth preview", note: "previews in 23, 24, 25, 26 and 27. jdk 26 tightened the exactness and dominance rules; 27 re-previewed it unchanged. nothing on the jdk 28 list yet." },
+  { name: "carrier classes", status: "exploring", where: "design note, january 2026", note: "\"data-oriented programming for java: beyond records\": records generalized, with a component list that drives accessors, construction, deconstruction and reconstruction, but without records' strict rules. exploratory, no syntax, no JEP." },
+  { name: "member patterns", status: "exploring", where: "design note, january 2024", note: "\"towards member patterns\": deconstruction patterns you declare yourself, for classes that aren't records." },
+  { name: "flexible constructor bodies", jep: "JEP 513", status: "final", where: "java 25", note: "statements before super(...) or this(...), as long as they don't touch the object being built. three previews first." },
+  { name: "module import declarations", jep: "JEP 511", status: "final", where: "java 25", note: "import module java.base; imports every package a module exports." },
+  { name: "compact source files and instance main methods", jep: "JEP 512", status: "final", where: "java 25", note: "void main() { IO.println(\"hi\"); } with no class around it. every runnable example on this site uses it." },
+];
+
+<InShort>
+**Project Amber** ships java's language features in small pieces, through previews. as of october 2026, three things are in flight: **derived record creation** (`p with { x = 0; }`, a JEP candidate that isn't targeted to any release), **primitive types in patterns** (a fifth preview in jdk 27), and **carrier classes** (a design note about what comes after records).
+
+and one came back out: **string templates** were previewed in 21 and 22, then withdrawn in 2024. preview really does mean preview.
+</InShort>
+
+## the picture
+
+you know how records, pattern matching for `switch`, text blocks and `var` all showed up over a few years, each one small? that's Amber's style: right-sized language features, each one previewed, adjusted, and only then made permanent (the whole run so far is in the [release timeline](/learn/modern/release-timeline), and what's in preview right now is in [in preview](/learn/modern/in-preview)).
+
+think of a restaurant testing new dishes as specials. most become regulars after a few tweaks. some get reworked several times. and once in a while one gets pulled from the menu entirely, because the kitchen figured out a better way to make it. string templates were that dish.
+
+## derived record creation
+
+records are immutable, so "this record, but with x changed" means calling the constructor with every component, by hand:
+
+```java
+Point next = new Point(0, loc.y(), loc.z());        // today: repeat every other component
+```
+
+with ten components that's a typo waiting to happen, and adding an eleventh breaks every one of these calls. so people write `withX(...)` methods, one per component. [JEP 468](https://openjdk.org/jeps/468) proposes the language do it:
+
+```java
+// JEP 468 (derived record creation): a candidate, not in any jdk. illustrative only.
+Point next = loc with { x = 0; };
+
+Point bigger = next with {
+    x *= 2;
+    y *= 2;
+    z *= 2;
+};
+```
+
+the block isn't magic syntax. it's ordinary code running on local variables named after the components:
+
+<Figure wide caption={<>step through it. the compiler deconstructs the record into locals, runs your block on them, and calls the canonical constructor, so the record's validation still runs. the original record never changes. the <C k="hot">changed</C> local is the only one you mentioned.</>}>
+<WithSteps />
+</Figure>
+
+as of october 2026 it's still a candidate: created in late 2023, last updated in april 2024, not targeted to any release, and the JEP doesn't say why. the likely answer is in Amber's newest design note (below): reconstruction is one piece of a bigger design about data classes that aren't records, and it makes sense to design them together. on jdk 25 the syntax doesn't even parse (`error: not a statement`).
+
+## string templates, withdrawn
+
+<Predict options={["Hello ada", "works, only with the preview flag", "compile error, even with the flag"]} answer={2} question="on jdk 25, with --enable-preview, what happens?">
+```java
+void main() {
+    String name = "ada";
+    IO.println(STR."Hello \{name}");
+}
+```
+<Explain>
+a compile error: `error: illegal escape character`, pointing at the `\{`. that was string template syntax, previewed in java 21 (JEP 430) and 22 (JEP 459). the plan was to make it final as JEP 465, but in 2024 the JEP was withdrawn and the feature removed from jdk 23, so on 23 and later `\{` is just an invalid escape in a normal string literal. code written against the 21 or 22 preview simply stopped compiling.
+</Explain>
+</Predict>
+
+the design had a template processor in front of every template (`STR.`, `FMT.`, or your own, say, for safe SQL). people found that processor-first design confusing, and it didn't compose well, which is the reasoning in the JDK issue that removed it (JDK-8329949). there was broad agreement it needed to change and no agreement yet on how, so the team pulled it rather than freeze a design they weren't happy with. as of october 2026 there's no new string template JEP.
+
+meanwhile, the boring answers are fine:
+
+```java title="Main.java" run output="hello ada, you have 3 messages\nhello ada, you have 3 messages"
+void main() {
+    String name = "ada";
+    int count = 3;
+    IO.println("hello " + name + ", you have " + count + " messages");   // compiled to invokedynamic
+    IO.println("hello %s, you have %d messages".formatted(name, count));
+}
+```
+
+`+` on strings has been compiled to an efficient `invokedynamic` call since java 9 (see [string concatenation internals](/learn/deep-dives/string-concatenation)), and `formatted` covers the rest. for SQL, the right tool was never interpolation anyway: it's a `PreparedStatement` with `?` parameters.
+
+## primitive types in patterns
+
+the one that's closest to done. it lets `instanceof` and `switch` work with every primitive type, and "matches" means the conversion is **exact**: nothing lost. the details and more examples are in [in preview](/learn/modern/in-preview). here's the exactness rule on its own:
+
+<Figure caption={<>type any int. a primitive pattern matches only if the value survives the conversion unchanged. try 16777217: it fits in a float's range, but a float can't hold it exactly, so <code>instanceof float</code> is <C k="dead">false</C>. the same table, run for real on jdk 25 with <code>--enable-preview</code>, is below.</>}>
+<Exactness />
+</Figure>
+
+```java title="Main.java" output="42: byte true, short true, char true, float true, long true, double true\n-129: byte false, short true, char false, float true, long true, double true\n1000: byte false, short true, char true, float true, long true, double true\n65535: byte false, short false, char true, float true, long true, double true\n16777217: byte false, short false, char false, float false, long true, double true\n2147483647: byte false, short false, char false, float false, long true, double true"
+// jdk 25 with --enable-preview (JEP 507, the third preview). jdk 27 previews it again (JEP 532).
+void main() {
+    for (int v : new int[] {42, -129, 1000, 65535, 16777217, 2147483647}) {
+        IO.println(v + ": byte " + (v instanceof byte) + ", short " + (v instanceof short) + ", char " + (v instanceof char)
+            + ", float " + (v instanceof float) + ", long " + (v instanceof long) + ", double " + (v instanceof double));
+    }
+}
+```
+
+five previews (23 through 27) is a lot for a feature this size, and it shows how careful the team is with anything that touches conversions: jdk 26 changed the exact definition of "unconditionally exact" and tightened which `case`s count as dominated. as of october 2026 it isn't on the jdk 28 list.
+
+## what's next: data beyond records
+
+Amber's newest design note, "Data-Oriented Programming for Java: Beyond Records" (january 2026), calls records, sealed types and record patterns the *first* arc of data-oriented programming, and sketches the next one: **carrier classes**. a carrier class declares a component list, like a record, and gets the matching API (accessors, a constructor, a deconstruction pattern, reconstruction with `with`), but without records' restrictions: it can be extended, its fields can be mutable, and its representation doesn't have to match its components one to one. it's explicitly exploratory: no syntax, no JEP, no release.
+
+<Figure caption={<>Amber's pipeline, checked against the JEP pages and the Amber project page on openjdk.org (october 2026). click a row.</>}>
+<StatusBoard rows={board} />
+</Figure>
+
+<Interview q="why were string templates removed from java after two previews?">
+because preview features are allowed to change or disappear. string templates (JEP 430 in java 21, JEP 459 in 22) were built around template processors, like `STR."..."`, and feedback showed that design was confusing and didn't compose well. JEP 465, which would have made it final, was withdrawn in 2024 and the feature was removed from jdk 23, so preview code using it stopped compiling. it's the clearest example of why you keep preview features out of production code and libraries. as of october 2026 there's no new proposal, and concatenation (compiled efficiently with invokedynamic) or `String.formatted` cover the common cases.
+</Interview>
+
+<Keylines>
+- Amber ships small language features through previews, and previews can be withdrawn.
+- derived record creation (`with`) is a JEP candidate since 2023, not targeted to any release (as of october 2026).
+- string templates: previewed in 21 and 22, withdrawn in 2024, gone from 23. `\{` is a compile error now.
+- primitive patterns match only when a conversion is exact. fifth preview in jdk 27.
+- carrier classes, a generalization of records, are the next arc. a design note, not a JEP.
+</Keylines>

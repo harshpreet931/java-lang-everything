@@ -1,0 +1,261 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { DispatchTime } from "@/components/figures/effective-java/DispatchTime";
+
+<InShort>
+items 49 to 56 are about a method's edges: what comes in, what goes out, and what the signature promises. **check parameters** at the door, **copy** mutable things you don't own, keep signatures short, remember **overloads are picked at compile time**, and never return `null` where an empty collection or an **Optional** would do.
+</InShort>
+
+<Figure caption={<>items 49 to 56. records, pattern matching and new javadoc features each touched one.</>}>
+<ItemMap
+  items={[
+    { n: 49, t: "validate parameters at the door", lens: "checkIndex, flexible constructors" },
+    { n: 50, t: "copy what you don't own", lens: "records + copyOf" },
+    { n: 51, t: "design signatures carefully" },
+    { n: 52, t: "overloads are picked at compile time", lens: "pattern matching switch" },
+    { n: 53, t: "varargs, carefully" },
+    { n: 54, t: "return empty, not null" },
+    { n: 55, t: "Optional for return values, sparingly" },
+    { n: 56, t: "document every exported element", lens: "snippets, markdown comments" },
+  ]}
+/>
+</Figure>
+
+## what comes in
+
+### item 49 · validate parameters at the door
+
+a bad argument should fail at the call that passed it, with a clear message, not three layers later as a confusing `NullPointerException` (or worse, silently wrong data). check at the start of every public method and constructor, and document what you throw.
+
+```java
+public Account(String owner, long cents, int branch) {
+    this.owner = Objects.requireNonNull(owner, "owner");
+    if (cents < 0) throw new IllegalArgumentException("cents < 0: " + cents);
+    this.branch = Objects.checkIndex(branch, BRANCHES); // IndexOutOfBoundsException
+    this.cents = cents;
+}
+```
+
+for private helpers you control every caller, so an `assert` (enabled with `-ea` in tests) documents the assumption without a runtime cost in production. skip the check only when it's expensive and the computation would fail anyway with a fine exception (sorting checks comparability as it goes).
+
+<Lens v={25}>`Objects.checkIndex` (9) is intrinsified by the JIT. and [flexible constructor bodies](/learn/modern/flexible-constructors) (25) finally let a subclass constructor validate its arguments *before* calling `super(...)`, instead of in a static helper squeezed into the `super` call.</Lens>
+
+### item 50 · copy what you don't own
+
+if your class stores a mutable object the caller handed in (an array, a `Date`, a list), the caller still holds a reference to it. they can change your "immutable" object from outside, by accident or on purpose. same for getters that hand out internal state.
+
+<Figure caption={<>step through it. <C k="ref">two arrows to one array</C> means the caller can reach inside the ticket. the copy breaks the link.</>}>
+<Slides>
+<Slide note="new Ticket(mine) stores the caller's array. main's mine and the ticket's seats are two arrows to one array.">
+<Memory
+  frames={[{ name: "main", locals: { mine: { ref: "a" }, t: { ref: "tk" } } }]}
+  heap={{ tk: { type: "Ticket", fields: { seats: { ref: "a" } } }, a: { type: "int[]", items: [12, 13] } }}
+/>
+</Slide>
+<Slide note="mine[0] = 99. the caller only touched its own array, and the ticket changed with it.">
+<Memory
+  frames={[{ name: "main", locals: { mine: { ref: "a" }, t: { ref: "tk" } } }]}
+  heap={{ tk: { type: "Ticket", fields: { seats: { ref: "a" } } }, a: { type: "int[]", items: [99, 13] } }}
+/>
+</Slide>
+<Slide note="with seats.clone() in the constructor, the ticket owns a private array. mine[0] = 99 only changes the caller's copy.">
+<Memory
+  frames={[{ name: "main", locals: { mine: { ref: "a" }, t: { ref: "tk" } } }]}
+  heap={{ tk: { type: "Ticket", fields: { seats: { ref: "b" } } }, a: { type: "int[]", items: [99, 13] }, b: { type: "int[]", items: [12, 13] } }}
+/>
+</Slide>
+</Slides>
+</Figure>
+
+<Compare>
+<Bad label="shares the caller's array">
+```java title="Main.java" run output="99 0"
+final class Ticket {
+    private final int[] seats;
+    Ticket(int[] seats) {
+        this.seats = seats;
+    }
+    int[] seats() {
+        return seats;
+    }
+}
+
+void main() {
+    int[] mine = {12, 13};
+    var t = new Ticket(mine);
+    mine[0] = 99;      // via the input
+    t.seats()[1] = 0;  // via the getter
+    var s = t.seats();
+    IO.println(s[0] + " " + s[1]);
+}
+```
+</Bad>
+<Good label="copy in, copy out">
+```java title="Main.java" run output="12 13"
+final class Ticket {
+    private final int[] seats;
+    Ticket(int[] seats) {
+        this.seats = seats.clone();
+    }
+    int[] seats() {
+        return seats.clone();
+    }
+}
+
+void main() {
+    int[] mine = {12, 13};
+    var t = new Ticket(mine);
+    mine[0] = 99;
+    t.seats()[1] = 0;
+    var s = t.seats();
+    IO.println(s[0] + " " + s[1]);
+}
+```
+</Good>
+</Compare>
+
+two details: copy *before* validating (otherwise another thread can change the argument between your check and your copy), and don't use `clone` to copy an argument whose class might be an untrusted subclass. better still, take immutable types (`Instant`, `List.copyOf`) and there's nothing to copy.
+
+<Lens v={16}>records don't copy for you (item 17): a record with a `List` or array component needs a compact constructor that copies it. `java.time` (8) replaced the mutable `Date` that most defensive-copy code existed for.</Lens>
+
+### item 51 · design signatures carefully
+
+a short checklist: names that read like the rest of the API; four parameters or fewer (more is unreadable, and identical types get swapped); parameter types that are interfaces (`Map`, not `HashMap`); and two-value enums instead of `boolean` flags.
+
+<Compare>
+<Bad label="what does true mean here?">
+```java
+heater.set(21, true, false);
+```
+</Bad>
+<Good label="enums and a record say it">
+```java
+heater.set(new Target(21, Mode.HEAT,
+    Fan.AUTO));
+```
+</Good>
+</Compare>
+
+long lists shrink three ways: split the method (`List.subList(...).indexOf(...)` instead of an `indexOf(from, to, x)`), group parameters into a small record, or use a builder for the arguments (item 2).
+
+## choosing between methods
+
+### item 52 · overloads are picked at compile time
+
+overloading looks like overriding, but the choice happens at a different moment, with different information:
+
+<Predict options={["string integer object", "object object object", "it doesn't compile"]} answer={1}>
+```java
+static String kind(Object o)  { return "object"; }
+static String kind(String s)  { return "string"; }
+static String kind(Integer i) { return "integer"; }
+
+void main() {
+    Object[] things = { "hi", 42, 3.0 };
+    for (Object t : things) IO.print(kind(t) + " ");
+}
+```
+<Explain>
+javac chooses the overload from the *static* type of `t`, which is `Object`, every time through the loop. the actual `String` and `Integer` objects never get a say. overriding works the other way: the JVM picks the body from the real class at run time.
+</Explain>
+</Predict>
+
+<Figure caption={<>the same <code>t</code>, two kinds of choice. <C k="hot">amber</C> is when the decision is actually made.</>}>
+<DispatchTime />
+</Figure>
+
+the safe policy: never export two overloads with the same number of parameters when a caller could plausibly pass something that fits both. give them different names (`writeInt`, `writeLong`) instead. the JDK's own scar is `List.remove`:
+
+```java title="Main.java" run output="[10, 30]\n[30]"
+void main() {
+    List<Integer> xs = new ArrayList<>(List.of(10, 20, 30));
+    xs.remove(1);                    // remove(int index): removes 20
+    IO.println(xs);
+    xs.remove(Integer.valueOf(10));  // remove(Object o): removes 10
+    IO.println(xs);
+}
+```
+
+<Lens v={21}>if you actually want to choose by runtime type, that's a pattern `switch` now, with `case String s ->` arms. it dispatches on the object, it's checked for completeness, and it reads like the overloads you were trying to write. see [pattern matching](/learn/modern/pattern-matching).</Lens>
+
+### item 53 · varargs, carefully
+
+varargs are great for "any number of these" (`String.format`, `List.of`). two things to get right. if the method needs at least one argument, say so in the signature instead of checking `args.length` at run time:
+
+```java title="Main.java" run output="4 2"
+static int min(int first, int... rest) {   // min() with no arguments won't compile
+    int m = first;
+    for (int x : rest) m = Math.min(m, x);
+    return m;
+}
+
+void main() {
+    IO.println(min(4) + " " + min(4, 2, 9));
+}
+```
+
+and every call allocates an array. in hot code, provide fixed-arity overloads for the common counts and varargs for the rest. that's why `List.of` has overloads for 0 to 10 elements before the `E...` one.
+
+## what goes out
+
+### item 54 · return empty, not null
+
+a method that returns `null` for "nothing" forces every caller to remember a null check, and the one that forgets crashes later. an empty collection or array is the honest answer, and it's cheap: `List.of()`, `Collections.emptyList()` and a shared zero-length array allocate nothing.
+
+<Compare>
+<Bad label="callers must remember">
+```java
+List<Order> open() {
+    return orders.isEmpty() ? null
+        : new ArrayList<>(orders);
+}
+// for (var o : shop.open()) → NPE
+```
+</Bad>
+<Good label="loops just work">
+```java
+List<Order> open() {
+    return List.copyOf(orders);
+}
+// empty in, empty out
+```
+</Good>
+</Compare>
+
+### item 55 · Optional for return values, sparingly
+
+`Optional<T>` says "there might not be a result" in the type, so callers can't forget. use it for return values of methods that legitimately may have no answer (`findFirst`, `max`, a lookup). don't use it for fields, parameters, collection elements, or map values, and never wrap a collection (return an empty one).
+
+```java title="Main.java" run output="ada@x.io\nno such user\nno email"
+record User(String name, String email) {}
+
+static Optional<User> find(List<User> users, String name) {
+    return users.stream().filter(u -> u.name().equals(name)).findFirst();
+}
+
+void main() {
+    var users = List.of(new User("ada", "ada@x.io"), new User("bo", null));
+    IO.println(find(users, "ada").map(User::email).orElse("no email"));
+    IO.println(find(users, "cy").map(User::email).orElse("no such user"));
+    IO.println(find(users, "bo").map(User::email).orElse("no email")); // map turns null into empty
+}
+```
+
+reach for `map`, `filter`, `orElse`, `orElseThrow` and `ifPresentOrElse`; calling `get()` after `isPresent()` is a null check wearing a costume. for primitives use `OptionalInt` and friends. performance-critical code can still return `null` or a sentinel, documented. the full tour is in [optional](/learn/core-api/optional).
+
+<Lens v={9}>`or`, `stream`, `ifPresentOrElse` (9) and `orElseThrow()` with no arguments (10) made Optional much less clumsy than in 2018's java 8 examples. and `Optional` is on [valhalla](/learn/future/valhalla)'s list of classes that become value classes under preview in jdk 28, which takes away much of its allocation cost.</Lens>
+
+### item 56 · document every exported element
+
+every public class, interface, constructor, method and field needs a doc comment: what it does (not how), its preconditions (`@param`), postconditions, side effects, thread-safety (item 82), and every exception it throws (`@throws`, item 74). the first sentence becomes the summary, so make it stand alone. generics, enums and annotations need their type parameters, constants and members documented too.
+
+<Lens v={23}>`{@snippet}` (18, JEP 413) replaced fragile `<pre>{@code ...}</pre>` blocks with checked, highlightable examples. and since java 23 (JEP 467) you can write doc comments in Markdown with `///` lines instead of HTML in `/** */`. more in [javadoc](/learn/tooling/javadoc).</Lens>
+
+<Keylines>
+- check arguments first, fail with a clear exception, and document it.
+- copy mutable arguments in and mutable fields out, or only accept immutable types.
+- short parameter lists, interface types, enums instead of boolean flags.
+- overloads are chosen at compile time from static types. don't export confusing ones.
+- empty collections instead of null; Optional only for return values that may be absent.
+- if it's public, it's documented: params, returns, throws, thread-safety.
+</Keylines>

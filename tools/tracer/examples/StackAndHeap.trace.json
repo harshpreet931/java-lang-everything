@@ -1,0 +1,441 @@
+{
+  "file": "StackAndHeap.java",
+  "source": "public class StackAndHeap {\n    static class Point {\n        int x;\n        int y;\n\n        Point(int x, int y) {\n            this.x = x;\n            this.y = y;\n        }\n    }\n\n    static void moveRight(Point p, int dx) {\n        p.x = p.x + dx;\n    }\n\n    public static void main(String[] args) {\n        int count = 3;\n        double ratio = 1.5;\n        String name = \"origin\";\n        int[] scores = {90, 75, 60};\n        Point p = new Point(1, 2);\n        moveRight(p, count);\n        System.out.println(name + \" moved to \" + p.x);\n        p = new Point(10, 20);\n        scores[0] = 100;\n        System.out.println(\"done\");\n    }\n}\n",
+  "steps": [
+    {"line": 17, "frames": [{"name": "main", "line": 17, "locals": {}}], "heap": {}, "stdout": ""},
+    {
+      "line": 18,
+      "frames": [{"name": "main", "line": 18, "locals": {"count": 3}}],
+      "heap": {},
+      "stdout": "",
+      "changed": ["count"]
+    },
+    {
+      "line": 19,
+      "frames": [{"name": "main", "line": 19, "locals": {"count": 3, "ratio": 1.5}}],
+      "heap": {},
+      "stdout": "",
+      "changed": ["ratio"]
+    },
+    {
+      "line": 20,
+      "frames": [{"name": "main", "line": 20, "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "String", "value": "\"origin\""}},
+      "stdout": "",
+      "changed": ["name"]
+    },
+    {
+      "line": 21,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}, "scores": {"ref": "o2"}}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60], "state": "new"}
+      },
+      "stdout": "",
+      "changed": ["scores"]
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}, "scores": {"ref": "o2"}}
+        },
+        {"name": "new Point", "line": 6, "locals": {"this": {"ref": "o3"}, "x": 1, "y": 2}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 0, "y": 0}, "state": "new"}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 7,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}, "scores": {"ref": "o2"}}
+        },
+        {"name": "new Point", "line": 7, "locals": {"this": {"ref": "o3"}, "x": 1, "y": 2}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 0, "y": 0}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 8,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}, "scores": {"ref": "o2"}}
+        },
+        {"name": "new Point", "line": 8, "locals": {"this": {"ref": "o3"}, "x": 1, "y": 2}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 1, "y": 0}}
+      },
+      "stdout": "",
+      "changed": ["o3.x"]
+    },
+    {
+      "line": 9,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}, "scores": {"ref": "o2"}}
+        },
+        {"name": "new Point", "line": 9, "locals": {"this": {"ref": "o3"}, "x": 1, "y": 2}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 1, "y": 2}}
+      },
+      "stdout": "",
+      "changed": ["o3.y"]
+    },
+    {
+      "line": 21,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"count": 3, "ratio": 1.5, "name": {"ref": "o1"}, "scores": {"ref": "o2"}}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 1, "y": 2}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 22,
+      "frames": [
+        {
+          "name": "main",
+          "line": 22,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 1, "y": 2}}
+      },
+      "stdout": "",
+      "changed": ["p"]
+    },
+    {
+      "line": 13,
+      "frames": [
+        {
+          "name": "main",
+          "line": 22,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        },
+        {"name": "moveRight", "line": 13, "locals": {"p": {"ref": "o3"}, "dx": 3}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 1, "y": 2}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 14,
+      "frames": [
+        {
+          "name": "main",
+          "line": 22,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        },
+        {"name": "moveRight", "line": 14, "locals": {"p": {"ref": "o3"}, "dx": 3}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}}
+      },
+      "stdout": "",
+      "changed": ["o3.x"]
+    },
+    {
+      "line": 23,
+      "frames": [
+        {
+          "name": "main",
+          "line": 23,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 24,
+      "frames": [
+        {
+          "name": "main",
+          "line": 24,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}}
+      },
+      "stdout": "origin moved to 4\n"
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "name": "main",
+          "line": 24,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        },
+        {"name": "new Point", "line": 6, "locals": {"this": {"ref": "o4"}, "x": 10, "y": 20}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}},
+        "o4": {"type": "Point", "fields": {"x": 0, "y": 0}, "state": "new"}
+      },
+      "stdout": "origin moved to 4\n"
+    },
+    {
+      "line": 7,
+      "frames": [
+        {
+          "name": "main",
+          "line": 24,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        },
+        {"name": "new Point", "line": 7, "locals": {"this": {"ref": "o4"}, "x": 10, "y": 20}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}},
+        "o4": {"type": "Point", "fields": {"x": 0, "y": 0}}
+      },
+      "stdout": "origin moved to 4\n"
+    },
+    {
+      "line": 8,
+      "frames": [
+        {
+          "name": "main",
+          "line": 24,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        },
+        {"name": "new Point", "line": 8, "locals": {"this": {"ref": "o4"}, "x": 10, "y": 20}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}},
+        "o4": {"type": "Point", "fields": {"x": 10, "y": 0}}
+      },
+      "stdout": "origin moved to 4\n",
+      "changed": ["o4.x"]
+    },
+    {
+      "line": 9,
+      "frames": [
+        {
+          "name": "main",
+          "line": 24,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        },
+        {"name": "new Point", "line": 9, "locals": {"this": {"ref": "o4"}, "x": 10, "y": 20}}
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}},
+        "o4": {"type": "Point", "fields": {"x": 10, "y": 20}}
+      },
+      "stdout": "origin moved to 4\n",
+      "changed": ["o4.y"]
+    },
+    {
+      "line": 24,
+      "frames": [
+        {
+          "name": "main",
+          "line": 24,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o3"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}},
+        "o4": {"type": "Point", "fields": {"x": 10, "y": 20}}
+      },
+      "stdout": "origin moved to 4\n"
+    },
+    {
+      "line": 25,
+      "frames": [
+        {
+          "name": "main",
+          "line": 25,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o4"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [90, 75, 60]},
+        "o4": {"type": "Point", "fields": {"x": 10, "y": 20}},
+        "o3": {"type": "Point", "fields": {"x": 4, "y": 2}, "state": "dead"}
+      },
+      "stdout": "origin moved to 4\n",
+      "changed": ["p"]
+    },
+    {
+      "line": 26,
+      "frames": [
+        {
+          "name": "main",
+          "line": 26,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o4"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [100, 75, 60]},
+        "o4": {"type": "Point", "fields": {"x": 10, "y": 20}}
+      },
+      "stdout": "origin moved to 4\n",
+      "changed": ["o2[0]"]
+    },
+    {
+      "line": 27,
+      "frames": [
+        {
+          "name": "main",
+          "line": 27,
+          "locals": {
+            "count": 3,
+            "ratio": 1.5,
+            "name": {"ref": "o1"},
+            "scores": {"ref": "o2"},
+            "p": {"ref": "o4"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"origin\""},
+        "o2": {"type": "int[]", "items": [100, 75, 60]},
+        "o4": {"type": "Point", "fields": {"x": 10, "y": 20}}
+      },
+      "stdout": "origin moved to 4\ndone\n"
+    },
+    {
+      "line": 27,
+      "frames": [],
+      "heap": {},
+      "stdout": "origin moved to 4\ndone\n",
+      "note": "main returned, program ends"
+    }
+  ]
+}

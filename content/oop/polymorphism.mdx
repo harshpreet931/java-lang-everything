@@ -1,0 +1,139 @@
+import { DispatchLab } from "@/components/figures/oop/DispatchLab";
+import { VtableLookup } from "@/components/figures/oop/VtableLookup";
+
+<InShort>
+two decisions, made at two different times. **overloading** (same name, different parameters) is resolved by **javac, at compile time**, from the *declared* types. **overriding** (a subclass replacing a method) is resolved by **the JVM, at runtime**, from the *actual class* of the object you call it on.
+
+that second one is polymorphism. one call site, different code depending on the object.
+</InShort>
+
+## the picture
+
+you know how `Animal a = new Dog()` has two types at once? kinda confusing until you name them. `Animal` is the **static type** (what the variable is declared as, what javac sees). `Dog` is the **runtime type** (what the object actually is, what the JVM sees).
+
+think of a hospital. reception (javac) reads your form and sends you to a department based on what's written on it ("animal, needs treatment"). once you're there, whoever is on shift (the object) does the actual work their way. reception never meets the doctor. the doctor never re-reads your form.
+
+<Figure caption={<>pick the vet and the argument. <C k="hot">amber</C> is the overload javac chose from declared types. <C k="live">green</C> is the code that actually ran. try <code>new ER()</code> with <code>Dog x</code>: the emergency vet falls back to the plain vet's method, because it never overrode that overload.</>}>
+<DispatchLab />
+</Figure>
+
+here's every combination, run for real:
+
+```java title="Main.java" run output="Vet/Animal(Animal) Vet.treat(Animal)\nVet/Animal(Dog) Vet.treat(Animal)\nVet/Dog(Dog) Vet.treat(Dog)\nER/Animal(Animal) ER.treat(Animal)\nER/Animal(Dog) ER.treat(Animal)\nER/Dog(Dog) Vet.treat(Dog)"
+class Animal {}
+class Dog extends Animal {}
+
+class Vet {
+    String treat(Animal a) { return "Vet.treat(Animal)"; }
+    String treat(Dog d)    { return "Vet.treat(Dog)"; }
+}
+
+class ER extends Vet {
+    @Override
+    String treat(Animal a) { return "ER.treat(Animal)"; }
+}
+
+void main() {
+    Vet v1 = new Vet();   Vet v2 = new ER();
+    Animal a1 = new Animal(); Animal a2 = new Dog(); Dog d = new Dog();
+    IO.println("Vet/Animal(Animal) " + v1.treat(a1));
+    IO.println("Vet/Animal(Dog) " + v1.treat(a2));
+    IO.println("Vet/Dog(Dog) " + v1.treat(d));
+    IO.println("ER/Animal(Animal) " + v2.treat(a1));
+    IO.println("ER/Animal(Dog) " + v2.treat(a2));
+    IO.println("ER/Dog(Dog) " + v2.treat(d));
+}
+```
+
+look at lines 2 and 5 of the output: the argument was a `Dog` at runtime, and nobody cared. java only dispatches on the receiver (the thing before the dot). that's called **single dispatch**. the arguments' runtime classes never pick the method.
+
+## side by side
+
+| | overloading | overriding |
+| --- | --- | --- |
+| what | same name, different parameter lists | same signature, in a subclass |
+| who decides | javac | the JVM |
+| when | compile time | every call, at runtime |
+| based on | declared types of the arguments | actual class of the receiver |
+| in the bytecode | the exact signature is baked in | only the signature. the class is looked up live |
+| works for statics? | yes | no, statics [hide](/learn/oop/static) |
+| works for fields? | n/a | no, fields [hide](/learn/oop/inheritance) |
+
+## how the JVM finds the method
+
+javac writes `invokevirtual Animal.speak()` into the class file. that names a method, not an implementation. so at runtime the JVM needs to get from "this object" to "the right code", and it needs to do it fast, because this happens billions of times.
+
+the answer is the **vtable**: every class has a table of its overridable methods. a subclass's table starts as a copy of its parent's, overrides replace their entry in place, and new methods go on the end. so `speak` sits in the same slot in Animal's table and Dog's table. the call doesn't search anything, it reads one slot.
+
+<Figure wide caption={<>pick an object and a call, and watch the lookup: <C k="ref">reference</C> to the object, the header's <C k="meta">class pointer</C> to its class, one <C k="hot">vtable slot</C>, then the code. switch between <code>new Animal()</code> and <code>new Dog()</code>: same slot, different table, different code.</>}>
+<VtableLookup />
+</Figure>
+
+not every call goes through this. `static` methods (`invokestatic`), `private` methods, constructors and `super.x()` calls (`invokespecial`) are bound to exactly one implementation, so there's nothing to look up. interface calls use `invokeinterface` and a separate table, the itable. the full map is in [the five invoke instructions](/learn/jvm/invoke-instructions).
+
+<Deep title="the JIT usually skips the vtable entirely">
+a vtable call is cheap, but it still blocks inlining, because the JIT can't paste in a body it doesn't know. so HotSpot profiles every call site. if a call site has only ever seen `Dog` (monomorphic), C2 compiles a guard ("is this a Dog?") followed by Dog.speak() inlined right there. two classes (bimorphic) gets two guards. past that (megamorphic) it falls back to the real vtable call.
+
+class hierarchy analysis goes further: if only one loaded class implements a method at all, the JIT treats the call as direct, and deoptimizes if a new subclass is ever loaded. so a `final` keyword is not a performance trick in modern java, the JIT figures it out anyway. more in [JIT optimizations](/learn/jvm/jit-optimizations).
+</Deep>
+
+## the classic trick question
+
+<Predict options={["A.who(A)", "B.who(A)", "B.who(B)", "compile error"]} answer={1}>
+```java
+class A {
+    String who(A a) { return "A.who(A)"; }
+}
+
+class B extends A {
+    @Override
+    String who(A a) { return "B.who(A)"; }
+    String who(B b) { return "B.who(B)"; }
+}
+
+void main() {
+    A ab = new B();
+    B b = new B();
+    IO.println(ab.who(b));
+}
+```
+<Explain>
+two steps, in order. **compile time:** `ab` is declared as `A`, and `A` has exactly one `who`: `who(A)`. a `B` argument fits it, so javac emits `invokevirtual A.who(A)`. `who(B)` was never a candidate, because javac only looks at the methods of the declared type. **runtime:** the object is a `B`, and `B` overrides `who(A)`, so `B.who(A)` runs. `b.who(ab)` also prints `B.who(A)`, and only `b.who(b)` reaches `B.who(B)`.
+</Explain>
+</Predict>
+
+if you got it wrong, run it through the two-step rule again: first find the signature from the declared types, then find the override from the object. interviewers love this one because people try to do both steps at once.
+
+<Gotcha title="list.remove(1) isn't removing the 1">
+`List<Integer>` has `remove(int index)` and `remove(Object o)`. overload resolution happens at compile time and prefers the exact primitive match, so `remove(1)` removes the element *at index 1*.
+
+```java title="Main.java" run output="[10, 30]\n[30]"
+void main() {
+    List<Integer> nums = new ArrayList<>(List.of(10, 20, 30));
+    nums.remove(1);                     // remove(int index)
+    IO.println(nums);
+    nums.remove(Integer.valueOf(10));   // remove(Object o)
+    IO.println(nums);
+}
+```
+
+overloads that take "the same thing in a different shape" are a trap. effective java item 52 says to use overloading judiciously: never export two overloads with the same number of parameters that a caller could confuse.
+</Gotcha>
+
+<Quiz question={<>with <code>show(Object)</code> and <code>show(String)</code> both declared, what do <code>show(null)</code> and <code>Object o = "hi"; show(o)</code> print?</>} options={["Object, Object", "String, String", "String, Object", "compile error: ambiguous"]} answer={2}>
+<Explain>
+`null` fits both, and javac picks the **most specific** overload: `String` is more specific than `Object`, so `show(null)` prints `String`. for `show(o)`, the declared type of `o` is `Object`, so javac picks `show(Object)`, even though the object is a String. overloads never look at the runtime type. (add a third overload like `show(Integer)` and `show(null)` becomes a compile error: two equally specific candidates.)
+</Explain>
+</Quiz>
+
+<Interview q="what's the difference between overloading and overriding?">
+overloading is several methods with the same name and different parameter lists, in one class or across a hierarchy. javac picks one at compile time using the declared types of the arguments, and bakes that exact signature into the bytecode. overriding is a subclass providing its own implementation of an inherited method with the same signature. the JVM picks the implementation at runtime from the receiver's actual class, through the vtable. punchline: java is single dispatch. the receiver's runtime class matters, the arguments' runtime classes never do.
+</Interview>
+
+<Keylines>
+- static type: what the variable says. runtime type: what the object is.
+- overloads are picked by javac from static types. overrides are picked by the JVM from the object.
+- java dispatches on the receiver only. argument objects never choose the method.
+- a vtable makes a virtual call one slot read. the JIT usually inlines it away.
+- static, private, constructor and super calls aren't dynamically dispatched.
+</Keylines>

@@ -1,0 +1,204 @@
+import { SubclassLayout } from "@/components/figures/oop/SubclassLayout";
+
+<InShort>
+`class Dog extends Animal` makes every `Dog` **also an `Animal`**: it inherits Animal's fields and methods, and a Dog object physically **contains** Animal's fields. methods can be **overridden** (the object's class decides which runs). fields can only be **hidden** (the variable's type decides which you get). constructors aren't inherited at all, they chain.
+</InShort>
+
+## the picture
+
+think of a form with a stapled extension. the base form (Animal) has name and legs. the dog extension adds breed and good-boy status. a filled-in dog form is the base form *plus* the extension, stapled together. anyone who only knows how to read base forms can still read the first page.
+
+<Figure caption={<>hover a class to see which slice of the object it contributes. flip between <code>new Animal()</code> and <code>new Dog()</code>: the Animal part doesn't move. <C k="meta">purple</C> is the JVM's header, <C k="ref">blue</C> are references. sizes measured on jdk 25.</>}>
+<SubclassLayout />
+</Figure>
+
+that "same offsets" detail is the trick that makes inheritance cheap. a method compiled for `Animal` reads `legs` at a fixed position. hand it a `Dog` and the `legs` is right where it expects. no conversion, no copy. that's why a `Dog` can go anywhere an `Animal` is expected.
+
+## what you get, and what you don't
+
+| member of Animal | in Dog? |
+| --- | --- |
+| `public` / `protected` fields and methods | inherited, usable |
+| package-private members | inherited, usable only if Dog is in the same package |
+| `private` fields | **in every Dog object**, but Dog's code can't name them |
+| `private` methods | not inherited (Dog can declare one with the same name, unrelated) |
+| constructors | never inherited. Dog's constructors call them via `super(...)` |
+| `static` members | reachable through `Dog` too, but hidden, not overridden |
+
+<Gotcha title="private is inherited into the object, not into the code">
+people say "private fields aren't inherited". they're in the object (count the bytes above), you just can't touch them from Dog's code:
+
+```java title="Main.java"
+class Animal {
+    private String secret = "hidden";
+}
+
+class Dog extends Animal {
+    String peek() { return secret; } // [!code error]
+}
+```
+
+`error: secret has private access in Animal`. Dog reaches it through whatever methods Animal chooses to expose.
+</Gotcha>
+
+## overriding and super
+
+a subclass can replace an inherited method by declaring one with the same signature. `super.method()` calls the parent's version from inside the override, which is how you extend behaviour instead of replacing it.
+
+```java title="Main.java" run output="an animal named rex\nan animal named rex, who is a good corgi"
+class Animal {
+    final String name;
+
+    Animal(String name) {
+        this.name = name;
+    }
+
+    String describe() {
+        return "an animal named " + name;
+    }
+}
+
+class Dog extends Animal {
+    final String breed;
+
+    Dog(String name, String breed) {
+        super(name);                 // constructors chain, they aren't inherited
+        this.breed = breed;
+    }
+
+    @Override
+    String describe() {
+        return super.describe() + ", who is a good " + breed;
+    }
+}
+
+void main() {
+    Animal plain = new Animal("rex");
+    Animal dog = new Dog("rex", "corgi");
+    IO.println(plain.describe());
+    IO.println(dog.describe());
+}
+```
+
+look at the last line: `dog` is declared as `Animal`, and the *Dog* version ran anyway. the variable's type says what you're allowed to call. the object's class decides which code runs. that's [polymorphism](/learn/oop/polymorphism), and it gets its own chapter. the constructor chain gets one too: [constructors and init order](/learn/oop/constructors-and-init-order).
+
+<Gotcha title="always write @Override">
+`@Override` makes javac check that you really are overriding something. without it, a typo or a wrong parameter type silently creates a new, unrelated method. the classic:
+
+```java title="Point.java"
+class Point {
+    final int x, y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+
+    @Override // [!code error]
+    public boolean equals(Point other) {  // overloads equals(Object), doesn't override it
+        return x == other.x && y == other.y;
+    }
+}
+```
+
+`error: method does not override or implement a method from a supertype`. without the annotation it compiles, and `HashSet` keeps calling the inherited `equals(Object)`, which never sees your version.
+</Gotcha>
+
+## fields don't override. they hide.
+
+here's the surprise. declare a field in Dog with the same name as one in Animal, and you don't replace it. you get **two fields**, both in the object.
+
+<Predict options={["dog dog", "animal dog", "animal animal", "dog animal"]} answer={1}>
+```java
+class Animal {
+    String name = "animal";
+    String name() { return "animal"; }
+}
+
+class Dog extends Animal {
+    String name = "dog";
+    @Override String name() { return "dog"; }
+}
+
+void main() {
+    Animal a = new Dog();
+    IO.println(a.name + " " + a.name());
+}
+```
+<Explain>
+method calls are dispatched on the object's runtime class, so `a.name()` runs Dog's: `dog`. field access is resolved by javac from the variable's declared type, so `a.name` reads the field declared in `Animal`: `animal`. same object, both fields present.
+</Explain>
+</Predict>
+
+<Figure caption={<>one <code>Dog</code>, two references to it with different declared types, and two fields called <code>name</code> inside it. <code>a.name</code> picks Animal's slot because <code>a</code> is declared as <code>Animal</code>. <code>d.name</code> picks Dog's.</>}>
+<Memory
+  frames={[{ name: "main", locals: { "Animal a": { ref: "d1" }, "Dog d": { ref: "d1" } } }]}
+  heap={{ d1: { type: "Dog", fields: { "name (Animal's)": { ref: "s1" }, "name (Dog's)": { ref: "s2" } } }, s1: { type: "String", value: '"animal"' }, s2: { type: "String", value: '"dog"' } }}
+/>
+</Figure>
+
+```java title="Main.java" run output="animal dog\ndog dog\nanimal"
+class Animal {
+    String name = "animal";
+    String name() { return "animal"; }
+}
+
+class Dog extends Animal {
+    String name = "dog";
+    @Override String name() { return "dog"; }
+}
+
+void main() {
+    Animal a = new Dog();
+    Dog d = (Dog) a;
+    IO.println(a.name + " " + a.name());
+    IO.println(d.name + " " + d.name());
+    IO.println(((Animal) d).name);    // a cast is enough to switch fields
+}
+```
+
+the lesson: never reuse a field name in a subclass. better yet, keep fields `private` and you physically can't.
+
+## casting up and down
+
+going up the tree (`Animal a = dog`) is always safe, so it's implicit. going down (`Dog d = (Dog) a`) is a promise that javac can't check, so the JVM checks it at runtime and throws `ClassCastException` if you lied. the modern way is to test and cast in one step:
+
+```java
+if (a instanceof Dog d) {      // pattern matching, java 16+
+    IO.println(d.breed);
+}
+```
+
+## one parent, and a root for everyone
+
+java classes have exactly one direct superclass. leave out `extends` and you get `Object`. so every class sits in one tree with `Object` at the top, and every object has `toString()`, `equals()` and `hashCode()`.
+
+<Figure caption="single inheritance: one parent each, all the way up to Object. a class can't have two parents, but it can implement any number of interfaces (next chapters).">
+<Tree>{`
+Object                        // the root. 11 methods, no fields
+    Number                    // abstract
+        Integer               // final
+        Long                  // final
+    String                    // final: can't be extended
+    AbstractCollection
+        AbstractList
+            ArrayList
+    Animal                    // yours
+        Dog
+        Cat
+`}</Tree>
+</Figure>
+
+`final` on a class stops the tree: `String`, `Integer` and every record are final. `final` on a method stops overriding just that method. both are how a class says "i wasn't designed to be extended, and i'm not pretending".
+
+<Effective item={19} title="design and document for inheritance or else prohibit it">
+a class that's safe to extend has to document which of its methods call which overridable methods, and its constructors must never call overridable methods. that's a lot of work and a permanent commitment. if you haven't done it, make the class `final` (or give it only private constructors). for the long version of why, see [composition over inheritance](/learn/oop/composition-over-inheritance).
+</Effective>
+
+<Interview q="why doesn't java allow multiple inheritance of classes?">
+because of state. if `C` extends both `A` and `B` and both have a field `x`, which `x` does the object contain, one or two? and whose constructor initializes it? C++ answers with virtual inheritance and a lot of rules. java chose single inheritance of classes (state + implementation) and multiple inheritance of interfaces (types, plus behaviour via default methods since java 8, with explicit rules for conflicts). see [abstract classes and interfaces](/learn/oop/abstract-classes-and-interfaces).
+</Interview>
+
+<Keylines>
+- a subclass object contains every field of its superclasses, private ones included.
+- the parent's fields keep their positions, so a Dog works anywhere an Animal does.
+- methods override: the object decides. fields hide: the variable's type decides.
+- constructors chain with `super(...)`. they're never inherited.
+- always `@Override`. never reuse a field name.
+</Keylines>

@@ -1,0 +1,207 @@
+import { RaceSim } from "@/components/figures/concurrency/RaceSim";
+import { InterleavingGrid } from "@/components/figures/concurrency/InterleavingGrid";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const overdraft = [
+  { mem: { balance: 100 }, note: "one account with 100 in it. two threads each want to withdraw 100." },
+  { ops: ["balance >= 100 → true", null], note: "T1 checks. 100 is enough. fine." },
+  { ops: [null, "balance >= 100 → true"], note: "T2 checks too, before T1 has done anything. still 100. also fine." },
+  { ops: ["balance -= 100", null], mem: { balance: 0 }, note: "T1 withdraws. balance is 0." },
+  { ops: [null, { t: "balance -= 100", k: "dead" }], mem: { balance: { v: -100, k: "dead" } }, note: "T2 acts on a check that stopped being true two steps ago. -100. and this happens even if -= itself were atomic." },
+];
+
+<InShort>
+a **race condition** is a bug where the result depends on how threads happen to interleave. the classic one: `count++` looks like one step, but it's three (**read, add, write**). two threads interleave those, both read the same old value, and one increment silently disappears. that's a **lost update**.
+</InShort>
+
+## the picture
+
+two people keeping a tally on one whiteboard. each one walks up, reads the number, does +1 in their head, and writes the new number over the old one. one at a time, it works. but if both read 41 before either writes, they both write 42, and one tally mark is gone. nobody made an arithmetic mistake. the bug is in the *timing*.
+
+that "in their head" part is the whole thing. each thread copies the value into a register (its own private scratch space), changes it there, and only then writes it back. between the read and the write, the shared value can change under it, and the thread has no idea.
+
+## count++ is three instructions
+
+here's what javac actually turns `count++` into, straight from `javap -c`:
+
+```text title="javap -c Counter"
+void increment();
+  Code:
+     0: aload_0
+     1: dup
+     2: getfield      #7     // Field count:I    ← read
+     5: iconst_1
+     6: iadd                                     ← add
+     7: putfield      #7     // Field count:I    ← write
+    10: return
+```
+
+a `getfield`, an `iadd`, a `putfield`. a thread can be paused, or simply run alongside another core, between any two of them. so let's split it into those three steps and let you be the scheduler.
+
+<Figure wide caption={<>click <strong>step T1</strong> and <strong>step T2</strong> in any order you like. try: T1 read, T2 read, then let both finish. the moment a thread writes over a value it never saw, the write turns <C k="dead">red</C>. then switch the guard to synchronized and try to break it again.</>}>
+<RaceSim />
+</Figure>
+
+see? nothing in that history is wrong on its own. every read read a real value, every add added correctly, every write wrote what it computed. the bug only exists in the *order*. that's why races survive code review: every line looks fine.
+
+## run it for real
+
+two platform threads, one shared `static int`, a million `count++` each:
+
+```java title="Main.java" run
+static int count = 0;
+
+void main() throws InterruptedException {
+    Runnable work = () -> {
+        for (int i = 0; i < 1_000_000; i++) {
+            count++;
+        }
+    };
+    Thread a = new Thread(work);
+    Thread b = new Thread(work);
+    a.start();
+    b.start();
+    a.join();
+    b.join();
+    IO.println("count = " + count);
+}
+```
+
+no output is printed under this one on purpose: it's different every time. here are eight runs in a row, on jdk 25 on a 14-core arm mac:
+
+<Figure caption={<>eight real runs of the program above. the <C k="live">green</C> bar is what the code says. the <C k="dead">red</C> ones are what it did. it lost between 211 thousand and 973 thousand increments, and never the same number twice.</>}>
+<Bars
+  data={[
+    { label: "expected", value: 2000000, tone: "live" },
+    { label: "run 1", value: 1050057, tone: "dead" },
+    { label: "run 2", value: 1789270, tone: "dead" },
+    { label: "run 3", value: 1483727, tone: "dead" },
+    { label: "run 4", value: 1742785, tone: "dead" },
+    { label: "run 5", value: 1026536, tone: "dead" },
+    { label: "run 6", value: 1766010, tone: "dead" },
+    { label: "run 7", value: 1030191, tone: "dead" },
+    { label: "run 8", value: 1340723, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+<Predict options={["1,000,000", "2", "1", "0"]} answer={1}>
+two threads each run `count++` a million times on a shared `int` starting at 0, with no synchronization. what's the smallest final value that's actually possible?
+<Explain>
+2. T1 reads 0 and stalls. T2 does 999,999 increments. T1 wakes up and writes 1, erasing all of them. T2 reads that 1 for its last increment and stalls. T1 runs its remaining 999,999 increments. T2 wakes up and writes 2. absurdly unlikely, completely legal. the point: a race doesn't just lose "a few" updates, it has no lower bound worth relying on.
+</Explain>
+</Predict>
+
+## how many orders go wrong?
+
+two threads, three steps each, gives exactly 20 possible orders. here's every one of them.
+
+<Figure wide caption={<>each tile is one interleaving: top row T1, bottom row T2, time going right. only the two where one thread finishes before the other starts end at <C k="live">2</C>. click a <C k="dead">1</C> to see where its update dies.</>}>
+<InterleavingGrid />
+</Figure>
+
+18 out of 20. if every order were equally likely, the counter would almost never be right. so why did the real runs keep a million-plus increments instead of losing nearly all of them?
+
+because real scheduling is lumpy. a thread usually runs a long streak of increments before anything interrupts it, and two cores only collide when their streaks overlap on the same value at the same moment. the bug fires in bursts, and how often depends on core count, the JIT, what else the machine is doing. which is exactly why a test that passes 1000 times proves nothing. more on that in [testing concurrent code](/learn/concurrency/testing-concurrent-code).
+
+<Deep title="why the JIT makes this worse, and then hides it">
+once C2 compiles that loop, it's allowed to keep `count` in a register for the entire loop and write it back once at the end (nothing in the code says another thread is watching). in a warmed-up JVM the loop then finishes so fast that the second thread often hasn't even started yet, and you get 2,000,000 every time. when I ran the same race 300 times in one JVM, the first two runs lost about 950,000 increments each. the next 298 were perfect. same bug, invisible.
+</Deep>
+
+## check-then-act
+
+`count++` is the poster child, but the more common race in real code is **check-then-act**: look at some state, decide, then act on a decision that may already be stale.
+
+<Figure wide caption={<>both checks pass because both happen before either withdrawal. the bug is the gap between the check and the act, not either line on its own.</>}>
+<Lanes threads={["T1", "T2"]} cells={["balance"]} steps={overdraft} />
+</Figure>
+
+it shows up everywhere:
+
+- `if (!map.containsKey(k)) map.put(k, v);` (two threads both put, one value lost)
+- `if (instance == null) instance = new Thing();` (two instances of your "singleton")
+- `if (!file.exists()) file.createNewFile();` (it's not just memory: files and databases race too)
+
+making each step thread-safe doesn't help. a `ConcurrentHashMap` makes `containsKey` and `put` each safe, but not the pair. you need the whole check-and-act to be one atomic step: a lock around both, or an API that does both at once.
+
+<Compare>
+<Bad label="two safe calls, one unsafe pair">
+```java
+if (!map.containsKey(user)) {
+    map.put(user, new Session(user));
+}
+```
+</Bad>
+<Good label="one atomic call">
+```java
+map.computeIfAbsent(user, Session::new);
+```
+</Good>
+</Compare>
+
+## data race vs race condition
+
+two terms people use interchangeably. they're not the same thing.
+
+<Defs>
+<dt>data race</dt>
+<dd>a precise memory-model term: two threads access the same variable, at least one writes, and nothing orders them (no happens-before). the racy `count++` above has one. so does a plain flag one thread sets and another reads. the effects are spelled out in the [java memory model](/learn/concurrency/java-memory-model).</dd>
+<dt>race condition</dt>
+<dd>a logic bug: the program is wrong under some timing. the overdraft is one. you can have a race condition with zero data races (every access done through atomics, still wrong), and a data race that happens to be harmless (a cached hash code that two threads might both compute).</dd>
+</Defs>
+
+fixing the data race is necessary. it isn't always sufficient.
+
+## the fixes, in one table
+
+every fix is one of three ideas: don't share, don't mutate, or coordinate.
+
+| fix | how | chapter |
+| --- | --- | --- |
+| don't share | keep state on the stack or inside one thread | [threads](/learn/concurrency/threads) |
+| don't mutate | immutable objects can be shared freely | [immutability](/learn/oop/immutability) |
+| lock it | `synchronized` or a `Lock` makes read-add-write one step | [synchronized](/learn/concurrency/synchronized) |
+| do it atomically | `AtomicInteger`, CAS, `LongAdder` | [atomics and CAS](/learn/concurrency/atomics-and-cas) |
+| use a safe structure | `ConcurrentHashMap.merge`, `computeIfAbsent` | [concurrent collections](/learn/concurrency/concurrent-collections) |
+
+the smallest fix for the counter is swapping the `int` for an `AtomicInteger`, whose `incrementAndGet()` does read-add-write as one indivisible hardware step:
+
+```java title="Main.java" run output="count = 2000000"
+import java.util.concurrent.atomic.AtomicInteger;
+
+static AtomicInteger count = new AtomicInteger();
+
+void main() throws InterruptedException {
+    Runnable work = () -> {
+        for (int i = 0; i < 1_000_000; i++) {
+            count.incrementAndGet();
+        }
+    };
+    Thread a = new Thread(work);
+    Thread b = new Thread(work);
+    a.start();
+    b.start();
+    a.join();
+    b.join();
+    IO.println("count = " + count.get());
+}
+```
+
+every time. that's the difference.
+
+<Gotcha title="volatile doesn't fix count++">
+`volatile int count` makes every read and write go to shared memory, so threads see each other's writes. but `count++` on a volatile is still read, add, write. two threads can still both read 41. volatile fixes visibility, not atomicity. more in the [memory model](/learn/concurrency/java-memory-model) chapter.
+</Gotcha>
+
+<Interview q="is i++ thread-safe in java? what about if i is volatile?">
+no, in both cases. `i++` compiles to a read, an add and a write, and another thread can interleave between them, so two increments can collapse into one. `volatile` only guarantees that each read sees the latest write; it doesn't make the three steps one. use `AtomicInteger.incrementAndGet()`, a `LongAdder` for hot counters, or a lock.
+</Interview>
+
+<Keylines>
+- `count++` is three steps: read, add, write. another thread can cut in between any two.
+- a lost update is two threads writing results computed from the same old value.
+- 18 of the 20 possible orders of two increments are wrong. reality hides it with lumpy scheduling.
+- check-then-act races even when every single call is thread-safe.
+- data race: unordered conflicting accesses. race condition: wrong under some timing. not the same.
+- don't share, don't mutate, or coordinate. there is no fourth option.
+</Keylines>

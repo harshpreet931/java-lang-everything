@@ -1,0 +1,135 @@
+import { DocAnatomy } from "@/components/figures/tooling/DocAnatomy";
+
+<InShort>
+a **doc comment** sits right above a declaration, and the `javadoc` tool turns all of them into an HTML site. the **first sentence** becomes the summary, **block tags** (`@param`, `@return`, `@throws`) become the structured parts.
+
+java 18 added **`{@snippet}`** for code examples that don't fight HTML, and java 23 added **`///` markdown comments**, so you can finally write docs the way you write a README.
+</InShort>
+
+## the picture
+
+a doc comment is the label on the box. nobody opens a library's source to learn how to call it, they read the label: in the IDE popup when they hover a method, or on the generated site. every JDK class page you've ever read (`String`, `HashMap`) is javadoc output, generated from comments in the JDK's own source.
+
+<Figure wide caption={<>hover the source on the left; the matching part of the output lights up. switch to the markdown version to see the same structure written as <code>///</code>. both comments are from a real class i ran through javadoc 25.</>}>
+<DocAnatomy />
+</Figure>
+
+## running it
+
+```bash
+$ javadoc -d docs -sourcepath src com.acme.money
+Loading source files for package com.acme.money...
+Constructing Javadoc information...
+Standard Doclet version 25.0.4.1+1-LTS
+Generating docs/com/acme/money/Money.html...
+src/com/acme/money/Money.java:47: warning: no comment
+    public Money negate() {
+                 ^
+...
+1 warning
+```
+
+one record with three methods became 60 files and 4.3 MB: the class page, package pages, an index, a client-side search, and the shared styles. maven (`mvn javadoc:javadoc`) and gradle (`gradle javadoc`) run the same tool. that `warning: no comment` comes from **doclint**, javadoc's built-in checker: it also flags broken HTML, missing `@param`s and links that don't resolve. `-Xdoclint:all,-missing` keeps the correctness checks and drops the "you didn't document this" nagging.
+
+<Predict options={["Retries a few times, e.g. three, then gives up.", "Retries a few times, e.g.", "Retries a few times"]} answer={1}>
+```java
+/** Retries a few times, e.g. three, then gives up. Never retries forever. */
+public void retry() {}
+```
+<Explain>
+the summary is "the first sentence", and javadoc decides a sentence ends at a period followed by a space. so the method summary table on the real generated page says `Retries a few times, e.g.` and stops. same with `approx.`, `vs.`, `i.e.`. write `e.g.&nbsp;three`, rephrase, or wrap the summary explicitly with `{@summary ...}` (java 10+).
+</Explain>
+</Predict>
+
+## code examples: @snippet
+
+the old way to put code in a doc comment was `<pre>{@code ... }</pre>`, and it fought you: `@` at the start of a line looks like a block tag, braces have to balance, and you can't highlight anything. java 18 added `{@snippet}` ([JEP 413](https://openjdk.org/jeps/413)):
+
+<Compare>
+<Bad label="pre + code">
+```java
+/**
+ * <pre>{@code
+ * Money total = Money.ofCents(1999)
+ *     .plus(Money.ofCents(1));
+ * }</pre>
+ */
+```
+</Bad>
+<Good label="@snippet">
+```java
+/**
+ * {@snippet :
+ * Money total = Money.ofCents(1999).plus(Money.ofCents(1));
+ * System.out.println(total); // @highlight substring="total"
+ * }
+ */
+```
+</Good>
+</Compare>
+
+the `// @highlight` marker comment is an instruction to javadoc: it's removed from the output, and on that line `total` is wrapped in bold. there are `@replace`, `@link` and region markers too. the generated page also got a **copy** button on the snippet.
+
+the real upgrade is **external snippets**: `{@snippet file="MoneyExamples.java" region="sum"}` pulls the code from a real `.java` file in a `snippet-files` folder, a file you can compile and run as a test. documentation examples that can't silently rot. that's the same idea behind every `run` block on this site.
+
+## markdown doc comments
+
+java 23 made `///` start a markdown doc comment ([JEP 467](https://openjdk.org/jeps/467)). it's CommonMark plus tables, with javadoc's own links and block tags still working:
+
+```java title="Money.java"
+/// Adds two amounts.
+///
+/// The result is **exact**: no rounding, no floating point.
+/// See [#ofCents(long)] for creating amounts, and
+/// [java.math.BigDecimal] if you need fractions of a cent.
+///
+/// ```java
+/// Money.ofCents(150).plus(Money.ofCents(50)); // 200 cents
+/// ```
+///
+/// @param other the amount to add
+/// @return the sum
+public Money plus(Money other) {
+    return new Money(Math.addExact(cents, other.cents));
+}
+```
+
+what javadoc 25 generated, checked in the HTML: `**exact**` became `<strong>`, both `[...]` references became real links (the `BigDecimal` one straight into the JDK's own API docs), and the fence became a `<pre><code class="language-java">` block. `@param` and `@return` render exactly like in a `/** */` comment.
+
+| you want | `/** */` (html) | `///` (markdown) |
+| --- | --- | --- |
+| code in a sentence | `{@code x}` | `` `x` `` |
+| a link | `{@link String#strip()}` | `[String#strip()]` |
+| emphasis | `<em>`, `<strong>` | `_x_`, `**x**` |
+| a list | `<ul><li>` | `- item` |
+| a code block | `<pre>{@code ...}</pre>` or `{@snippet}` | a fenced block (or `{@snippet}`) |
+
+<Gotcha title="old /// comments are now documentation">
+before java 23, `///` was just a line comment that happened to start with an extra slash, and some codebases used `////////` banners or `/// TODO` notes. now a `///` block directly above a declaration *is* its doc comment, and it shows up in the generated docs and the IDE popup. grep for `///` before your first javadoc run on 23+.
+</Gotcha>
+
+## what good docs say
+
+the tool is the easy part. the comment that's actually useful answers what a caller can't see from the signature:
+
+- what it does, in one standalone sentence (it's the summary).
+- what each parameter may be: can it be null? negative? empty?
+- what it returns in the edge cases: empty list or null?
+- which exceptions, and *when*. `@throws IllegalArgumentException if cents is Long.MIN_VALUE` beats `@throws IllegalArgumentException on bad input`.
+- thread safety and side effects, when there are any.
+
+<Effective item={56} title="write doc comments for all exposed API elements">
+every public class, interface, constructor, method and field gets a doc comment, describing the contract (what, not how): preconditions, postconditions, side effects, thread safety. Bloch also argues for the summary-sentence discipline and for documenting generics' type parameters and enum constants. the item predates `{@snippet}` and markdown, but the advice holds unchanged.
+</Effective>
+
+<Interview q="what's the difference between a comment and a doc comment?">
+a regular comment (`//` or `/* */`) explains the implementation to someone reading the code. a doc comment (`/** */` or, since java 23, `///`) documents the contract for someone calling the code: the javadoc tool and IDEs extract it, the first sentence becomes the summary, and block tags like `@param` and `@throws` become structured docs. bonus point: doclint can fail a build on broken doc comments, and `{@snippet}` (java 18) lets examples come from compiled code.
+</Interview>
+
+<Keylines>
+- doc comments document the contract. javadoc turns them into a site.
+- the first sentence is the summary, and it ends at the first ". ", even in "e.g. ".
+- `{@snippet}` (java 18) beats `<pre>{@code}</pre>`. external snippets can be tested.
+- `///` markdown comments (java 23): backticks, `[links]`, fences, and the same block tags.
+- document what the signature can't say: nulls, edge cases, exceptions, threads.
+</Keylines>

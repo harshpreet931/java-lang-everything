@@ -1,0 +1,15 @@
+[
+  { "term": "strong encapsulation", "short": "since java 17 the JDK's private members are closed to reflection. setAccessible throws unless the package is opened.", "chapter": "reflection", "aka": ["InaccessibleObjectException", "--add-opens", "illegal reflective access"] },
+  { "term": "retention policy", "short": "how long an annotation survives: SOURCE (javac only), CLASS (in the class file, the default) or RUNTIME (visible to reflection).", "chapter": "annotations", "aka": ["@Retention", "RuntimeVisibleAnnotations"] },
+  { "term": "meta-annotation", "short": "an annotation on an annotation type: @Retention, @Target, @Documented, @Inherited, @Repeatable.", "chapter": "annotations", "aka": ["@Target", "@Inherited", "@Repeatable"] },
+  { "term": "annotation processor", "short": "a plugin that runs inside javac, reads declarations and can generate new source files, in rounds.", "chapter": "annotation-processing", "aka": ["processing round", "AbstractProcessor", "-proc:full"] },
+  { "term": "dynamic proxy", "short": "an object generated at runtime that implements given interfaces and sends every call to one InvocationHandler.", "chapter": "dynamic-proxies", "aka": ["InvocationHandler", "Proxy.newProxyInstance"] },
+  { "term": "self-invocation", "short": "a bean calling its own method through this, which bypasses the proxy and so skips @Transactional and friends.", "chapter": "dynamic-proxies" },
+  { "term": "MethodHandle", "short": "a typed, directly callable reference to a method, constructor or field, found once through a Lookup.", "chapter": "method-handles-and-varhandles", "aka": ["method handle", "MethodHandles.Lookup", "combinator"] },
+  { "term": "signature polymorphic", "short": "a method like invokeExact whose call sites each get their own descriptor from the argument and cast types.", "chapter": "method-handles-and-varhandles", "aka": ["invokeExact", "WrongMethodTypeException"] },
+  { "term": "VarHandle", "short": "a handle to a field or array slot with CAS and per-access memory ordering: plain, opaque, acquire/release, volatile.", "chapter": "method-handles-and-varhandles", "aka": ["access mode", "acquire/release", "opaque"] },
+  { "term": "bootstrap method", "short": "the method the JVM calls the first time an invokedynamic runs. it returns the CallSite the instruction is linked to.", "chapter": "invokedynamic", "aka": ["CallSite", "ConstantCallSite", "MutableCallSite"] },
+  { "term": "dynamic constant", "short": "a constant pool entry computed by a bootstrap method on first ldc, then cached. java 11, JEP 309.", "chapter": "invokedynamic", "aka": ["condy", "CONSTANT_Dynamic"] },
+  { "term": "Class-File API", "short": "java.lang.classfile, java 24: parse, build and transform class files with elements, builders and transforms.", "chapter": "class-file-api", "aka": ["java.lang.classfile", "ClassTransform", "ClassModel"] },
+  { "term": "ServiceLoader", "short": "finds implementations of an interface on the class or module path through META-INF/services or provides/uses.", "chapter": "service-loader", "aka": ["META-INF/services", "service provider", "provides with", "uses"] }
+]

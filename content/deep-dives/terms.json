@@ -1,0 +1,8 @@
+[
+  { "term": "continuation", "short": "a piece of code that can pause itself (yield) and be resumed later from the same spot. every virtual thread runs inside one.", "chapter": "virtual-thread-internals", "aka": ["Continuation", "jdk.internal.vm.Continuation", "yield"] },
+  { "term": "stack chunk", "short": "the heap object a parked virtual thread's frames are copied into (freeze) and copied back out of (thaw).", "chapter": "virtual-thread-internals", "aka": ["StackChunk", "freeze", "thaw"] },
+  { "term": "pointer chasing", "short": "walking a structure where each element holds the address of the next, so every load waits for the previous one. why linked lists are slow.", "chapter": "arraylist-vs-linkedlist", "aka": ["dependent load", "cache miss"] },
+  { "term": "GC overhead limit", "short": "Parallel GC's rule: more than 98% of time in GC while freeing under 2% of the heap throws OutOfMemoryError: GC overhead limit exceeded.", "chapter": "out-of-memory-zoo", "aka": ["GC overhead limit exceeded", "UseGCOverheadLimit"] },
+  { "term": "mutable key", "short": "a hash map key or set element whose hashCode changes after insertion. the entry stays in the old bucket and can't be found or removed.", "chapter": "equals-and-hashcode-traps", "aka": ["vanishing key"] },
+  { "term": "class loader leak", "short": "one reference from long-lived code into an undeployed app keeps its class loader, and so every one of its classes, alive.", "chapter": "classloader-leaks", "aka": ["redeploy leak", "PermGen space", "Metaspace leak"] }
+]

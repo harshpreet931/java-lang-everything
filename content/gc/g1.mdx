@@ -1,0 +1,113 @@
+import { G1Regions } from "@/components/figures/gc/G1Regions";
+import { RemSet } from "@/components/figures/gc/RemSet";
+import { G1Cycle } from "@/components/figures/gc/cycles";
+
+<InShort>
+G1 (garbage first) cuts the heap into about 2048 equal **regions**, and any region can be eden, survivor, old or humongous. young GCs evacuate the eden regions. when the old gen fills up, G1 marks it **concurrently**, then runs **mixed GCs** that also evacuate the old regions with the **most garbage first**.
+
+it sizes all of that to hit a pause goal, `-XX:MaxGCPauseMillis` (200 ms by default). it's been the default collector since java 9, and since java 27 it's the default everywhere.
+</InShort>
+
+## the picture
+
+you know how [Parallel](/learn/gc/serial-and-parallel) has to compact the whole old gen at once, so a big heap means a big pause? G1's answer: never collect the whole old gen. collect **pieces** of it.
+
+think of a warehouse made of identical shipping containers. you can't empty the whole warehouse in one night. so every night you check which containers are mostly trash, move the few useful boxes out of them into one empty container, and send the rest off to be recycled. how many containers you deal with each night depends on how long the night is (the pause target). containers that are full of useful stuff, you just leave alone.
+
+<Figure wide caption={<>step through one full G1 cycle. outlined in <C k="hot">amber</C> is the collection set: the regions this GC will evacuate. after marking, each old region shows its <C k="live">live</C> and <C k="dead">garbage</C> share. change the pause target and step to the mixed GC again: a tighter target means fewer old regions per pause.</>}>
+<G1Regions />
+</Figure>
+
+see why it's called garbage first? after marking, G1 knows exactly how much garbage each old region holds, and it always evacuates the worst ones first: the least copying for the most space back. and since everything gets evacuated (copied into a fresh region), the old gen gets compacted a few regions at a time. no fragmentation, no giant compaction pause.
+
+## one real cycle
+
+here's a real G1 cycle, straight out of `-Xlog:gc` for the toy service from the [last chapter](/learn/gc/serial-and-parallel) (256 MB heap, 1 MB regions, jdk 25):
+
+<Figure wide caption={<>hover the blocks. every young and mixed GC is a short stop-the-world pause. marking runs <C k="meta">concurrently</C> in between, interrupted only by the tiny remark and cleanup pauses.</>}>
+<G1Cycle />
+</Figure>
+
+the lines it's made of, in the order they happen:
+
+| log says | what's happening |
+| --- | --- |
+| `Pause Young (Normal)` | a plain young GC: evacuate eden and survivor regions. |
+| `Pause Young (Concurrent Start)` | the old gen crossed the threshold, so this young GC also starts concurrent marking (it scans the roots while the app is stopped anyway). |
+| `Concurrent Mark Cycle` | marking, on GC threads, while the app runs. |
+| `Pause Remark` | finish marking (drain the SATB queues), process weak references, free regions that turned out to be completely empty, and pick the old regions worth collecting: the candidates. |
+| `Pause Cleanup` | a tiny pause that closes the cycle, after the candidates' remembered sets have been rebuilt concurrently. |
+| `Pause Young (Prepare Mixed)` | the last young-only GC before the mixed ones. |
+| `Pause Young (Mixed)` | young regions plus some old candidate regions. |
+
+look at the remark line: `201M->135M`. that 66 MB came back without copying a single object: whole regions that marking found to be 100% garbage are simply freed.
+
+and here's G1 deciding what goes into one mixed GC (`-Xlog:gc+ergo+cset=debug`):
+
+```text nolines
+GC(8) Start adding marking candidates to collection set. Min 8 regions, max 26 regions,
+      available 58 regions (11 groups), time remaining 195.70ms, optional threshold 39.14ms
+GC(8) Finish adding marking candidates to collection set (Maximum number of regions reached).
+GC(8) Pause Young (Mixed) (G1 Evacuation Pause) 198M->166M(256M) 1.467ms
+```
+
+58 old regions were worth collecting. G1 wants to get through them in at most 8 mixed GCs (`-XX:G1MixedGCCountTarget=8`), so at least 8 per pause. it will never take more than 10% of the heap's regions in one go (26 of 256). the predicted time was nowhere near the 200 ms goal, so the region cap is what stopped it. the actual pause: 1.5 ms.
+
+<Quiz question="what does -XX:MaxGCPauseMillis=50 actually do?" options={["guarantees every pause is under 50 ms", "a goal: G1 sizes the young gen and each mixed collection set to try to stay under it", "limits how long concurrent marking can take"]} answer={1}>
+<Explain>
+it's a target, not a promise. G1 keeps statistics on how long copying, scanning remembered sets and so on actually took, predicts the cost of each region, and picks the eden size and the number of old regions per mixed GC to fit the goal. set it too low and G1 makes eden tiny and collects all the time, which costs throughput and can still miss. and nothing makes a full GC fit.
+</Explain>
+</Quiz>
+
+## remembered sets
+
+collecting a handful of regions has the same problem as a young GC: objects outside the collection set might point in, and those pointers are roots. G1 can't scan the rest of the heap to find them, so every region keeps a **remembered set**: the list of cards (512-byte chunks) elsewhere in the heap that contain a pointer into it.
+
+<Figure caption={<>an eden region with two incoming references from old regions. its remembered set (<C k="meta">purple</C>) lists exactly the two cards those references live in.</>}>
+<RemSet />
+</Figure>
+
+those sets are kept up to date by the **post-write barrier**. on a reference store, it checks whether the store crosses regions (and isn't null). if it does, it marks the card dirty and queues it, and background **refinement** threads move the card into the right remembered set. add the SATB pre-barrier from [how GC works](/learn/gc/gc-fundamentals) and that's G1's whole barrier story. it's also why G1 has a bit less throughput than Parallel: every reference store does a little extra work. java 26 cut that work down a lot (JEP 522): the app now just dirties a card in one table while refinement works on a second one, and the barrier went from around 50 instructions to 12 on x64.
+
+## the knobs worth knowing
+
+| flag | default | what it does |
+| --- | --- | --- |
+| `-XX:MaxGCPauseMillis` | 200 | the pause goal. the one knob G1 is designed around. |
+| `-Xmx` / `-Xms` | 25% / 1/64 of RAM | heap size. more heap, fewer GCs. |
+| `-XX:InitiatingHeapOccupancyPercent` | 45 | when to start marking. G1 adapts it at runtime from what it observes. |
+| `-XX:G1HeapRegionSize` | ergonomic | 1 to 32 MB, aiming for ~2048 regions. bigger regions, fewer humongous objects. |
+| `-XX:G1ReservePercent` | 10 | heap kept free as room to evacuate into. |
+| `-XX:G1MixedGCCountTarget` | 8 | spread the old candidates over this many mixed GCs. |
+| `-XX:G1HeapWastePercent` | 5 | stop mixed GCs once what's left would free less than this. |
+
+<Gotcha title="don't set the young gen size">
+`-Xmn` or `-XX:NewRatio` pin the young gen's size, and young gen size is G1's main lever for hitting the pause goal. with it pinned, G1 can't shrink eden when pauses run long. people copy these flags over from old Parallel configs all the time. with G1, set `-Xmx` and maybe `MaxGCPauseMillis`, and leave the rest alone until a log tells you otherwise.
+</Gotcha>
+
+<Gotcha title="evacuation failure">
+evacuating needs free regions to copy into. if the heap is too full (too much live data, or garbage piling up in the old gen faster than marking can keep up), G1 runs out of room mid-copy. the log says so, and what usually comes next is the expensive thing G1 exists to avoid. from a run of the same service with a heap that was too small (128 MB):
+
+```text nolines
+GC(9)  Pause Young (Prepare Mixed) (G1 Evacuation Pause) (Evacuation Failure: Allocation) 124M->127M(128M) 1.601ms
+GC(10) Pause Full (G1 Compaction Pause) 127M->65M(128M) 15.332ms
+```
+
+a full GC: the whole heap, mark-compact, every thread stopped. it's parallel since java 10, but it's still the slowest pause G1 has. the fix is almost always more heap, or less live data. see [memory leaks](/learn/gc/memory-leaks).
+</Gotcha>
+
+<Deep title="humongous objects, up close">
+an object at least half a region in size is humongous. it gets its own run of contiguous regions straight in the old gen, and the tail of the last region is wasted. humongous allocations can also kick off a marking cycle early (you'll see `(G1 Humongous Allocation)` as the GC cause). short-lived humongous objects are less bad than they used to be: G1 can reclaim a dead one at any young GC if nothing points at it. but if `-Xlog:gc+heap` keeps showing `Humongous regions: 40->40`, either your buffers are oversized or `-XX:G1HeapRegionSize` is too small for them.
+</Deep>
+
+<Interview q="how does G1 decide which regions to collect?">
+young regions (eden and survivors) are in every collection set. old regions are only considered after a concurrent marking cycle, which measures how much of each one is live. regions that are mostly live (over 85% by default) are skipped. the rest are sorted by how much garbage they'd free for how much copying, and each mixed GC takes regions from the top of that list until its predicted pause would exceed `MaxGCPauseMillis` or it hits the per-GC cap. that's the "garbage first" in the name.
+</Interview>
+
+<Keylines>
+- G1 splits the heap into equal regions. any region can be eden, survivor, old or humongous.
+- every collection evacuates whole regions, which also compacts as it goes.
+- concurrent marking finds out how much garbage each old region has. mixed GCs take the worst ones first.
+- remembered sets let G1 collect a few regions without scanning the rest of the heap.
+- `MaxGCPauseMillis` is a goal. don't pin the young gen, and treat a full GC in the log as a bug.
+</Keylines>

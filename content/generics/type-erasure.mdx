@@ -1,0 +1,152 @@
+import { ErasureView } from "@/components/figures/generics/ErasureView";
+
+<InShort>
+generics live only in the compiler. javac checks every type argument, then **erases** them: `T` becomes its bound (`Object` if there isn't one), `List<String>` becomes plain `List`. to keep things working it **inserts casts** where values come back out, and writes **bridge methods** where erasure would break overriding.
+
+the JVM never sees a type argument. that one decision explains almost every weird rule in this part.
+</InShort>
+
+## the picture
+
+you know how `ArrayList<String>` and `ArrayList<Integer>` feel like two different classes? at run time they're the same class, the same object layout, the same bytecode. the difference was only ever a promise the compiler checked for you.
+
+think of an editor proofreading a manuscript with a red pen (javac). they check every sentence against the style guide, fix what's wrong, and then the red notes are thrown away before printing. the printed book (the class file) contains the result of the checking, never the checks themselves. a reader (the JVM) can't tell which sentences were reviewed.
+
+<Figure caption={<>what javac does to generic code, in order. hover a stage. none of it costs anything at run time except the casts, and those are the ones you would have written by hand anyway.</>}>
+<Flow stages={[
+  { label: "check", sub: "your types", note: "every add, every assignment, every call is checked against the type arguments. this is where generic code fails, if it fails." },
+  { label: "erase", sub: "T → its bound", note: "type parameters become their first bound (Object if none). parameterized types lose their arguments: List<String> → List." },
+  { label: "cast", sub: "at every read", note: "where an erased Object comes back and the code needs a String, javac inserts a checkcast. it can't fail unless something bypassed the checks." },
+  { label: "bridge", sub: "fix overriding", note: "where erasure would stop a method from overriding its parent's, javac adds a synthetic bridge method." },
+  { label: ".class", sub: "no type arguments", note: "the bytecode only knows List and Object. the generic signatures survive as metadata, but the JVM doesn't use them to run anything." },
+]} />
+</Figure>
+
+## what javac actually writes
+
+talk is cheap. here's real `javap` output from javac 25, next to the source it came from:
+
+<Figure wide caption={<>pick an example, then something to look at. the left is java, the right is the bytecode javac produced, with the matching lines in <C k="hot">amber</C>. watch for <code>Object</code> where you wrote <code>T</code>, and the <code>checkcast</code> nobody typed.</>}>
+<ErasureView />
+</Figure>
+
+the rules, all of them:
+
+| in the source | after erasure |
+| --- | --- |
+| `T` | `Object` |
+| `T extends Number` | `Number` |
+| `T extends Comparable<T> & Serializable` | `Comparable` (the first bound) |
+| `List<String>`, `Map<K, List<V>>` | `List`, `Map` |
+| `T[]` | `Object[]` |
+| `String s = list.get(0)` | `String s = (String) list.get(0)` |
+
+notice that `javap` still prints `class Box<T>` and `T get()`. that's not a contradiction: javac also stores the generic signatures in the class file as metadata (a `Signature` attribute), for the compiler and for reflection. the **descriptor**, the thing the JVM links and runs against, is the erased one. what that metadata is good for is in [generics at runtime](/learn/generics/generics-and-reflection).
+
+<Predict options={["true", "false", "compile error"]} answer={0}>
+```java
+var a = new ArrayList<String>();
+var b = new ArrayList<Integer>();
+IO.println(a.getClass() == b.getClass());
+```
+<Explain>
+one class, `java.util.ArrayList`, shared by every type argument. `getClass()` returns the same `Class` object for both, so it prints `true` (checked on jdk 25). there is no `ArrayList<String>.class`, and no way to ask an `ArrayList` object what its type argument was. it doesn't have one.
+</Explain>
+</Predict>
+
+## bridge methods
+
+erasure has one sneaky side effect. `Comparable<T>` declares `compareTo(T)`, which erases to `compareTo(Object)`. your `Name implements Comparable<Name>` declares `compareTo(Name)`. in the bytecode those are different signatures, so yours doesn't override the interface method at all, and code that only knows it has a `Comparable` (like `Collections.sort`) would call a method that doesn't exist.
+
+javac's fix is the **bridge method**: a synthetic `compareTo(Object)` that casts its argument to `Name` and calls yours. it's in the "a bridge method" tab above. reflection can see it too:
+
+```java title="Main.java" run output="public int Name.compareTo(Name)\npublic int Name.compareTo(java.lang.Object)   <- bridge, synthetic: true\ntrue"
+import java.lang.reflect.Method;
+import java.util.*;
+
+record Name(String value) implements Comparable<Name> {
+    public int compareTo(Name other) {
+        return value.compareTo(other.value);
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        Method[] ms = Name.class.getDeclaredMethods();
+        Arrays.sort(ms, Comparator.comparing(Method::toString));
+        for (Method m : ms)
+            if (m.getName().equals("compareTo"))
+                System.out.println(m + (m.isBridge() ? "   <- bridge, synthetic: " + m.isSynthetic() : ""));
+        System.out.println(new ArrayList<String>().getClass() == new ArrayList<Integer>().getClass());
+    }
+}
+```
+
+bridges also show up for covariant return types, generic or not (override `Object clone()` with `Point clone()` and javac adds an `Object clone()` bridge). you almost never notice them, except in stack traces: a frame for a method on a line with no code, or a `ClassCastException` thrown from a line that's just the class declaration. that's the bridge's cast failing, because something called it through a raw type with the wrong argument.
+
+## the rules erasure forces on you
+
+if the JVM doesn't know type arguments, anything that would need them at run time is off the table. javac tells you up front:
+
+<Compare>
+<Bad label="asking for type arguments at run time">
+```java
+if (o instanceof List<String>) { } // [!code error]
+// error: Object cannot be safely
+//   cast to List<String>
+```
+</Bad>
+<Good label="asking for what the object really has">
+```java
+if (o instanceof List<?> list) {
+    // a List of something. check
+    // the elements one by one if
+    // you need to
+}
+```
+</Good>
+</Compare>
+
+`instanceof List<String>` would need the object to remember `String`. it doesn't, so the check is impossible and javac refuses (since java 16 it's allowed when the compiler can prove it's safe anyway, like a `Collection<String>` tested for `List<String>`). the same logic kills overloads that differ only in type arguments:
+
+```java
+void print(List<String> xs) { }
+void print(List<Integer> xs) { }   // [!code error]
+```
+
+```text
+error: name clash: print(List<Integer>) and print(List<String>) have the same erasure
+```
+
+after erasure both are `print(List)`, and a class can't have two methods with the same signature. the rest of the list, `new T()`, `new T[]`, `List<int>`, generic exceptions, is in [arrays, varargs and other limits](/learn/generics/generics-limitations).
+
+## why do it this way?
+
+because in 2004 there were millions of lines of java using raw collections, compiled against libraries that were about to become generic. erasure meant:
+
+- **the JVM didn't change.** no new bytecodes, no new object layout, no type arguments to track at run time.
+- **migration could happen in any order.** a library could add type parameters without breaking a single compiled client, because `List<String>` and the old `List` compile to the same descriptor. clients could generify before or after their libraries did.
+- **one copy of the code.** `ArrayList` is one class however many type arguments you use, unlike templates that stamp out a copy per type.
+
+C# made the opposite choice a year later: generics in .NET 2.0 are **reified** (the runtime knows `List<string>` from `List<int>`), which needed a new runtime and a parallel set of generic collection classes. java kept compatibility and paid with everything in the next chapter.
+
+<Gotcha title="erasure is also why heap pollution is possible">
+the casts javac inserts are only safe if every write went through the type checker. raw types, unchecked casts and generic varargs can put the wrong thing into a `List<String>`, and nothing at run time will stop them, because at run time it's just a `List`. the failure comes later, at one of javac's inserted casts, somewhere else. that's what "unchecked warning" means, and it's the subject of [arrays, varargs and other limits](/learn/generics/generics-limitations).
+</Gotcha>
+
+<Deep title="will java ever reify generics?">
+not wholesale: it would break the migration story that erasure was chosen for. but project valhalla is working on the biggest limit, primitives. value classes (JEP 401, targeted as a preview for jdk 28) are the first step, and the longer-term plan is to let generic code work over value types without boxing, so a `List<int>`-like thing stops being a fantasy. what's coming is in [valhalla](/learn/future/valhalla).
+</Deep>
+
+<Interview q="what is type erasure, and what's a bridge method?">
+java generics are checked at compile time and then erased: type parameters are replaced by their first bound (or `Object`), parameterized types by their raw type, and javac inserts casts where generic values are read. so at run time `List<String>` and `List<Integer>` are the same class, which is why you can't do `instanceof List<String>`, `new T()`, or overload on type arguments alone. a bridge method is a synthetic method javac generates when erasure would break overriding: for `class Name implements Comparable<Name>`, it adds `compareTo(Object)` that casts to `Name` and calls your `compareTo(Name)`. it was done this way for binary compatibility with pre-java-5 code.
+</Interview>
+
+<Keylines>
+- javac checks generics, then erases them. the JVM never sees a type argument.
+- `T` becomes its first bound, `List<String>` becomes `List`.
+- javac inserts a cast wherever an erased value is read as something specific.
+- bridge methods keep overriding working after erasure.
+- no `instanceof List<String>`, no overloads that differ only in type arguments.
+- the reason: old code and new code had to run side by side, unchanged.
+</Keylines>

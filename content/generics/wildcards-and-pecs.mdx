@@ -1,0 +1,159 @@
+import { Decoder } from "@/components/figures/generics/Decoder";
+import { copySig } from "@/components/figures/generics/decoders";
+import { SubtypeLattice } from "@/components/figures/generics/SubtypeLattice";
+import { WildcardOps } from "@/components/figures/generics/WildcardOps";
+
+<InShort>
+an `Integer` is a `Number`, but a `List<Integer>` is **not** a `List<Number>`. generics are **invariant**. wildcards loosen that, safely: `List<? extends Number>` takes a list of any kind of number but only lets you **read**, `List<? super Integer>` takes any list an `Integer` fits in but only lets you **write**.
+
+which one when? **PECS**: producer `extends`, consumer `super`.
+</InShort>
+
+## the picture
+
+you know how it feels like a list of integers should obviously count as a list of numbers? here's why it can't. if it did, this would compile:
+
+```java
+List<Integer> ints = new ArrayList<>();
+List<Number> nums = ints;      // pretend this were allowed
+nums.add(2.5);                 // a Double is a Number, fine
+Integer i = ints.get(0);       // ClassCastException, in a program with no casts
+```
+
+it doesn't compile. javac stops at line 2:
+
+```text
+Main.java:2: error: incompatible types: List<Integer> cannot be converted to List<Number>
+```
+
+the real danger is line 3, writing through the wider view. so java's answer is a wider view you can't write through.
+
+think of a fruit bowl that only holds apples. if all you'll do is take fruit *out* of it, an apple bowl is a perfectly good fruit bowl (you'll always get fruit). if you want to put fruit *in*, it isn't (someone will drop a banana in it). and a basket that takes any fruit is a fine place to put an apple, even though it's not an apple basket. that's the whole chapter: `extends` for taking out, `super` for putting in.
+
+<Figure wide caption={<>click any box. for a concrete list, <C k="live">green</C> is every type it can be passed as. for a wildcard type, green is every list that fits it. the <C k="dead">dashed line</C> is the edge people expect and java refuses. every edge checked with javac 25.</>}>
+<SubtypeLattice />
+</Figure>
+
+see how `List<Integer>` and `List<Number>` are siblings, not parent and child? the wildcards sit above them as common supertypes. `List<?>` sits above everything: a list of *something*.
+
+## what each one lets you do
+
+a wildcard type is a promise with a price. `? extends Number` promises javac that everything inside is some kind of `Number`, but it doesn't say which kind. so reading is safe (whatever it is, it's a `Number`) and writing isn't (is this list the `List<Double>` or the `List<Integer>`?).
+
+<Figure wide caption={<>pick a declared type, then click an operation. <C k="live">✓</C> compiles, <C k="dead">✗</C> doesn&apos;t, and the box shows javac 25&apos;s actual error. <code>CAP#1</code> is javac&apos;s name for &quot;the specific type this wildcard stands for, which i don&apos;t know&quot;.</>}>
+<WildcardOps />
+</Figure>
+
+the pattern, once you see it:
+
+| declared as | get() gives you | add() accepts | use it for |
+| --- | --- | --- | --- |
+| `List<Number>` | `Number` | any `Number` | reading and writing, but only an exact `List<Number>` |
+| `List<? extends Number>` | `Number` | nothing (only `null`) | reading: a producer |
+| `List<? super Integer>` | `Object` | `Integer` | writing: a consumer |
+| `List<?>` | `Object` | nothing (only `null`) | size, clear, things that don't care about the type |
+
+## PECS
+
+the rule of thumb, from Josh Bloch: **producer extends, consumer super**. look at each parameter from the method's point of view. if the method only *takes things out* of it, the parameter is a producer: `? extends T`. if it only *puts things in*, it's a consumer: `? super T`. if it does both, it needs the exact type: no wildcard.
+
+the JDK's `Collections.copy` is PECS in one line:
+
+<Figure caption={<>jdk 25&apos;s real <code>Collections.copy</code>. click a piece. the source list produces, the destination consumes.</>}>
+<Decoder parts={copySig} read="copy Ts out of any list of Ts-or-subtypes, into any list that can hold a T." />
+</Figure>
+
+write your own and it works the same way. one method, every sensible combination of lists:
+
+```java title="Main.java" run output="[1, 2, 2.5] [1, 2, 2.5]\n[x, 2, 2.5]"
+static <T> void pour(Collection<? extends T> from, Collection<? super T> into) {
+    for (T x : from) into.add(x);
+}
+
+void main() {
+    List<Integer> ints = List.of(1, 2);
+    List<Double> doubles = List.of(2.5);
+    List<Number> nums = new ArrayList<>();
+    List<Object> anything = new ArrayList<>();
+
+    pour(ints, nums);          // T = Integer: read Integers, a List<Number> takes them
+    pour(doubles, nums);       // T = Double
+    pour(nums, anything);      // T = Number
+    IO.println(nums + " " + anything);
+
+    Collections.copy(anything, List.of("x"));   // copy(List<? super T>, List<? extends T>)
+    IO.println(anything);
+}
+```
+
+without the wildcards, `pour(List<T> from, List<T> into)` would only accept two lists of the *same* type. every call above would fail.
+
+you see PECS all over the JDK once you know to look: `addAll(Collection<? extends E>)` (reads from its argument), `forEach(Consumer<? super T>)` (the consumer takes `T`s), `sort(Comparator<? super E>)` (a comparator consumes elements), `Stream.map`, whose `Function<? super T, ? extends R>` consumes a `T` and produces an `R`. the same rule explains the `? super T` in [bounded types](/learn/generics/bounded-types): a `Comparable` consumes.
+
+<Predict options={["compile error: you can't add to ? extends", "2 [1, 2]", "3 [1, 2, null]"]} answer={2}>
+```java
+List<? extends Number> xs = new ArrayList<Integer>(List.of(1, 2));
+xs.add(null);
+IO.println(xs.size() + " " + xs);
+```
+<Explain>
+you can't add anything to a `? extends` list, *except* `null`, because `null` belongs to every reference type, so it's safe whatever `CAP#1` really is. checked on jdk 25: it prints `3 [1, 2, null]`. it's the one hole in "producers are read-only", and the reason `List<?>` isn't truly immutable. if you want read-only, use an [unmodifiable list](/learn/collections/immutable-collections).
+</Explain>
+</Predict>
+
+## wildcard capture
+
+every time you use a wildcard-typed expression, javac quietly invents a name for the unknown type: `CAP#1`, "capture of ?". that's why this tiny method doesn't compile:
+
+```java
+static void swap(List<?> list, int i, int j) {
+    list.set(i, list.get(j));     // [!code error]
+}
+```
+
+```text
+error: incompatible types: Object cannot be converted to CAP#1
+```
+
+you know it's the same list, so the element you read *must* fit back in. javac only knows that `get` returns "something" (so `Object`) and `set` wants a `CAP#1`. the fix is a private generic helper: calling it makes javac **capture** the wildcard as a real type variable `T`, and inside the helper the types line up.
+
+```java title="Main.java" run output="[c, b, a]"
+static void swap(List<?> list, int i, int j) {
+    swapHelper(list, i, j);            // javac captures the ? as a fresh T
+}
+
+private static <T> void swapHelper(List<T> list, int i, int j) {
+    T tmp = list.get(i);
+    list.set(i, list.get(j));
+    list.set(j, tmp);
+}
+
+void main() {
+    List<String> letters = new ArrayList<>(List.of("a", "b", "c"));
+    swap(letters, 0, 2);
+    IO.println(letters);
+}
+```
+
+the public signature stays `List<?>` (callers don't need to care about `T`), the helper does the typed work. funny detail: the JDK's own `Collections.swap` skips the helper and uses a raw `List` with `@SuppressWarnings`. the comment above it says the helper would work, it just costs an extra method.
+
+<Gotcha title="no wildcards in return types">
+a method that returns `List<? extends Number>` forces every caller to deal with a list they can't add to and whose element type they can't name. wildcards are for *accepting* flexibly. return the exact type: `List<Number>`, or a type parameter `List<T>`. and don't use a wildcard on a parameter you both read and write: that's a job for `T`.
+</Gotcha>
+
+<Deep title="when to write List<?> and when to write <T> List<T>">
+if a type parameter appears exactly once in a method signature, you can replace it with a wildcard and nothing changes for callers: `<T> int count(List<T> xs)` and `int count(List<?> xs)` accept the same arguments. the wildcard version is simpler to read, so prefer it in public APIs. if the type has to connect two things (the parameter and the return type, or two parameters), you need the named `T`: in `<T> T first(List<T> xs)` the `T` says "the result has the element type", which `?` can't express. effective java item 31 covers both rules.
+</Deep>
+
+<Interview q="what is PECS?">
+producer extends, consumer super. a parameter the method only reads from produces values, so declare it `? extends T`: then a `List<Integer>` can be passed where `T` is `Number`. a parameter the method only writes into consumes values, so declare it `? super T`: then a `List<Object>` can receive `T`s. needed because generics are invariant, `List<Integer>` isn't a `List<Number>`, otherwise you could add a `Double` through the wider view. `Collections.copy`, with its `? super T` destination and `? extends T` source, is the textbook example. bonus points: `Comparator` and `Comparable` are always consumers, and wildcards never belong in return types.
+</Interview>
+
+<Keylines>
+- `List<Integer>` is not a `List<Number>`. generics are invariant, on purpose.
+- `? extends T`: read `T`s out, write nothing (but `null`). a producer.
+- `? super T`: write `T`s in, read only `Object`. a consumer.
+- PECS: decide per parameter, from the method's point of view. both? no wildcard.
+- `CAP#1` in an error is the unknown type behind a wildcard. a generic helper can capture it.
+- wildcards on parameters, never on return types.
+</Keylines>

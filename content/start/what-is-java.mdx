@@ -1,0 +1,98 @@
+import { JdkNesting } from "@/components/figures/start/JdkNesting";
+import { WriteOnce } from "@/components/figures/start/WriteOnce";
+import { ReleaseTrain } from "@/components/figures/start/ReleaseTrain";
+
+<InShort>
+"java" is three things wearing one name: the **language** (what you type), the **JVM** (a program that runs compiled java on any machine) and the **JDK** (the JVM plus the tools to build programs for it).
+
+you write `.java`, `javac` turns it into **bytecode**, and the JVM runs that bytecode on whatever OS it's sitting on.
+</InShort>
+
+## the picture
+
+"install java". "java is slow". "we're still on java 17". three sentences, three different things called java. kinda confusing, so let's pull them apart.
+
+think of sheet music. you compose a song (java source). a transcriber writes it down as sheet music (`javac` → bytecode). any musician who can read sheet music can play it, on whatever instrument they have (a JVM, on whatever OS). the sheet music never changes between performances. the musician does.
+
+<Figure caption={<>click a layer, or pick one above. the JDK contains the runtime, which contains the <C k="meta">JVM</C>. the sizes are real: temurin 25 on an arm mac.</>}>
+<JdkNesting />
+</Figure>
+
+<Defs>
+<dt>java</dt><dd>the language: what `class`, `int` and `for` mean. written down in the java language specification (the JLS).</dd>
+<dt>JVM</dt><dd>java virtual machine. an actual program (mostly C++) that runs bytecode. it has its own spec, the JVMS, and it has never seen a line of java syntax.</dd>
+<dt>JDK</dt><dd>java development kit. the JVM, the standard library and the tools (`javac`, `jshell`, `jar`...). this is what you install.</dd>
+<dt>JRE</dt><dd>java runtime environment: the JDK without the dev tools. oracle stopped shipping a separate one with java 11 (some vendors still build them). today you install a JDK, or ship a trimmed runtime made with `jlink`.</dd>
+<dt>OpenJDK</dt><dd>the open-source project where the JDK is built. temurin, corretto, oracle's JDK: all builds of the same code. which one to pick is in [getting a JDK](/learn/start/setup).</dd>
+</Defs>
+
+## write once, run anywhere
+
+here's the trick. `javac` does not compile your code to x86 or arm machine code. it compiles to **bytecode**, the instruction set of a CPU that doesn't exist. then every OS gets its own JVM, which knows how to run that made-up CPU on the real one underneath.
+
+<Figure caption={<>pick an OS. the <code>.class</code> file is byte-for-byte identical; the <C k="meta">JVM</C> is the part you download per platform. kotlin, scala and clojure live here too: their compilers emit the same bytecode, so the JVM can't tell the difference.</>}>
+<WriteOnce />
+</Figure>
+
+you can see the bytecode's fingerprint yourself. every class file on earth starts with the same four bytes:
+
+```bash
+$ javac Main.java
+$ xxd Main.class | head -1
+00000000: cafe babe 0000 0045 001d 0a00 0200 0307  .......E........
+```
+
+`CAFEBABE` is the magic number (an old joke from the people who designed the format). `0x45` is 69, the class file version for java 25. we'll take one apart in [compile and run](/learn/start/compile-and-run).
+
+## compiled or interpreted? both
+
+people argue about this one. the honest answer is that java gets compiled twice.
+
+<Figure caption="hover a stage. javac runs once, on your machine. everything right of the .class happens every time the program runs, on the machine running it.">
+<Flow
+  stages={[
+    { label: "Main.java", sub: "you", note: "plain text. the only part a human writes." },
+    { label: "javac", sub: "ahead of time", note: "compile #1. checks types, then translates to bytecode. runs once, on your machine." },
+    { label: "Main.class", sub: "bytecode", note: "portable instructions for the JVM. the thing you ship." },
+    { label: "interpreter", sub: "starts instantly", note: "the JVM runs bytecode one instruction at a time, right away. slow-ish, but no waiting." },
+    { label: "JIT", sub: "at runtime", note: "compile #2. methods that run a lot (200 calls → C1, 5,000 → C2 by default) get compiled to real machine code, optimized for how they're actually used." },
+  ]}
+/>
+</Figure>
+
+that second compile is why java programs speed up after a few seconds of running (people call it warm-up), and why "java is slow" is mostly a story about startup. once the JIT has had a look, hot code runs as native machine code, sometimes better tuned than what a C compiler would guess ahead of time, because the JIT knows what your program actually does. the full story is in [the interpreter and the JIT](/learn/jvm/interpreter-and-jit).
+
+<Quiz question="you compile Main.java on a mac. your friend has a windows laptop with java 25 installed. what do they need to run your Main.class?" options={["nothing else, just java Main", "recompile Main.java on windows first", "a windows build of your .class"]} answer={0}>
+<Explain>
+the `.class` is bytecode, not mac machine code. their JVM (a windows build) turns it into x86 instructions while it runs. the only thing that has to match is the java version: their JVM must be at least as new as the one you compiled for.
+</Explain>
+</Quiz>
+
+## one language, many versions
+
+a new java ships every march and every september, like a train that leaves on schedule whether your feature is on it or not. every two years, one release is **LTS** (long-term support): vendors keep patching it for years, so that's what most companies run. 17, 21 and now 25.
+
+<Figure caption={<>hover or tap a release (← → work too). the gap after 8 is real: 9 took three and a half years, so java switched to fixed six-month releases. this site targets <strong>java 25</strong>, the latest LTS.</>}>
+<ReleaseTrain />
+</Figure>
+
+old versions called themselves `1.something`: java 8 is "1.8" and its `java -version` still prints `1.8.0_...`. from 9 on it's just the number. every release in detail lives in [java 8 → 27](/learn/modern/release-timeline).
+
+<Gotcha title="the newest JDK isn't always the one to install">
+26 and 27 are real releases, but each one only gets security updates for six months, until the next one ships. if you're learning, building something, or picking a version for work, use the newest **LTS** (25 right now). it gets patches for years and every library supports it.
+</Gotcha>
+
+<Deep title="who actually owns java">
+Sun Microsystems made it (James Gosling's team, 1.0 shipped in january 1996). Sun open-sourced the JDK as OpenJDK in 2006-2007, under the GPL with the "classpath exception", which is what lets you ship closed-source programs on top of it. Oracle bought Sun in 2010 and still leads the project, but changes go through public proposals called JEPs (JDK enhancement proposals), and Red Hat, Amazon, Microsoft, Google, SAP and others work on the same code. "java" is an Oracle trademark, which is why every other vendor calls its build something else: temurin, corretto, zulu.
+</Deep>
+
+<Interview q="what's the difference between the JDK, the JRE and the JVM?">
+the JVM runs bytecode. the JRE was the JVM plus the standard library, enough to run programs. the JDK is all of that plus the dev tools (`javac`, `jar`, `jshell`, debuggers, profilers). bonus point: the JRE stopped being a separate oracle download in java 11, and modern apps ship a custom runtime built with `jlink`, which contains only the modules the app actually uses (a hello world needs about 45 MB, not the full 294 MB).
+</Interview>
+
+<Keylines>
+- the language is what you type. the JVM is what runs it. the JDK is the box both come in.
+- `javac` compiles to bytecode, not machine code. the JVM's JIT makes machine code while your program runs.
+- one `.class` runs on every OS. the JVM is the part that's different per platform.
+- a new java every six months, an LTS every two years. learn on the latest LTS: 25.
+</Keylines>

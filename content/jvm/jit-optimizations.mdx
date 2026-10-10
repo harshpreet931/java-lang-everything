@@ -1,0 +1,232 @@
+import { CodeMorph } from "@/components/figures/jvm/CodeMorph";
+import { MeasuredBars } from "@/components/figures/jvm/MeasuredBars";
+
+export const eaSteps = [
+  {
+    title: "source",
+    code: `static int distanceSquared(int x, int y) {
+    Point p = new Point(x, y);
+    Point q = p.plus(new Point(1, 1));
+    return q.lengthSquared();
+}
+
+record Point(int x, int y) {
+    Point plus(Point o) { return new Point(x + o.x, y + o.y); }
+    int lengthSquared() { return x * x + y * y; }
+}`,
+    note: "what you wrote: three Point objects per call and two method calls (plus three constructors). this is also exactly what the interpreter does.",
+    stats: [
+      { label: "calls", value: "5" },
+      { label: "objects", value: "3" },
+      { label: "bytes", value: "72", tone: "dead" },
+    ],
+  },
+  {
+    title: "inline",
+    code: `static int distanceSquared(int x, int y) {
+    Point p = new Point(x, y);              // <init> inlined
+    Point o = new Point(1, 1);
+    Point q = new Point(p.x + o.x, p.y + o.y);  // plus() inlined
+    return q.x * q.x + q.y * q.y;           // lengthSquared() inlined
+}`,
+    marks: [2, 4, 5],
+    note: "C2 pastes the callees into the caller (PrintInlining says inline (hot) for plus, lengthSquared and every constructor). no calls left. more importantly, C2 can now see everything that happens to p, o and q.",
+    stats: [
+      { label: "calls", value: "0", tone: "live" },
+      { label: "objects", value: "3" },
+      { label: "bytes", value: "72", tone: "dead" },
+    ],
+  },
+  {
+    title: "escape analysis",
+    code: `static int distanceSquared(int x, int y) {
+    int p_x = x,  p_y = y;      // p is just two values now
+    int o_x = 1,  o_y = 1;
+    int q_x = p_x + o_x,  q_y = p_y + o_y;
+    return q_x * q_x + q_y * q_y;
+}`,
+    marks: [2, 3, 4, 5],
+    note: "none of the three objects escapes: not returned, not stored in a field, not passed to code C2 can't see. so it never allocates them. each field becomes a plain local that can live in a register. that's scalar replacement.",
+    stats: [
+      { label: "calls", value: "0", tone: "live" },
+      { label: "objects", value: "0", tone: "live" },
+      { label: "bytes", value: "0", tone: "live" },
+    ],
+  },
+  {
+    title: "fold",
+    code: `static int distanceSquared(int x, int y) {
+    int a = x + 1, b = y + 1;
+    return a * a + b * b;
+}`,
+    marks: [2, 3],
+    note: "constant propagation and dead code removal clean up what's left. this is about what the machine code does. and when the caller's loop is compiled too, distanceSquared is inlined into it and even this little method disappears.",
+    stats: [
+      { label: "calls", value: "0", tone: "live" },
+      { label: "objects", value: "0", tone: "live" },
+      { label: "bytes", value: "0", tone: "live" },
+    ],
+  },
+];
+
+<InShort>
+C2's big moves are a short list. **inlining** pastes small methods into their callers. that unlocks **escape analysis** (objects that never leave the method don't get allocated at all), loop tricks (**unrolling**, **range check elimination**, **vectorization**), and **intrinsics** (hand-written machine code for methods like `System.arraycopy`). and all of it rests on **speculation**: C2 bets on what the profile saw, and **deoptimizes** when a bet loses.
+</InShort>
+
+## the picture
+
+you know how people say "the JIT will optimize that away"? sometimes it does, sometimes it really doesn't, and the difference is almost always one thing: whether the code got inlined.
+
+think of a chef who writes the recipe for a dish in terms of other recipes: "make the sauce (see page 40)". following it literally means flipping back and forth. an experienced chef first copies page 40 into the recipe, and only *then* notices that half the sauce steps are wasted for this dish. inlining is the copying. every other optimization is the noticing, and it can only notice what's on the page.
+
+## inlining, then escape analysis
+
+here's a method that looks allocation-heavy: three `Point` records per call. step through what C2 does to it.
+
+<Figure wide caption={<>step through, or click a stage. the <C k="hot">hot</C> lines are what changed. this is the java equivalent of C2's work (it really operates on a graph, not on source), but every stage is backed by the real run below.</>}>
+<CodeMorph file="Point.java" steps={eaSteps} />
+</Figure>
+
+the inlining decisions are real, from `-XX:+PrintInlining` (a diagnostic flag, so it needs `-XX:+UnlockDiagnosticVMOptions`) when C2 compiled `distanceSquared` on jdk 25:
+
+```text title="-XX:+PrintInlining (C2, distanceSquared)"
+@ 6   Inline$Point::<init> (15 bytes)   inline (hot)
+  @ 1   java.lang.Record::<init> (5 bytes)   inline (hot)
+    @ 1   java.lang.Object::<init> (1 bytes)   inline (hot)
+@ 17  Inline$Point::<init> (15 bytes)   inline (hot)
+  ...
+@ 20  Inline$Point::plus (26 bytes)   inline (hot)
+  @ 22  Inline$Point::<init> (15 bytes)   inline (hot)
+  ...
+@ 25  Inline$Point::lengthSquared (20 bytes)   inline (hot)
+```
+
+and here's what escape analysis is worth, measured with `ThreadMXBean.getThreadAllocatedBytes` over 50 million calls after warmup, with the default and with `-XX:-DoEscapeAnalysis`:
+
+<Figure caption={<>median of three runs, jdk 25, M4 Pro. 72 bytes is three <code>Point</code>s at 24 bytes each (12-byte header, two 4-byte ints, padded to 8: see <a href="/learn/jvm/object-layout">object layout</a>).</>}>
+<MeasuredBars unit="ns/call" data={[
+  { label: "-XX:-DoEscapeAnalysis · 72 bytes/call", value: 6.09, tone: "dead" },
+  { label: "default · 0 bytes/call", value: 0.41, tone: "live" },
+]} />
+</Figure>
+
+15 times faster, and the GC never hears about these objects. which is why "don't allocate small objects, they're expensive" is mostly outdated advice: short-lived objects that stay local are often free. the catch is the word *local*.
+
+<Quiz question="which of these Point objects can C2 scalar-replace (never allocate)?" options={["one returned to the caller", "one stored into a field of this", "one used only for arithmetic inside the method", "one passed to a big method that doesn't get inlined"]} answer={2}>
+<Explain>
+only the one that stays inside the method. returning it or storing it lets it outlive the call. passing it to a method that isn't inlined is the sneaky one: C2 can't see what that method does with it, so it has to assume it escapes. this is why inlining matters so much: escape analysis can only reason about code that got inlined into the method it's compiling.
+</Explain>
+</Quiz>
+
+## what decides inlining
+
+C2 inlines a call when it's both possible and worth it. possible: the target must be known. for a static, private, final or constructor call it always is. for a virtual or interface call, C2 uses the **type profile** from tier 3:
+
+```text title="-XX:+PrintInlining, the same call site with 1, 2 and 3 receiver classes"
+@ 27   Mega$Circle::area (14 bytes)   inline (hot)
+       \-> TypeProfile (40960/40960 counts) = Mega$Circle
+
+@ 27   Mega$Circle::area (14 bytes)   inline (hot)
+@ 27   Mega$Square::area (10 bytes)   inline (hot)
+       \-> TypeProfile (20480/40960 counts) = Mega$Square
+       \-> TypeProfile (20480/40960 counts) = Mega$Circle
+
+@ 27   Mega$Shape::area (0 bytes)   failed to inline: virtual call
+```
+
+one class (monomorphic): inline it behind a cheap class check. two (bimorphic): inline both, check which one you have. three or more (megamorphic): give up and do a real vtable or itable call. here's the loop `for (Shape s : shapes) t += s.area()` over 4096 shapes, each run in a fresh JVM:
+
+<Figure caption="one call site, 1 to 4 receiver classes, median of three runs, jdk 25 on an M4 Pro. the cliff is between 2 and 3.">
+<MeasuredBars unit="ns/call" data={[
+  { label: "1 class (monomorphic)", value: 0.69, tone: "live" },
+  { label: "2 classes (bimorphic)", value: 0.65, tone: "live" },
+  { label: "3 classes (megamorphic)", value: 1.57, tone: "dead" },
+  { label: "4 classes (megamorphic)", value: 1.64, tone: "dead" },
+]} />
+</Figure>
+
+worth it: methods under `MaxInlineSize` = 35 bytes of bytecode are inlined even when they aren't hot, hot ones up to `FreqInlineSize` = 325 bytes, nested at most `MaxInlineLevel` = 15 deep, and not if the callee is already compiled into a big chunk of machine code (`InlineSmallCode`). that's why small methods are good for performance, not bad: they're exactly what inlining loves.
+
+## loops
+
+hot code is mostly loops, and C2 has a bag of tricks for them. **range check elimination**: `a[i]` normally checks `0 <= i < a.length` every time; when `i` runs from 0 to `a.length`, C2 proves the checks can't fail and hoists them out of the loop. **unrolling**: do several iterations per trip around the loop, so the loop's own overhead (compare, jump, increment) is paid less often. **vectorization** (C2 calls it SuperWord): turn several iterations into single SIMD instructions that work on 4 or 8 ints at once.
+
+here's `b[i] = a[i] + c[i]` over 4096 ints, turning each trick off in turn:
+
+<Figure caption="per element, median of three runs, jdk 25 on an M4 Pro (aarch64, NEON). C1 doesn't unroll or vectorize.">
+<MeasuredBars unit="ns/element" data={[
+  { label: "C1 only (-XX:TieredStopAtLevel=1)", value: 0.597 },
+  { label: "C2, no unrolling, no SIMD", value: 0.316 },
+  { label: "C2, unrolled, no SIMD", value: 0.188 },
+  { label: "C2 default: unrolled + SIMD", value: 0.049, tone: "live" },
+]} />
+</Figure>
+
+12 times between C1 and C2 for a loop you'd never think twice about. (flags used: `-XX:LoopUnrollLimit=1` to stop unrolling, `-XX:-UseSuperWord` to stop vectorizing.)
+
+<Deep title="loop strip mining, and why your loops still have safepoint polls">
+a counted `int` loop compiled by C2 used to have no safepoint poll inside it at all, so a long loop could hold up a GC pause for its whole duration. since java 10, C2 splits such loops into an outer loop with a poll and an inner loop of at most `LoopStripMiningIter` = 1000 iterations without one (that's on by default when the collector cares about pause times, which includes G1). more in [safepoints](/learn/jvm/safepoints).
+</Deep>
+
+## intrinsics
+
+some JDK methods are never compiled from their bytecode at all. the JVM recognizes them by name and drops in hand-written machine code instead. `PrintInlining` marks them:
+
+```text title="-XX:+PrintInlining (excerpt)"
+@ 25   java.lang.Integer::bitCount (53 bytes)   (intrinsic)
+@ 1    java.lang.Math::sqrt (5 bytes)   (intrinsic)
+@ 11   java.lang.System::arraycopy (0 bytes)   (intrinsic)
+@ 44   java.lang.StringLatin1::equals (36 bytes)   (intrinsic)
+```
+
+`Integer.bitCount` is 53 bytes of clever bit-twiddling in `Integer.java`, but on this machine C2 uses the CPU's population-count instruction instead. counting bits over a 4096-int array took 0.12 ns per element normally and 0.25 ns with `-XX:DisableIntrinsic=_bitCount_i`. there are hundreds of intrinsics: `System.arraycopy`, string comparisons and searches, `Math` functions, CRC32, AES and SHA, `Object.hashCode`, `Thread.currentThread`. the practical upshot: use the JDK method instead of hand-rolling it. yours won't be intrinsified.
+
+## speculation and deoptimization
+
+everything above is a bet. "this call site only ever sees `Circle`" is true *so far*. C2 compiles as if it's always true, with a cheap check that falls off a cliff if it isn't: an **uncommon trap**. when a trap fires, the JVM throws away the compiled code (marks it *not entrant*), rebuilds an interpreter frame from the compiled frame's state, and continues in the interpreter. later, with a better profile, it compiles again.
+
+here's a real one. the call site in `area` sees 200,000 `Circle`s, then one `Square`:
+
+```java title="Deopt.java"
+static double area(Shape s) {
+    return s.area();
+}
+// phase 1: area(new Circle(i)) 200,000 times
+// phase 2: area(new Square(2)), then a mix of both
+```
+
+```text title="java -XX:+PrintCompilation -Xlog:deoptimization=debug Deopt (area only)" {3,5,6}
+14   21       4       Deopt::area (7 bytes)
+phase 2: a square shows up
+[0.017s][debug][deoptimization] cid=21 level=4 Deopt.area(LDeopt$Shape;)D trap_bci=1 class_check maybe_recompile
+17   21       4       Deopt::area (7 bytes)   made not entrant: uncommon trap
+17   25       4       Deopt::area (7 bytes)
+```
+
+<Figure caption="hover a stage. here the trap, the deoptimization and the start of the recompile all happened within the same millisecond.">
+<Flow stages={[
+  { label: "profile", sub: "only Circle, 200k times", note: "tier 3 recorded the receiver class at the call site: 100% Circle." },
+  { label: "C2 bets", sub: "compile 21", note: "C2 inlines Circle.area behind a single class check, and doesn't compile any other path." },
+  { label: "trap", sub: "class_check at bci 1", note: "a Square arrives. the class check fails and hits the uncommon trap. compile 21 is made not entrant." },
+  { label: "interpreter", sub: "deoptimized frame", note: "the JVM rebuilds an interpreter frame from the compiled state and carries on. correct, just slower." },
+  { label: "recompile", sub: "compile 25", note: "with the new profile (Circle and Square), C2 compiles area again, now bimorphic." },
+]} />
+</Figure>
+
+deoptimization is what makes aggressive optimization safe. C2 can assume a branch is never taken, a class has no subclasses (class hierarchy analysis), or a value is never null, because being wrong costs a recompile instead of a wrong answer. the price shows up as occasional hiccups when a program changes phase.
+
+<Gotcha title="the warmup lie">
+benchmarks that warm up on one kind of input and then measure another measure something that doesn't exist in production. warm up `area()` with only circles, and you're timing an inlined, monomorphic call. in production, where three shape types flow through, that call site is megamorphic and over twice as slow. profiles are per call site and they're real: feed your benchmark realistic data, and use [JMH](/learn/performance/jmh), which forks a fresh JVM per benchmark so one test's profile can't pollute another's.
+</Gotcha>
+
+<Interview q="what is escape analysis, and does it mean java allocates objects on the stack?">
+escape analysis is C2 working out, after inlining, whether an object can be seen outside the method being compiled (returned, stored in a field or array, passed somewhere it can't see). if it can't, HotSpot doesn't move it to the stack: it removes the object entirely and keeps its fields as separate values in registers or stack slots (scalar replacement). it can also drop locks on objects that never escape (lock elision). it only works on what's been inlined, so it fails quietly when a method is too big to inline or the call is megamorphic.
+</Interview>
+
+<Keylines>
+- inlining first. almost every other optimization needs it.
+- objects that don't escape aren't allocated at all. 72 bytes and 6 ns became 0 and 0.4 here.
+- call sites with 1 or 2 receiver classes inline. 3 or more don't.
+- loops get bounds checks hoisted, unrolled and vectorized: 12x over C1 for a simple loop.
+- it's all speculation. a broken bet means an uncommon trap and a recompile, not a wrong answer.
+</Keylines>

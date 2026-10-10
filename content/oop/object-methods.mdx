@@ -1,0 +1,189 @@
+import { EqualsContract } from "@/components/figures/oop/EqualsContract";
+import { HashSetBuckets } from "@/components/figures/oop/HashSetBuckets";
+
+<InShort>
+every class inherits `equals`, `hashCode` and `toString` from `Object`, and all three default to **identity**: equal only to itself, hashed by identity, printed as `ClassName@hex`. override `equals` to mean "same value", and you **must** override `hashCode` too: **equal objects need equal hash codes**, or every hash-based collection quietly breaks.
+</InShort>
+
+## the picture
+
+you know how two `new Point(1, 2)` aren't `equals` until you say so? `Object` can't know what "the same" means for your class, so it plays it safe: same object or nothing.
+
+think of a library. `equals` is "is this the same book?" (same title and author, not the same physical copy). `hashCode` is the shelf number: the catalogue says *Moby-Dick* lives on shelf 12, so that's the only shelf anyone checks. if two copies of the same book get different shelf numbers, the librarian looks on the wrong shelf and swears you don't have it.
+
+## the equals contract
+
+overriding `equals` is signing a contract with every collection in the JDK. five promises:
+
+<Figure caption={<>pick an implementation. <C k="live">✓</C> means the promise holds, <C k="dead">✗</C> shows the exact calls that break it (all run on jdk 25). the two <code>ColorPoint</code>s are the classic: you can't add a value field in a subclass and keep the contract.</>}>
+<EqualsContract />
+</Figure>
+
+the good version, written out:
+
+```java title="Point.java"
+final class Point {
+    private final int x, y;
+
+    Point(int x, int y) { this.x = x; this.y = y; }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Point p    // false for null and other types
+            && x == p.x && y == p.y;   // the fields that define "same value"
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(x, y);     // the same fields, nothing else
+    }
+
+    @Override
+    public String toString() {
+        return "Point(" + x + ", " + y + ")";
+    }
+}
+```
+
+or let the compiler do it. `record Point(int x, int y) {}` generates exactly this `equals`, a matching `hashCode` and a readable `toString`. see [records](/learn/modern/records).
+
+## hashCode: the half people forget
+
+a `HashSet` is a `HashMap` underneath: an array of buckets. to find an object it computes `hashCode()`, mixes the bits, and checks **one bucket**. only inside that bucket does it call `equals`. so if two equal objects produce different hash codes, they land in different buckets, and `equals` never even gets asked.
+
+<Figure caption={<>add a <code>Point(1, 2)</code>, then ask <code>contains(new Point(1, 2))</code>. with the inherited <code>hashCode</code>, each new object gets its own identity hash (real values from one jdk 25 run), lands somewhere random, and the answer is <C k="dead">false</C>. switch to <code>Objects.hash(x, y)</code>: every equal Point goes to bucket 2, and the answer is <C k="live">true</C>.</>}>
+<HashSetBuckets />
+</Figure>
+
+<Predict options={["true, 1", "true, 2", "false, 1", "false, 2"]} answer={3}>
+```java
+class Point {
+    final int x, y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Point p && x == p.x && y == p.y;
+    }
+    // no hashCode
+}
+
+Set<Point> set = new HashSet<>();
+set.add(new Point(1, 2));
+IO.println(set.contains(new Point(1, 2)));
+set.add(new Point(1, 2));
+IO.println(set.size());
+```
+<Explain>
+`false` and `2`. the probe has a different identity hash than the stored point, so the set looks in the wrong bucket (or finds a different hash there and skips `equals`). and the second `add` doesn't find the first point either, so the "set" now holds two equal elements. no exception, no warning. that's the scary part.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="false\n2"
+import java.util.*;
+
+class Point {
+    final int x, y;
+
+    Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Point p && x == p.x && y == p.y;
+    }
+    // no hashCode: inherited from Object
+}
+
+public class Main {
+    public static void main(String[] args) {
+        Set<Point> set = new HashSet<>();
+        set.add(new Point(1, 2));
+        System.out.println(set.contains(new Point(1, 2)));
+        set.add(new Point(1, 2));
+        System.out.println(set.size());
+    }
+}
+```
+
+the rules for `hashCode`, all following from "the set looks in one bucket":
+
+- equal objects **must** have equal hash codes. (the one you can't break.)
+- unequal objects *may* share a hash code. that's a collision, it's legal, it's just slower.
+- it must stay the same while the object is in a collection, so build it from the same fields `equals` uses, ideally final ones.
+
+## toString: what Object@hex means
+
+`Object.toString()` is `getClass().getName() + "@" + Integer.toHexString(hashCode())`. that hex is just the hash code. so if you override `hashCode` but not `toString`, the hex changes to *your* hash:
+
+```java title="Ts.java" output="Point@3e2\n3e2\ntrue"
+import java.util.*;
+
+class Point {
+    final int x, y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Point p && x == p.x && y == p.y;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(x, y);   // 31 * (31 + 1) + 2 = 994 = 0x3e2
+    }
+}
+
+public class Ts {
+    public static void main(String[] args) {
+        Point p = new Point(1, 2);
+        System.out.println(p);
+        System.out.println(Integer.toHexString(p.hashCode()));
+        System.out.println(new HashSet<>(List.of(p)).contains(new Point(1, 2)));
+    }
+}
+```
+
+it is **not** a memory address. it's a hash, and with the default `hashCode` it's a random-ish number the JVM generates once and stores in the object's header (that's what the mark word's hash bits are for, see [classes and objects](/learn/oop/classes-and-objects)). override `toString` on anything you'll ever log: it costs nothing and saves hours.
+
+<Gotcha title="a mutable key vanishes">
+if a field used by `hashCode` changes while the object is in a `HashSet` (or is a `HashMap` key), the object is now filed under the wrong bucket. `contains` says false, `remove` does nothing, and the object is stuck in there forever. keep hash fields final, or never mutate a key. the full horror show is in [equals and hashCode traps](/learn/deep-dives/equals-and-hashcode-traps).
+</Gotcha>
+
+<Deep title="compareTo should agree with equals too">
+sorted collections don't use `equals` at all, they use `compareTo` (or a `Comparator`). if the two disagree, a `HashSet` and a `TreeSet` disagree about the same elements. the JDK's own example is `BigDecimal`: `1.0` and `1.00` aren't `equals` (different scale), but `compareTo` says they're the same number.
+
+```java title="Bd.java" run output="false 0\n2 1"
+import java.math.BigDecimal;
+import java.util.*;
+
+public class Bd {
+    public static void main(String[] args) {
+        var a = new BigDecimal("1.0");
+        var b = new BigDecimal("1.00");
+        System.out.println(a.equals(b) + " " + a.compareTo(b));
+        System.out.println(new HashSet<>(List.of(a, b)).size() + " " + new TreeSet<>(List.of(a, b)).size());
+    }
+}
+```
+
+two elements in the hash set, one in the tree set. legal, documented, and surprising. more in [sorting and comparators](/learn/collections/sorting-and-comparators).
+</Deep>
+
+<Effective item="10–12" title="obey the contracts, always override hashCode with equals, always override toString">
+override `equals` only when the class has a notion of logical equality that differs from identity, and then keep all five promises. whenever you override `equals`, override `hashCode` with the same significant fields. and give every class a `toString` that shows what a human would want to see in a log. the long version: [methods common to all objects](/learn/effective-java/methods-common-to-all-objects).
+</Effective>
+
+<Interview q="why do you have to override hashCode when you override equals?">
+because hash-based collections use the hash to decide which bucket to search, and only call `equals` inside that bucket. the contract says equal objects must have equal hash codes. if you override `equals` but inherit `Object.hashCode`, two equal objects get different identity hashes, so `HashSet.contains` looks in the wrong bucket and returns false, and a set can end up holding duplicates. the reverse is fine: unequal objects may share a hash, that's just a collision.
+</Interview>
+
+<Keylines>
+- the defaults are identity: equals is `==`, hashCode is an identity hash, toString is `Class@hex`.
+- equals has five promises: reflexive, symmetric, transitive, consistent, false for null.
+- override equals ⇒ override hashCode, using the same fields.
+- a hash collection checks one bucket. wrong hash = invisible object.
+- records write all three for you. use them for value types.
+</Keylines>

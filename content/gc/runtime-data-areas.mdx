@@ -1,0 +1,133 @@
+import { JvmMemoryMap } from "@/components/figures/gc/JvmMemoryMap";
+import { ReservedCommitted } from "@/components/figures/gc/ReservedCommitted";
+
+<InShort>
+a running JVM is one OS process, carved into areas. every **thread** gets its own stack and pc register. everyone shares the **heap** (objects), **metaspace** (classes) and the **code cache** (compiled code).
+
+`-Xmx` only caps the heap. the rest is native memory, and it's just as real.
+</InShort>
+
+## the picture
+
+you've seen "stack and heap" a hundred times. that's two boxes. a real JVM has closer to ten, and the other eight are why a container running `-Xmx1g` can still get killed for using too much memory.
+
+think of the JVM as an office building. each thread is an employee with a private desk (their stack) and a sticky note saying what they're doing right now (the pc register). there's one big shared warehouse (the heap) where all the actual stuff is. there's a room full of blueprints that says what every kind of thing looks like (metaspace). there's a machine shop where the JIT keeps fast, pre-built versions of your hottest methods (the code cache). and then there's the building's own plumbing: the GC's bookkeeping, I/O buffers, symbol tables. nobody puts that in the brochure, but it's on the electricity bill.
+
+<Figure wide caption={<>hover or tap any area. <C k="meta">purple</C> is the JVM's own machinery: class metadata, compiled code, GC bookkeeping. the numbers come from a real run (javac compiling three files on jdk 25, <code>-Xmx512m</code>, measured with native memory tracking).</>}>
+<JvmMemoryMap />
+</Figure>
+
+notice the split. the top row is per thread: start a thousand threads and you get a thousand stacks. the middle is the heap, the only thing `-Xmx` limits. the bottom is native memory the JVM allocates for itself, mostly sized by other flags, some of it not sized by anything at all.
+
+## what the spec says, and what HotSpot does
+
+the JVM spec lists six "run-time data areas". it says what each one is for, never where it lives. HotSpot (the JVM inside basically every JDK you'll download) maps them like this:
+
+| the spec says | HotSpot | lives in |
+| --- | --- | --- |
+| pc register | one per thread, the current bytecode | the thread |
+| JVM stack | the thread's stack, java frames | native memory, per thread |
+| native method stack | the same stack. HotSpot uses one stack for java and native frames | native memory, per thread |
+| heap | the java heap, split into generations or regions by the collector | reserved at startup, capped by `-Xmx` |
+| method area | metaspace (plus the compressed class space) | native memory |
+| run-time constant pool | part of each class's metadata | metaspace |
+
+and two that the spec doesn't mention at all: the **code cache** (machine code from the [JIT](/learn/jvm/interpreter-and-jit)) and everything the garbage collector needs to do its job.
+
+<Deep title="permgen, and why it had to go">
+before java 8, class metadata lived in the **permanent generation**: a fixed-size region next to the heap, capped by `-XX:MaxPermSize`. apps that loaded lots of classes (app servers redeploying, anything generating proxies) ran out and died with `OutOfMemoryError: PermGen space`, and the only fix was guessing a bigger number.
+
+java 8 (JEP 122) deleted permgen. class metadata moved to **metaspace**, allocated in native memory per class loader, and the default max became "unlimited". interned strings and static fields had already moved onto the regular heap in java 7. so today: metadata in native memory, everything else that's an object on the heap.
+</Deep>
+
+## see it from the inside
+
+the JVM reports its memory pools through `java.lang.management`. this lists them:
+
+```java title="Main.java" run
+import java.lang.management.*;
+
+void main() {
+    for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+        long max = pool.getUsage().getMax();
+        IO.println("%-9s %-34s max %s".formatted(
+            pool.getType() == MemoryType.HEAP ? "heap" : "non-heap",
+            pool.getName(),
+            max < 0 ? "unlimited" : (max >> 20) + " MB"));
+    }
+}
+```
+
+on my machine (jdk 25, G1, 24 GB of RAM), sorted:
+
+```text nolines
+heap      G1 Eden Space                      max unlimited
+heap      G1 Old Gen                         max 6144 MB
+heap      G1 Survivor Space                  max unlimited
+non-heap  CodeHeap 'non-nmethods'            max 5 MB
+non-heap  CodeHeap 'profiled nmethods'       max 117 MB
+non-heap  CodeHeap 'non-profiled nmethods'   max 117 MB
+non-heap  Compressed Class Space             max 1024 MB
+non-heap  Metaspace                          max unlimited
+```
+
+see the shape? the heap pools are named after the collector. run it with `-XX:+UseSerialGC` and you get `Eden Space`, `Survivor Space` and `Tenured Gen` instead. with `-XX:+UseZGC`: `ZGC Young Generation` and `ZGC Old Generation`. the heap's layout belongs to the GC. the non-heap pools don't change.
+
+the 6144 MB is no accident either: with no `-Xmx`, the max heap is 25% of physical memory (`-XX:MaxRAMPercentage=25`). 24 GB / 4 = 6 GB.
+
+<Quiz question="which of these does NOT count against -Xmx?" options={["a string literal", "a static int field", "the bytecode of your methods", "an int[1_000_000]"]} answer={2}>
+<Explain>
+method bytecode is class metadata, so it lives in metaspace, in native memory. string literals live in the string pool, which is on the heap. static fields live inside the class's `java.lang.Class` object, also on the heap. arrays are objects. heap.
+</Explain>
+</Quiz>
+
+## reserved is not committed
+
+here's the part that confuses everyone reading `top`. the JVM asks the OS for memory in two steps.
+
+1. **reserve**: "please keep this range of addresses free for me." cheap. no memory is used, it's just a promise about addresses.
+2. **commit**: "ok, now actually back these pages with memory." this is what costs RAM (and the OS only really hands over a page the first time something writes to it).
+
+the JVM reserves big contiguous ranges at startup (the whole max heap, a gigabyte for class space, 240 MB for compiled code) and commits pieces as it grows.
+
+<Figure caption={<>the same javac run. the outline is what was reserved, the filled bar is what was committed. hover a row. the whole process reserved almost 2 GB of addresses and used about 495 MB.</>}>
+<ReservedCommitted />
+</Figure>
+
+two things jump out. the class space reserves a full gigabyte and uses a megabyte and a half (it has to be one contiguous range, so it grabs it all up front). and the GC's own structures are 62 MB, committed, for a 512 MB heap. that's memory you pay for that no heap graph will ever show you.
+
+<Figure caption={<>what <code>-Xmx</code> covers, and what it doesn't. only the first branch.</>}>
+<Tree>{`
+JVM process memory
+    java heap                  // capped by -Xmx
+        young: eden + survivors
+        old
+    metaspace #meta            // MaxMetaspaceSize
+        compressed class space #meta // 1 GB reserved
+    code cache #meta           // ReservedCodeCacheSize
+    thread stacks              // -Xss × threads
+    GC structures #meta        // grows with the heap
+    direct buffers             // MaxDirectMemorySize
+    everything else            // symbols, JIT arenas
+`}</Tree>
+</Figure>
+
+<Gotcha title="-Xmx is not your memory limit">
+set `-Xmx1g` in a container with a 1 GB limit, and the first time the heap actually grows to 1 GB the process is over the limit, because the process is the heap **plus** everything on that list. you don't get an `OutOfMemoryError`. you get a silent `SIGKILL` from the kernel (exit code 137). leave headroom: a common starting point is a heap around 70 to 75% of the container limit (`-XX:MaxRAMPercentage=75`), then measure. the full story, with the tool that shows each category, is in [native memory](/learn/gc/native-memory).
+</Gotcha>
+
+<Deep title="why is the class space a separate thing at all?">
+every object's header holds a pointer to its class (the `Klass`). on a 64-bit JVM that would be 8 bytes per object. with compressed class pointers (the default), it's a 32-bit offset from a base address instead, which only works if every `Klass` sits inside one contiguous range. that range is the compressed class space. reserving 1 GB of addresses costs nothing, so the JVM grabs it all at startup and commits pages as classes get loaded. more on headers in [object layout](/learn/jvm/object-layout).
+</Deep>
+
+<Interview q="what's the difference between the heap and metaspace?">
+the heap holds instances: every object and array, collected by the garbage collector, capped by `-Xmx`. metaspace holds what classes look like: bytecode, constant pools, field layouts, method tables. it lives in native memory, it's allocated per class loader, and it's freed only when the whole class loader becomes unreachable (which is also how [class loader leaks](/learn/deep-dives/classloader-leaks) happen). by default metaspace has no cap at all.
+</Interview>
+
+<Keylines>
+- each thread gets a stack and a pc register. everyone shares the heap, metaspace and the code cache.
+- the heap layout belongs to the collector: eden, survivors and old for most of them.
+- class metadata lives in metaspace, in native memory, since java 8 killed permgen.
+- the JVM reserves address space up front and commits it as it grows. only committed memory costs RAM.
+- `-Xmx` caps the heap and nothing else. the process is always bigger.
+</Keylines>

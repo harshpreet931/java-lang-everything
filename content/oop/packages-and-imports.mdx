@@ -1,0 +1,141 @@
+import { ImportResolver } from "@/components/figures/oop/ImportResolver";
+
+<InShort>
+a **package** is a namespace, and every class's real name includes it: `java.util.ArrayList`, not `ArrayList`. that's the **fully qualified name**. an **import** just lets you write the short name. it loads nothing and costs nothing at runtime, it only exists while javac is reading your file.
+
+java 25 adds `import module`, which imports every package a module exports in one line.
+</InShort>
+
+## the picture
+
+think of a postal address. "ada" isn't enough to find someone. "ada, 12 elm street, london" is. a package is the street and city (the namespace), the class name is the person, and an import is you telling the mail carrier "when i say ada, i mean the one on elm street".
+
+packages also map to folders. `package com.acme.shop;` at the top of `Cart.java` means the source lives in `com/acme/shop/`, and the compiled class lands in `com/acme/shop/Cart.class`.
+
+<Figure caption={<>folders on the left, the names they give classes on the right. the dots in a package name are just slashes in disguise. click a folder to fold it.</>}>
+<Tree>{`
+src/
+    com/
+        acme/
+            shop/                  // package com.acme.shop
+                Cart.java          // com.acme.shop.Cart
+                Item.java          // com.acme.shop.Item
+                checkout/          // package com.acme.shop.checkout (a different package)
+                    Payment.java   // com.acme.shop.checkout.Payment
+            util/                  // package com.acme.util
+                Money.java         // com.acme.util.Money
+    Main.java                      // no package line: the unnamed package
+`}</Tree>
+</Figure>
+
+a few things that tree says that people get wrong:
+
+- `com.acme.shop.checkout` is **not inside** `com.acme.shop` as far as java cares. the names nest, the packages don't. there's no access between them and `import com.acme.shop.*` doesn't reach into `checkout`.
+- the reverse-domain style (`com.acme`) is a convention for avoiding clashes between libraries, nothing more.
+- a class with no `package` line lives in the **unnamed package**. fine for a quick `Main.java`, but classes in a named package can't import it at all.
+
+## how a class is found at runtime
+
+your bytecode never contains `ArrayList`. it always contains `java/util/ArrayList`. when the JVM needs a class, a class loader turns the name into a path and looks for it.
+
+<Figure caption={<>hover each stage. for your own classes the search goes through the classpath entries in order, and the first match wins. JDK classes like <code>java.util.ArrayList</code> are found earlier, by the boot and platform loaders, inside the JDK's modules.</>}>
+<Flow stages={[
+  { label: "com.acme.shop.Cart", sub: "a name in the bytecode", note: "every class reference in a .class file is a fully qualified name. imports are long gone." },
+  { label: "com/acme/shop/Cart.class", sub: "dots → slashes", note: "the package becomes a folder path, the class name becomes a file name." },
+  { label: "-cp out:a.jar", sub: "search, left to right", note: "each classpath entry (a folder or a jar) is checked for that path, in the order you listed them." },
+  { label: "first match wins", sub: "defineClass", note: "the first entry that has the file supplies the class. later copies are silently ignored. no match: ClassNotFoundException." },
+]} />
+</Figure>
+
+"first match wins" is a real footgun. two jars with the same class, and the order on the command line decides which one runs:
+
+```bash
+$ java -cp a:b com.acme.Greeter
+hello from a/
+$ java -cp b:a com.acme.Greeter
+hello from b/
+$ java -cp . com.acme.Greeter
+Error: Could not find or load main class com.acme.Greeter
+Caused by: java.lang.ClassNotFoundException: com.acme.Greeter
+```
+
+that's the classpath in one picture. the details (and why modules were invented to stop this) are in [class loaders](/learn/jvm/classloaders) and [classpath to module path](/learn/tooling/classpath-to-modulepath).
+
+## the four kinds of import
+
+```java title="Imports.java"
+import java.util.List;           // single-type: exactly one class
+import java.util.*;              // on-demand: any class in java.util, when you use it
+import static java.lang.Math.max; // static: a static member, used without the class name
+import module java.sql;          // module (java 25): every package java.sql exports
+```
+
+and one you never write: every file gets `import java.lang.*;` for free. that's why `String`, `Math` and `System` just work.
+
+```java title="St.java" run output="7 3.141592653589793"
+import static java.lang.Math.max;
+import static java.lang.Math.PI;
+
+public class St {
+    public static void main(String[] args) {
+        System.out.println(max(3, 7) + " " + PI);
+    }
+}
+```
+
+### import module <Since v={25} />
+
+`import module M;` imports, on demand, every public class in every package `M` exports, plus the packages of modules `M` requires transitively ([JEP 511](https://openjdk.org/jeps/511), final in java 25). `import module java.base;` alone covers all 58 packages `java.base` exports on jdk 25: `java.util`, `java.io`, `java.time`, `java.util.function`, `java.util.stream`, `java.nio.file` and the rest.
+
+compact source files get that one implicitly. so this whole program has no imports and still uses `List`, `ArrayList`, `Map` and `HashMap`:
+
+```java title="Main.java" run output="[ada, duke] 3"
+void main() {
+    List<String> names = new ArrayList<>(List.of("ada", "duke"));
+    Map<String, Integer> lengths = new HashMap<>();
+    for (String n : names) lengths.put(n, n.length());
+    IO.println(names + " " + lengths.get("ada"));
+}
+```
+
+## when two classes share a name
+
+`java.util.Date` and `java.sql.Date` both exist. import both packages with wildcards and javac can't pick. the rule for who wins is a ranking: **single-type** imports beat **on-demand** ones, and on-demand ones beat **module** imports. two at the same rank: ambiguous.
+
+<Figure caption={<>toggle import lines, or pick a preset. the result is what javac 25 actually did with that exact file: every one of the 64 combinations was compiled. <C k="live">green</C> is the class you got, <C k="dead">red</C> is the error.</>}>
+<ImportResolver />
+</Figure>
+
+<Gotcha title="ambiguity only counts when you use the name">
+`import java.util.*;` plus `import java.sql.*;` compiles fine until the first time you write `Date`. so adding an innocent-looking wildcard import (or upgrading a library that adds a class) can break a file that didn't change. that's one argument for single-type imports, which is what IDEs write by default.
+</Gotcha>
+
+<Quiz question="which of these does import java.util.* let you use without another import?" options={["java.util.concurrent.ConcurrentHashMap", "java.util.HashMap", "both", "neither, wildcards are only for static imports"]} answer={1}>
+<Explain>
+a wildcard covers one package, and `java.util.concurrent` is a different package that merely has a longer name. `ConcurrentHashMap` needs its own import (`import java.util.concurrent.*;` or the single-type one), or `import module java.base;`, which does cover every package in the module.
+</Explain>
+</Quiz>
+
+<Deep title="imports really do vanish">
+compile a class that does `new ArrayList<String>()` with `import java.util.ArrayList;`, and run `javap -c` on it:
+
+```text nolines
+0: new           #7      // class java/util/ArrayList
+4: invokespecial #9      // Method java/util/ArrayList."<init>":()V
+11: invokevirtual #12    // Method java/util/ArrayList.add:(Ljava/lang/Object;)Z
+```
+
+no import anywhere, only full names. so `import java.util.*` versus a list of single-type imports makes zero difference to the class file, startup or speed. the choice is purely about readability and clash-safety.
+</Deep>
+
+<Interview q="does a wildcard import slow anything down?">
+no, not at runtime. imports are resolved by javac and erased: the class file only has fully qualified names, and classes are loaded lazily when first used, never because of an import. the real costs of wildcards are human: you can't see where a name comes from, and a new class in an imported package can make an existing name ambiguous. compile time differences are negligible.
+</Interview>
+
+<Keylines>
+- a class's real name is its fully qualified name: package + class.
+- packages map to folders, and they don't nest. `a.b.c` has nothing to do with `a.b`.
+- imports are a compile-time shortcut. bytecode only has full names.
+- at runtime the classpath is searched in order, and the first match wins.
+- single-type beats on-demand beats module. ties are ambiguous, but only when used.
+</Keylines>

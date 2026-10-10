@@ -1,0 +1,208 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { FnShapes } from "@/components/figures/effective-java/FnShapes";
+
+<InShort>
+java 8 added **lambdas** (functions as values) and **streams** (pipelines over data). items 42 to 48: use lambdas and method references instead of anonymous classes, reach for the standard **functional interfaces** first, use streams where they make the code clearer and loops where they don't, keep stream functions free of side effects, and treat `parallel()` as an experiment, not a switch.
+</InShort>
+
+<Figure caption={<>items 42 to 48. the core advice holds; <C k="hot">amber</C> marks where later releases added better tools.</>}>
+<ItemMap
+  items={[
+    { n: 42, t: "lambdas over anonymous classes" },
+    { n: 43, t: "method references when they're clearer" },
+    { n: 44, t: "use the standard functional interfaces" },
+    { n: 45, t: "streams when they're clearer, loops when they're not", lens: "toList, mapMulti, gatherers" },
+    { n: 46, t: "no side effects inside stream pipelines" },
+    { n: 47, t: "return a collection, not a stream", lens: "Stream.toList, sequenced collections" },
+    { n: 48, t: "parallel is not a speed button", lens: "Gatherers.mapConcurrent" },
+  ]}
+/>
+</Figure>
+
+## lambdas
+
+### item 42 · lambdas over anonymous classes
+
+an anonymous class to pass one method is five lines of ceremony around one expression. a lambda is the expression. it only works for **functional interfaces** (exactly one abstract method), and that's most of the time.
+
+<Compare>
+<Bad label="an anonymous class">
+```java
+names.sort(new Comparator<String>() {
+    @Override
+    public int compare(String a, String b) {
+        return Integer.compare(
+            a.length(), b.length());
+    }
+});
+```
+</Bad>
+<Good label="a lambda, or better">
+```java
+names.sort((a, b) -> Integer.compare(
+    a.length(), b.length()));
+
+names.sort(Comparator
+    .comparingInt(String::length));
+```
+</Good>
+</Compare>
+
+keep lambdas short (one to three lines). they have no name and no documentation, so a long one is a puzzle. and they're not identical to anonymous classes: inside a lambda, `this` is the enclosing object.
+
+```java title="A.java" run output="anon\nouter"
+public class A {
+    String name = "outer";
+
+    void show() {
+        Runnable anon = new Runnable() {
+            String name = "anon";
+            public void run() { System.out.println(this.name); } // the anonymous object
+        };
+        Runnable lambda = () -> System.out.println(this.name);   // the enclosing A
+        anon.run();
+        lambda.run();
+    }
+
+    public static void main(String[] args) { new A().show(); }
+}
+```
+
+anonymous classes still have jobs lambdas can't do: implementing an interface with several abstract methods, extending an abstract class, or referring to themselves. how lambdas are compiled (not as anonymous classes) is in [how lambdas are compiled](/learn/deep-dives/lambda-internals).
+
+### item 43 · method references when they're clearer
+
+`String::length` beats `s -> s.length()`. `x -> x` is clearer than `Function.identity()`, though. the rule is just: use whichever reads better. the five kinds:
+
+| kind | example | same as |
+| --- | --- | --- |
+| static | `Integer::parseInt` | `s -> Integer.parseInt(s)` |
+| bound | `Instant.now()::isAfter` | `t -> now.isAfter(t)`, receiver fixed up front |
+| unbound | `String::toLowerCase` | `s -> s.toLowerCase()`, receiver is the first argument |
+| class constructor | `TreeMap::new` | `() -> new TreeMap<>()` |
+| array constructor | `int[]::new` | `n -> new int[n]` |
+
+more in [method references](/learn/functional/method-references).
+
+### item 44 · use the standard functional interfaces
+
+`java.util.function` has 43 interfaces, and they're all variations on six shapes. before declaring your own `Validator` interface with one `boolean check(String)` method, check whether it's just a `Predicate<String>`. standard ones come with useful defaults (`and`, `negate`, `andThen`, `compose`) and every library already accepts them.
+
+<Figure caption={<>click a shape. most of the 43 interfaces are one of these six, specialized to <code>int</code>/<code>long</code>/<code>double</code> or taking two arguments.</>}>
+<FnShapes />
+</Figure>
+
+write your own only when it'll be widely used and benefits from a descriptive name, a strong contract, or custom defaults (`Comparator` is the JDK's example: it's structurally a `ToIntBiFunction`, but the name and the `thenComparing` defaults earn their place). annotate it `@FunctionalInterface`. the full family is in [functional interfaces](/learn/functional/functional-interfaces).
+
+## streams
+
+### item 45 · streams when they're clearer, loops when they're not
+
+streams shine when the question is a sentence: "total cents per city, sorted by city". loops are better when you need to break out early, mutate several locals, throw checked exceptions, or look at more than one element at a time.
+
+```java title="Main.java" run output="{delhi=700, goa=400, pune=1200}\nover 1000 after order #1"
+record Order(String city, int cents) {}
+
+void main() {
+    var orders = List.of(new Order("pune", 900), new Order("goa", 400),
+                         new Order("pune", 300), new Order("delhi", 700));
+
+    // the stream version: a one-sentence question, a one-sentence answer
+    Map<String, Integer> byCity = orders.stream()
+        .collect(Collectors.groupingBy(Order::city, TreeMap::new,
+                 Collectors.summingInt(Order::cents)));
+    IO.println(byCity);
+
+    // the loop version: early exit plus two things tracked at once
+    int total = 0, firstBig = -1;
+    for (int i = 0; i < orders.size(); i++) {
+        total += orders.get(i).cents();
+        if (firstBig < 0 && total > 1000) { firstBig = i; break; }
+    }
+    IO.println("over 1000 after order #" + firstBig);
+}
+```
+
+name lambda parameters well (the element type is invisible in a pipeline), extract helper methods, and avoid streaming over `char`s (`"hi".chars()` gives you ints). how a pipeline actually executes, lazily and element by element, is in [how a stream pipeline runs](/learn/functional/stream-pipeline).
+
+<Lens v={24}>three additions narrowed the "loops are better" list: `Stream.toList()` (16), `mapMulti` (16) for one-to-many without a temporary stream, and [gatherers](/learn/functional/gatherers) (24) for custom stateful steps like windows and scans, the kind of thing that used to force you back into a loop.</Lens>
+
+### item 46 · no side effects inside stream pipelines
+
+a stream function should compute its result from its input and nothing else. if `forEach` is doing the real work (writing into an outside map or list), you've written a loop with extra steps, and one that breaks the moment someone adds `.parallel()`.
+
+<Compare>
+<Bad label="forEach writing to an outside map">
+```java
+Map<String, Integer> counts =
+    new HashMap<>();
+words.stream().forEach(w ->
+    counts.merge(w, 1, Integer::sum));
+// add .parallel(): HashMap from
+// many threads at once, lost updates
+```
+</Bad>
+<Good label="a collector does the accumulating">
+```java
+var counts = words.stream()
+    .collect(Collectors.groupingBy(
+        w -> w, Collectors.counting()));
+// add .parallel(): still correct
+```
+</Good>
+</Compare>
+
+`forEach` is for reporting the result (printing, logging), not computing it. the collectors to know: `toList`, `toSet`, `toMap`, `groupingBy`, `partitioningBy`, `counting`, `joining`, `summingInt`, `teeing`. they're all in [collectors](/learn/functional/collectors).
+
+### item 47 · return a collection, not a stream
+
+a `Stream` return type forces callers to stream, and they can only do it once:
+
+<Predict options={["3 then 3", "3 then 0", "3 then an exception"]} answer={2}>
+```java
+void main() {
+    Stream<String> names = Stream.of("ada", "bo", "cy");
+    IO.println(names.count());
+    IO.println(names.count());
+}
+```
+<Explain>
+a stream is a one-shot pipeline, not a container. the second terminal operation throws an `IllegalStateException` ("stream has already been operated upon or closed"). a method that returns a `Stream` hands every caller exactly one pass.
+</Explain>
+</Predict>
+
+`Collection` is a subtype of `Iterable` *and* has `stream()`, so returning one serves loop people and stream people alike. if the data is huge, return a view (an `AbstractList` over something lazy, like the squares list in [item 20](/learn/effective-java/classes-and-interfaces)) instead of materializing it. return a `Stream` only when the sequence is truly lazy or infinite, or one-pass by nature (lines of a file).
+
+<Lens v={21}>`Stream.toList()` (16) made "give me a list back" a one-liner (and it's unmodifiable). sequenced collections (21) added `getFirst`, `getLast` and `reversed()` to lists, deques and sorted sets, which closed another gap that pushed people toward returning streams.</Lens>
+
+### item 48 · parallel is not a speed button
+
+`parallel()` splits work across the common fork/join pool. it pays off when the source splits cheaply (arrays, `ArrayList`, `IntStream.range`), the work per element is real, and the result combines cheaply (`sum`, `count`, `reduce`). it can be slower, or wrong, otherwise:
+
+<Figure caption={<>best of 7 runs after warm-up, jdk 25, a 14-core arm mac. <code>Stream.iterate</code> + <code>limit</code> can&apos;t be split well, so going <C k="dead">parallel</C> made it slower. the prime count is the case parallel was built for.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "range 20M, sequential", value: 17.7 },
+    { label: "range 20M, parallel", value: 2.5, tone: "live" },
+    { label: "iterate+limit 20M, sequential", value: 83.1 },
+    { label: "iterate+limit 20M, parallel", value: 111.8, tone: "dead" },
+    { label: "count primes ≤ 3M, sequential", value: 221.3 },
+    { label: "count primes ≤ 3M, parallel", value: 25.5, tone: "live" },
+  ]}
+/>
+</Figure>
+
+the gotchas: `limit` and `findFirst` force ordering work; a stateful or side-effecting lambda (item 46) goes from "ugly" to "wrong"; and the common pool is shared by the whole JVM, so one slow parallel stream slows down every other. measure with [JMH](/learn/performance/jmh) before and after, on the real hardware. the long version is in [parallel streams](/learn/functional/parallel-streams).
+
+<Lens v={24}>parallel streams are for CPU-bound work. for I/O-bound work (calling services, reading files), use [virtual threads](/learn/concurrency/virtual-threads) (21), or `Gatherers.mapConcurrent(n, fn)` (24), which runs a mapping step on up to n virtual threads while keeping the stream's order.</Lens>
+
+<Keylines>
+- a lambda is an anonymous class minus the ceremony. inside it, `this` is the enclosing object.
+- use method references when they read better, lambdas when they don't.
+- check `java.util.function` before inventing an interface. six shapes cover nearly everything.
+- streams for sentence-shaped questions, loops for early exits and multi-variable state.
+- stream functions should be pure. collectors accumulate, `forEach` only reports.
+- return collections. parallelize only after measuring, and only CPU-bound work.
+</Keylines>

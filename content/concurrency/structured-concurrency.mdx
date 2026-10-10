@@ -1,0 +1,196 @@
+import { TaskTree } from "@/components/figures/concurrency/TaskTree";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const scoped = {
+  file: "Main.java",
+  source: `static final ScopedValue<String> USER = ScopedValue.newInstance();
+
+void audit(String what) {
+    IO.println(what + " by " + USER.get());
+}
+
+void main() {
+    ScopedValue.where(USER, "ada").run(() -> {
+        audit("read");
+        ScopedValue.where(USER, "admin").run(() -> audit("delete"));   // rebound, for this call only
+        audit("write");                                                // back to ada
+    });
+    IO.println("bound out here? " + USER.isBound());
+}`,
+  steps: [
+    { line: 8, frames: [], heap: {}, note: "USER isn't bound to anything yet. where(USER, \"ada\") makes a binding, and run(...) makes it visible for exactly as long as the lambda runs." },
+    { line: 9, frames: [], heap: {}, note: "inside the lambda, USER.get() is \"ada\": here, and in every method called from here, however deep." },
+    { line: 4, frames: [], heap: {}, stdout: "read by ada\n", note: "audit never received USER as a parameter. it reads the binding of the scope it's running in." },
+    { line: 10, frames: [], heap: {}, stdout: "read by ada\n", note: "a nested where(...).run rebinds USER for that inner call only. it doesn't overwrite anything: the outer binding is still there, just shadowed." },
+    { line: 4, frames: [], heap: {}, stdout: "read by ada\ndelete by admin\n", note: "inside the inner run, USER is \"admin\"." },
+    { line: 11, frames: [], heap: {}, stdout: "read by ada\ndelete by admin\nwrite by ada\n", note: "the inner run returned, so its binding is gone, and USER is \"ada\" again. nobody had to restore it." },
+    { line: 13, frames: [], heap: {}, stdout: "read by ada\ndelete by admin\nwrite by ada\nbound out here? false\n", note: "outside the run there's no binding at all. nothing to remove(), so nothing can leak." },
+  ],
+};
+
+export const leak = [
+  { mem: { "CURRENT_USER on thread-1": "null" }, note: "a pool thread, and a ThreadLocal holding the current user. the pool reuses the thread for request after request." },
+  { ops: ["request A: set(\"ada\")"], mem: { "CURRENT_USER on thread-1": "ada" } },
+  { ops: ["handle A as ada"], note: "fine so far." },
+  { ops: [{ t: "A done, no remove()", k: "dead" }], note: "request A finishes on a path that forgot to call remove(). maybe an exception skipped it." },
+  { ops: ["request B: get() → \"ada\""], mem: { "CURRENT_USER on thread-1": { v: "ada", k: "dead" } }, note: "request B lands on the same thread and reads ada. B is now running with someone else's identity. a ThreadLocal lives as long as its thread, not as long as your request." },
+];
+
+<InShort>
+**structured concurrency** treats a group of concurrent subtasks as one unit: they're forked inside a **`StructuredTaskScope`**, and they all finish (succeed, fail, or get **cancelled**) before the scope's block ends. a failure cancels the siblings, cancelling the parent cancels the children, and no thread outlives the code that started it. **`ScopedValue`** is the matching way to share context with that tree: an immutable value bound for the length of a call, replacing most `ThreadLocal`s. scoped values are final in java 25 ([JEP 506](https://openjdk.org/jeps/506)). the scope API is still a preview <Since preview v={27} />.
+</InShort>
+
+## the picture
+
+`ExecutorService.submit` is like sending three interns out on errands and going back to your desk. if one of them gets hit by a bus, you find out whenever you next check your messages, and the other two keep running their errands for a project that's already cancelled.
+
+a structured scope is a meeting. you all go into one room, everybody works on their part, and nobody leaves the room until the meeting is over. if one part fails and the meeting is called off, everyone stops. when you walk out the door, there's nobody left inside.
+
+that's the "structure": the lifetime of the subtasks is nested inside a block of code, exactly like a method call is nested inside its caller. the same rule that makes `try`/`finally` reliable, applied to threads.
+
+## the problem with plain futures
+
+```java title="Unstructured.java"
+Response handle() throws Exception {
+    Future<String> user  = executor.submit(() -> findUser());
+    Future<Integer> order = executor.submit(() -> fetchOrder());
+    return new Response(user.get(), order.get());   // if fetchOrder fails first, we don't notice
+}                                                    // until findUser is done. and if handle() is
+                                                     // interrupted, both tasks keep running.
+```
+
+nothing ties those tasks to `handle()`. a failure in one doesn't stop the other, the parent learns about failures in whatever order it happens to call `get()`, and cancelling the parent doesn't cancel the children. in a thread dump, they're just pool threads with no record of who they're working for.
+
+<Figure wide caption={<>the same three subtasks, fetchOrder failing at 300 ms. with an <strong>ExecutorService</strong>, handle() only finds out at 800 ms, and fetchWeather keeps running <C k="dead">for nobody</C> until 1200. with a <strong>StructuredTaskScope</strong>, the failure cancels the siblings and handle() fails at 300 ms with nothing left running.</>}>
+<TaskTree />
+</Figure>
+
+## `StructuredTaskScope`
+
+<Since preview v={27} /> here's the jdk 25 version of the API, which is what this site runs (compile and run with `--enable-preview --source 25`):
+
+```java title="Main.java" run output="findUser: cancelled\nscope failed: order service down"
+import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.StructuredTaskScope.Subtask;
+
+String findUser() throws InterruptedException {
+    try {
+        Thread.sleep(1000);
+        return "ada";
+    } catch (InterruptedException e) {
+        IO.println("findUser: cancelled");
+        throw e;
+    }
+}
+
+int fetchOrder() throws InterruptedException {
+    Thread.sleep(100);
+    throw new IllegalStateException("order service down");
+}
+
+void main() throws InterruptedException {
+    try (var scope = StructuredTaskScope.open()) {
+        Subtask<String> user = scope.fork(this::findUser);
+        Subtask<Integer> order = scope.fork(this::fetchOrder);
+        scope.join();                          // waits for both, or for the first failure
+        IO.println(user.get() + " ordered " + order.get());
+    } catch (StructuredTaskScope.FailedException e) {
+        IO.println("scope failed: " + e.getCause().getMessage());
+    }
+}
+```
+
+the shape is always the same:
+
+1. `open()` a scope in a try-with-resources.
+2. `fork()` each subtask. each one runs in its own new [virtual thread](/learn/concurrency/virtual-threads), and you get a `Subtask` handle back.
+3. `join()` once. with the default policy, it waits for all subtasks to succeed, or throws as soon as one fails (after cancelling the rest).
+4. read results with `subtask.get()`, which is only allowed after `join()`.
+5. leaving the block (`close()`) waits until every subtask's thread has actually finished. there's no way to leak one.
+
+and if the thread running `handle()` is interrupted while in `join()`, the scope is cancelled and every subtask is interrupted too. cancellation flows down the tree, failures flow up.
+
+other completion policies come from `StructuredTaskScope.Joiner`, passed to `open(joiner)`: wait for all and collect every result, return the **first** subtask to succeed and cancel the rest (racing two replicas, say), or write your own.
+
+<Note title="the API is still moving">
+structured concurrency has been in preview since java 21 and changed shape more than once. java 25 ([JEP 505](https://openjdk.org/jeps/505)) replaced the constructors with `open()` and joiners. java 26 renamed some joiners and made `allSuccessfulOrThrow()` return a list of results. java 27 ([JEP 533](https://openjdk.org/jeps/533), the seventh preview) added a type parameter for the exception `join()` throws, and with the default policy `join()` now throws a checked `ExecutionException` instead of `FailedException`. [JEP 543](https://openjdk.org/jeps/543) proposes making it final, unchanged from 27, in java 28. the ideas above are stable; check the exact method names against your jdk.
+</Note>
+
+## ScopedValue: context for the tree
+
+a request comes in, and a dozen methods deep, something needs to know the current user, the transaction, the request id. passing it as a parameter through every method is tedious. a `ThreadLocal` has been the standard answer since java 1.2, but it's a mutable, per-thread global with a lifetime problem:
+
+<Figure wide caption={<>a <code>ThreadLocal</code> value lives as long as the thread, and pool threads live forever. one missing <code>remove()</code> and the next request on that thread <C k="dead">inherits the previous user</C>.</>}>
+<Lanes threads={["pool-1-thread-1"]} cells={["CURRENT_USER on thread-1"]} steps={leak} />
+</Figure>
+
+a **`ScopedValue`** is bound for the duration of a call instead, and it can't be changed, only rebound for a nested call:
+
+<Figure wide caption={<>step through it. the binding exists only while <code>run(...)</code> is executing. nested bindings shadow the outer one and disappear on return, so there's never anything to clean up.</>}>
+<CodeStepper trace={scoped} />
+</Figure>
+
+```java title="Main.java" run output="read by ada\ndelete by admin\nwrite by ada\nbound out here? false"
+static final ScopedValue<String> USER = ScopedValue.newInstance();
+
+void audit(String what) {
+    IO.println(what + " by " + USER.get());
+}
+
+void main() {
+    ScopedValue.where(USER, "ada").run(() -> {
+        audit("read");
+        ScopedValue.where(USER, "admin").run(() -> audit("delete"));   // rebound, for this call only
+        audit("write");                                                // back to ada
+    });
+    IO.println("bound out here? " + USER.isBound());
+}
+```
+
+and the two features are designed together: subtasks forked in a `StructuredTaskScope` automatically see the scoped values bound around the scope. no copying into each thread, no inheritance cost, because the values are immutable and the subtasks can't outlive the binding:
+
+```java title="Main.java" run output="subtask 1 sees ada\nsubtask 2 sees ada"
+import java.util.concurrent.StructuredTaskScope;
+
+static final ScopedValue<String> USER = ScopedValue.newInstance();
+
+void main() throws InterruptedException {
+    ScopedValue.where(USER, "ada").run(() -> {
+        try (var scope = StructuredTaskScope.open()) {
+            var a = scope.fork(() -> "subtask 1 sees " + USER.get());   // inherited by forked subtasks
+            var b = scope.fork(() -> "subtask 2 sees " + USER.get());
+            scope.join();
+            IO.println(a.get());
+            IO.println(b.get());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    });
+}
+```
+
+| | `ThreadLocal` | `ScopedValue` |
+| --- | --- | --- |
+| lifetime | as long as the thread (forever, in a pool) | exactly the `run(...)` / `call(...)` |
+| mutable | yes, `set()` anywhere, by anyone | no, rebind for a nested call instead |
+| cleanup | your job: `remove()`, every path | none needed |
+| child threads | `InheritableThreadLocal` copies the value per thread | shared with structured subtasks for free |
+| cost with a million virtual threads | a map entry per thread | a lookup in the current binding |
+
+`ThreadLocal` is still the right tool for genuinely per-thread state that's expensive to build and safe to reuse (a per-thread `SimpleDateFormat`, say), on platform threads. for passing context down a call tree, use a `ScopedValue`. more on how `ThreadLocal` works (and leaks) in [ThreadLocal internals](/learn/deep-dives/threadlocal-internals).
+
+<Gotcha title="get() on an unbound ScopedValue throws">
+`USER.get()` outside any binding throws `NoSuchElementException`. use `isBound()` to check, or `orElse(fallback)` for a default. since java 25, `orElse(null)` isn't allowed: the fallback must be non-null.
+</Gotcha>
+
+<Interview q="what problem does structured concurrency solve?">
+with plain executors, subtasks aren't tied to the code that started them: a failure in one doesn't cancel the others, cancelling the parent doesn't cancel the children, and threads can outlive the method that forked them (a leak). StructuredTaskScope confines subtasks to a lexical block: they're forked inside it, joined inside it, and guaranteed finished when it closes. a failure can cancel the siblings, interruption of the parent propagates to the children, and thread dumps show the task hierarchy. it pairs with virtual threads (one per subtask) and scoped values (context shared with the subtasks).
+</Interview>
+
+<Keylines>
+- unstructured futures leak work: failures are noticed late, and nothing cancels the siblings.
+- a StructuredTaskScope keeps subtasks inside a block: fork, join, and everything's done when it closes.
+- failure flows up and cancels siblings. cancellation flows down to children.
+- still a preview in java 27; proposed final for java 28 (JEP 543). the shape changed between versions.
+- ScopedValue (final in java 25): immutable context for the length of a call. nothing to remove, nothing to leak.
+</Keylines>

@@ -1,0 +1,268 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+
+<InShort>
+exceptions are for **exceptional** conditions, not for control flow. items 69 to 77: throw **checked** exceptions for things a caller can recover from and **unchecked** ones for bugs, reuse the standard types, translate low-level exceptions at layer boundaries, put the failing values in the message, leave objects unchanged when you fail, and never swallow one silently.
+</InShort>
+
+<Figure caption={<>items 69 to 77. sealed result types, helpful NPE messages and the unnamed <code>_</code> changed three of them.</>}>
+<ItemMap
+  items={[
+    { n: 69, t: "exceptions aren't control flow" },
+    { n: 70, t: "checked for recoverable, unchecked for bugs" },
+    { n: 71, t: "don't force callers to catch what they can't handle", lens: "sealed result types" },
+    { n: 72, t: "reuse the standard exceptions" },
+    { n: 73, t: "translate exceptions at layer boundaries" },
+    { n: 74, t: "document every exception you throw" },
+    { n: 75, t: "put the failing values in the message", lens: "helpful NPE messages" },
+    { n: 76, t: "fail without half-changing state" },
+    { n: 77, t: "never swallow an exception", lens: "catch (E _)" },
+  ]}
+/>
+</Figure>
+
+## when to throw
+
+### item 69 · exceptions aren't control flow
+
+an exception is slow to create (it captures the whole stack trace), the JIT optimizes the normal path rather than the catch block, and code that catches to steer itself hides real errors in the same `catch`. if callers need to ask "will this work?", give them a way to ask: a state-testing method (`hasNext()` before `next()`), or a return value that can say "no" (`Optional`, a result type).
+
+<Figure caption={<>parsing a million strings, half of them invalid. best of 7, jdk 25, arm mac. <C k="dead">catching NumberFormatException</C> vs <C k="live">checking the characters first</C>.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "try parseInt, catch the failure", value: 135.6, tone: "dead" },
+    { label: "check digits first, then parse", value: 3.2, tone: "live" },
+  ]}
+/>
+</Figure>
+
+about 40x, and almost all of it is building 500,000 stack traces nobody reads. the same rule applies to API design: don't make your users use exceptions for ordinary outcomes.
+
+### item 70 · checked for recoverable, unchecked for bugs
+
+java has three kinds of throwable, and each one is a message to the caller:
+
+<Figure caption={<>the throwable family. checked exceptions say "this can happen, plan for it". <C k="dead">unchecked</C> ones say "someone wrote a bug". errors belong to the JVM. click a node to fold it.</>}>
+<Tree>{`
+Throwable
+    Error                          // the JVM is in trouble. don't catch, don't subclass
+        OutOfMemoryError
+        StackOverflowError
+    Exception                      // checked: the compiler makes callers handle it
+        IOException
+            FileNotFoundException
+        InterruptedException
+        RuntimeException #dead     // unchecked: precondition violated, a bug
+            IllegalArgumentException #dead
+            IllegalStateException #dead
+            NullPointerException #dead
+            IndexOutOfBoundsException #dead
+`}</Tree>
+</Figure>
+
+use a checked exception when the caller can reasonably recover (file missing, network down, payment declined) and give it methods with the details the caller needs to recover (how much money was missing?). use a `RuntimeException` subclass for precondition violations: the fix is to change the code, not to catch. never throw `Error`, and never subclass `Throwable` directly. the mechanics are in [exceptions](/learn/core-api/exceptions).
+
+### item 71 · don't force callers to catch what they can't handle
+
+a checked exception is a cost on every caller: a `try` block, and no way to use the method in a stream or lambda. it's only worth it if the caller can actually do something useful. if the best they can do is `throw new AssertionError()` or log and give up, make it unchecked, or return something that represents "no result".
+
+<Lens v={21}>sealed interfaces + records + pattern `switch` (21) make "return the failure" a first-class option. the compiler forces callers to handle every case, like a checked exception, but it works in lambdas and streams:</Lens>
+
+```java title="Main.java" run output="port 8080\nhttp: not a number\n70000: too big"
+sealed interface Parsed permits Ok, Bad {}
+record Ok(int value) implements Parsed {}
+record Bad(String input, String why) implements Parsed {}
+
+static Parsed parsePort(String s) {
+    if (!s.matches("\\d{1,5}")) return new Bad(s, "not a number");
+    int p = Integer.parseInt(s);
+    return p <= 65_535 ? new Ok(p) : new Bad(s, "too big");
+}
+
+void main() {
+    for (String s : List.of("8080", "http", "70000")) {
+        String msg = switch (parsePort(s)) {   // exhaustive: forget Bad and it won't compile
+            case Ok(int v) -> "port " + v;
+            case Bad(String in, String why) -> in + ": " + why;
+        };
+        IO.println(msg);
+    }
+}
+```
+
+### item 72 · reuse the standard exceptions
+
+everyone already knows what these mean, so your API is easier to learn and your stack traces easier to read:
+
+| exception | throw it when |
+| --- | --- |
+| `IllegalArgumentException` | an argument's value is wrong (negative count, bad format) |
+| `IllegalStateException` | the object isn't in the right state for this call (not initialized, already closed) |
+| `NullPointerException` | an argument is `null` where it mustn't be |
+| `IndexOutOfBoundsException` | an index is out of range |
+| `ConcurrentModificationException` | a collection was modified while it was being iterated (when that's detected) |
+| `UnsupportedOperationException` | the object doesn't support this method (immutable collections) |
+
+the specific beats the general: a null argument is an NPE, not an `IllegalArgumentException`. and never throw `Exception`, `RuntimeException`, `Throwable` or `Error` directly: callers can't tell your exception from every other one.
+
+## shaping exceptions
+
+### item 73 · translate exceptions at layer boundaries
+
+a `SQLException` escaping from `OrderService.place()` leaks the fact that you use SQL, and changes your API the day you switch storage. catch the low-level exception at the boundary and throw one that speaks the higher layer's language, keeping the original as the **cause**:
+
+<Figure caption={<>hover a stage. each layer throws in its own vocabulary and keeps the lower exception as its cause, so the stack trace still ends at the real failure.</>}>
+<Flow
+  stages={[
+    { label: "FileNotFoundException", sub: "the file layer", note: "the real failure: /data/users/42.json isn't there." },
+    { label: "RepositoryException", sub: "the storage layer", note: "\"can't load user 42\", with the FileNotFoundException as its cause." },
+    { label: "UserNotFoundException", sub: "the service layer", note: "what callers of the service care about. maybe even a checked exception they can recover from." },
+  ]}
+/>
+</Figure>
+
+```java title="Main.java" run output="can't load user 42\ncaused by: java.io.FileNotFoundException: /data/users/42.json"
+import java.io.*;
+
+class RepositoryException extends RuntimeException {
+    RepositoryException(String msg, Throwable cause) { super(msg, cause); }
+}
+
+String loadUser(String id) {
+    try {
+        throw new FileNotFoundException("/data/users/" + id + ".json");   // the low-level failure
+    } catch (IOException e) {
+        throw new RepositoryException("can't load user " + id, e);     // translated, cause kept
+    }
+}
+
+void main() {
+    try {
+        loadUser("42");
+    } catch (RepositoryException e) {
+        IO.println(e.getMessage());
+        IO.println("caused by: " + e.getCause());
+    }
+}
+```
+
+don't overdo it: the best fix is often to make the low-level call not fail (validate first), or to log and handle it at the boundary so callers never see it.
+
+### item 74 · document every exception you throw
+
+declare checked exceptions one by one in `throws` (never `throws Exception`), and document every exception, checked or not, with `@throws` and the condition that causes it. that list of unchecked exceptions *is* the method's preconditions. don't put unchecked ones in the `throws` clause, though: the javadoc tag is enough, and the clause is how readers tell checked from unchecked.
+
+### item 75 · put the failing values in the message
+
+when a failure reaches a log, the message is often all anyone gets. include the values that caused it: not "index out of range" but "index 12 out of range for length 10". the cleanest way is a constructor that takes the values and builds the message, so every throw site gets it right. don't include passwords or keys.
+
+<Lens v={14}>"helpful NullPointerException messages" (JEP 358, on by default since 15) did this for the JVM's own NPEs: the message now names exactly which reference was null.</Lens>
+
+```java title="Main.java" run output="shipping o-7\nException in thread \"main\" java.lang.NullPointerException: Cannot invoke \"Address.city()\" because the return value of \"Customer.address()\" is null"
+record Order(String id, Customer customer) {}
+record Customer(String name, Address address) {}
+record Address(String city) {}
+
+public class Main {
+    public static void main(String[] args) {
+        var order = new Order("o-7", new Customer("ada", null));
+        System.out.println("shipping " + order.id());
+        System.out.println(order.customer().address().city());   // which part was null?
+    }
+}
+```
+
+## after the throw
+
+### item 76 · fail without half-changing state
+
+a method that throws should leave the object as it was before the call (**failure atomicity**). otherwise the caller catches the exception and keeps going with an object in a state no one designed.
+
+<Predict question="the transfer fails. how much is left in mine?" options={["500", "300", "200"]} answer={1}>
+```java
+class Account {
+    long cents;
+    Account(long cents) { this.cents = cents; }
+}
+
+static void transfer(Account from, Account to, long amount) {
+    from.cents -= amount;
+    if (to == null) throw new IllegalArgumentException("no target account");
+    to.cents += amount;
+}
+
+void main() {
+    var mine = new Account(500);
+    try {
+        transfer(mine, null, 200);
+    } catch (IllegalArgumentException e) {
+        IO.println(e.getMessage() + ", balance now " + mine.cents);
+    }
+}
+```
+<Explain>
+the debit ran before the check, so `mine` is down to 300 and the 200 went nowhere. the exception was thrown and caught correctly, and the data is still wrong. check first, mutate second.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="no target account, balance still 500"
+class Account {
+    long cents;
+    Account(long cents) { this.cents = cents; }
+}
+
+static void transfer(Account from, Account to, long amount) {
+    Objects.requireNonNull(to, "no target account");      // check everything first
+    if (amount > from.cents) throw new IllegalStateException("insufficient funds");
+    from.cents -= amount;                                  // then mutate
+    to.cents += amount;
+}
+
+void main() {
+    var mine = new Account(500);
+    try {
+        transfer(mine, null, 200);
+    } catch (NullPointerException e) {
+        IO.println(e.getMessage() + ", balance still " + mine.cents);
+    }
+}
+```
+
+four ways to get there: be immutable (failure atomicity for free), check everything before mutating, compute the result on a temporary copy and swap it in, or (rarely) write recovery code that rolls back. some failures can't be atomic (a `ConcurrentModificationException` means things already went wrong); document when you don't guarantee it.
+
+### item 77 · never swallow an exception
+
+an empty `catch` block turns a crash you'd notice into a wrong result you won't. if ignoring really is right (closing a read-only stream, a best-effort cache refresh), say why in a comment and name the variable to show it's intentional.
+
+<Compare>
+<Bad label="the error vanishes">
+```java
+try {
+    cache.refresh();
+} catch (Exception e) {
+}
+```
+</Bad>
+<Good label="intentional, and explained">
+```java
+try {
+    cache.refresh();
+} catch (IOException _) {
+    // best effort: stale entries are
+    // fine, next refresh will retry
+}
+```
+</Good>
+</Compare>
+
+<Lens v={22}>unnamed variables (JEP 456, 22) let you write `catch (IOException _)`: the compiler knows you don't use it, and so does the reader. it's not a license to ignore things, just a cleaner way to say "on purpose". more in [try, catch, finally](/learn/core-api/try-catch-finally).</Lens>
+
+<Keylines>
+- exceptions are for exceptional cases. don't steer normal logic with them, they're slow and they hide bugs.
+- checked = the caller can recover. unchecked = a bug. errors are the JVM's.
+- a checked exception has to earn its cost. a sealed result type is often the better API now.
+- throw the standard exceptions, translated to your layer, with the cause attached.
+- put the failing values in the message, and check before you mutate.
+- an empty catch is a bug waiting to be found in production. if you ignore, say why.
+</Keylines>

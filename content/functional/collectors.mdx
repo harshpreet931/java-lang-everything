@@ -1,0 +1,180 @@
+import { BucketDrop } from "@/components/figures/functional/BucketDrop";
+
+<InShort>
+`collect(...)` folds a stream into one result using a **collector**: a recipe that says how to make an empty container, how to add one element, how to merge two containers, and how to finish.
+
+`Collectors` ships the common recipes: `toList`, `toMap`, `joining`, `groupingBy`, `partitioningBy`, `teeing`. the real power is **downstream collectors**: a collector that runs inside each group of another collector.
+</InShort>
+
+## the picture
+
+you know that loop where you make a `HashMap<String, List<Thing>>`, check if the key exists, create the list if it doesn't, then add? `groupingBy` is that loop, written once and correctly.
+
+think of a mail room. every letter gets read once and dropped into a pigeonhole labelled with its key (the classifier). what happens inside each pigeonhole is a separate decision (the downstream): keep the letters, just count them, or staple them into one bundle.
+
+<Figure wide caption={<>pick a classifier and a downstream, then step. each word is read once and dropped into the bucket for its key. the <C k="meta">purple line</C> under each bucket is what the downstream collector is actually holding. the printed map at the end is the real jdk 25 output, including the HashMap's odd key order.</>}>
+<BucketDrop />
+</Figure>
+
+## the everyday ones
+
+```java title="Main.java" run output="[fig, kiwi, plum]\nfig, kiwi, plum\n[fig|kiwi|plum]\n4.888888888888889\nIntSummaryStatistics{count=9, sum=44, min=3, average=4.888889, max=7}"
+import java.util.*;
+import static java.util.stream.Collectors.*;
+
+void main() {
+    List<String> words = List.of("fig", "kiwi", "plum", "pear", "apple",
+            "mango", "banana", "cherry", "avocado");
+
+    IO.println(words.stream().limit(3).toList());      // java 16, unmodifiable
+    IO.println(words.stream().limit(3).collect(joining(", ")));
+    IO.println(words.stream().limit(3).collect(joining("|", "[", "]")));
+    IO.println(words.stream().collect(averagingInt(String::length)));
+    IO.println(words.stream().collect(summarizingInt(String::length)));
+}
+```
+
+<Gotcha title="Stream.toList() and Collectors.toList() are not the same list">
+`stream.toList()` (java 16) gives you an **unmodifiable** list: `add` throws `UnsupportedOperationException`. `collect(Collectors.toList())` gives you a list the spec doesn't describe at all, which on every JDK so far is a plain `ArrayList` you can mutate. code that switched from one to the other "because it's shorter" can start throwing at the first `add`. if you need to mutate, say so: `collect(Collectors.toCollection(ArrayList::new))`.
+</Gotcha>
+
+## groupingBy and downstream collectors
+
+`groupingBy(classifier)` alone gives you `Map<K, List<T>>`. the second argument replaces that `List` with any other collector, and a three-argument version also lets you pick the map:
+
+```java title="Main.java" run output="{3=1, 4=3, 5=2, 6=2, 7=1}\n{a=APPLE+AVOCADO, b=BANANA, c=CHERRY, f=FIG, k=KIWI, m=MANGO, p=PLUM+PEAR}\n{false=Optional[kiwi], true=Optional[avocado]}\n{and=2, bat=1, cat=1, hat=1, the=3}"
+import java.util.*;
+import java.util.function.*;
+import static java.util.stream.Collectors.*;
+
+void main() {
+    List<String> words = List.of("fig", "kiwi", "plum", "pear", "apple",
+            "mango", "banana", "cherry", "avocado");
+
+    IO.println(words.stream()
+            .collect(groupingBy(String::length, TreeMap::new, counting())));
+
+    IO.println(words.stream()
+            .collect(groupingBy(w -> w.charAt(0), TreeMap::new,
+                    // a downstream inside a downstream
+                    mapping(String::toUpperCase, joining("+")))));
+
+    IO.println(words.stream()
+            .collect(partitioningBy(w -> w.length() > 4,
+                    maxBy(Comparator.comparingInt(String::length)))));
+
+    // word frequencies
+    String text = "the cat and the hat and the bat";
+    IO.println(Arrays.stream(text.split(" "))
+            .collect(groupingBy(Function.identity(), TreeMap::new, counting())));
+}
+```
+
+downstreams nest as deep as you like: `mapping`, `filtering` and `flatMapping` transform elements before they reach the inner collector, `counting`, `summingInt`, `averagingDouble`, `minBy`, `maxBy` reduce them, and `collectingAndThen` post-processes the result. that last example, word frequencies in one expression, is a classic interview question.
+
+<Quiz question="partitioningBy(w -> w.length() > 100) on a list of short words. what do you get?" options={["{}", "{false=[...all of them]}", "{false=[...all of them], true=[]}"]} answer={2}>
+<Explain>
+`partitioningBy` always returns a map with both keys, `false` and `true`, even when one side is empty. `groupingBy(w -> w.length() > 100)` would only have the `false` key, because groupingBy creates a bucket the first time a key shows up.
+</Explain>
+</Quiz>
+
+## toMap, and the duplicate key
+
+`toMap(keyFn, valueFn)` is the one that blows up in production. it assumes keys are unique, and it's right until the day it isn't:
+
+```java title="Main.java" run output="indexing [apple, avocado, banana]\nException in thread \"main\" java.lang.IllegalStateException: Duplicate key a (attempted merging values apple and avocado)"
+import java.util.*;
+import java.util.stream.*;
+
+void main() {
+    List<String> words = List.of("apple", "avocado", "banana");
+    IO.println("indexing " + words);
+    Map<Character, String> byInitial = words.stream()
+            .collect(Collectors.toMap(w -> w.charAt(0), w -> w));
+    IO.println(byInitial);
+}
+```
+
+the fix is the third argument, a merge function that says what to do when two values land on the same key. add a fourth for the map type:
+
+```java title="Main.java" run output="{p=2, a=2, b=1, c=1, f=1, k=1, m=1}\n{a=apple+avocado, b=banana, c=cherry, f=fig, k=kiwi, m=mango, p=plum+pear}"
+import java.util.*;
+import static java.util.stream.Collectors.*;
+
+void main() {
+    List<String> words = List.of("fig", "kiwi", "plum", "pear", "apple",
+            "mango", "banana", "cherry", "avocado");
+    IO.println(words.stream()
+            .collect(toMap(w -> w.charAt(0), w -> 1, Integer::sum)));
+    IO.println(words.stream()
+            .collect(toMap(w -> w.charAt(0), w -> w,
+                    (a, b) -> a + "+" + b,      // merge function
+                    TreeMap::new)));            // map factory
+}
+```
+
+see the first line's key order: `p` before `a`. that's a `HashMap`, and `'p'` (112) happens to land in bucket 0 of a 16-slot table. never print or test against a `HashMap`'s order. ([why](/learn/collections/hashmap))
+
+## teeing: two collectors at once
+
+`teeing` (java 12) sends every element to two collectors and combines their results at the end. one pass, two answers:
+
+```java title="Main.java" run output="Range[min=4, max=42]"
+import java.util.stream.*;
+import static java.util.stream.Collectors.*;
+
+record Range(int min, int max) {}
+
+void main() {
+    Range r = Stream.of(4, 8, 15, 16, 23, 42).collect(teeing(
+            minBy(Integer::compare),
+            maxBy(Integer::compare),
+            (lo, hi) -> new Range(lo.orElseThrow(), hi.orElseThrow())));
+    IO.println(r);
+}
+```
+
+## what a collector actually is
+
+every collector is four functions. `collect` calls them in this order:
+
+<Figure caption="hover a stage. the combiner only runs for parallel streams, where each thread fills its own container and the containers are merged at the end.">
+<Flow
+  stages={[
+    { label: "supplier", sub: "() → container", note: "makes a new, empty, mutable container. an ArrayList, a StringBuilder, a long[1] for counting." },
+    { label: "accumulator", sub: "(container, element)", note: "folds one element into the container. called once per element. mutates, returns nothing." },
+    { label: "combiner", sub: "(c1, c2) → container", note: "merges two containers. only parallel streams need it: each thread had its own." },
+    { label: "finisher", sub: "container → result", note: "turns the container into the answer: StringBuilder → String, a counter → Long. often just identity." },
+  ]}
+/>
+</Figure>
+
+so you can build your own with `Collector.of`:
+
+```java title="Main.java" run output="FIGKIWIPLUM"
+import java.util.*;
+import java.util.stream.*;
+
+void main() {
+    Collector<String, StringBuilder, String> shout = Collector.of(
+            StringBuilder::new,                     // supplier
+            (sb, w) -> sb.append(w.toUpperCase()),  // accumulator
+            StringBuilder::append,                  // combiner
+            StringBuilder::toString);               // finisher
+    IO.println(Stream.of("fig", "kiwi", "plum").collect(shout));
+}
+```
+
+the container is **mutable on purpose**. that's the big difference between `collect` and `reduce`, which is the [next chapter](/learn/functional/reduction).
+
+<Interview q="how would you count how often each word appears in a list?">
+`words.stream().collect(Collectors.groupingBy(Function.identity(), Collectors.counting()))`. it returns a `Map<String, Long>`. bonus points: pass `TreeMap::new` as the middle argument if the output should be sorted, mention that `toMap(w -> w, w -> 1, Integer::sum)` works too (and gives `Integer` counts), and that a plain `toMap` without the merge function would throw `IllegalStateException` on the first repeated word.
+</Interview>
+
+<Keylines>
+- a collector is supplier, accumulator, combiner, finisher. `collect` folds into a mutable container.
+- `groupingBy` makes buckets on demand. `partitioningBy` always has both `true` and `false`.
+- downstream collectors decide what each bucket holds: a list, a count, a joined string, anything.
+- `toMap` throws on duplicate keys unless you give it a merge function.
+- `Stream.toList()` is unmodifiable. `Collectors.toList()` isn't. don't swap them blindly.
+</Keylines>

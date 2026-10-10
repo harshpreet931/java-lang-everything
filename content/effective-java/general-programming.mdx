@@ -1,0 +1,282 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+
+<InShort>
+items 57 to 68 are the everyday habits: keep variables in the **smallest scope**, prefer for-each, use the library before writing your own, never use `double` for **money**, prefer **primitives** to boxes, don't stringly-type things, build strings with a **StringBuilder** in loops, and **measure** before optimizing.
+</InShort>
+
+<Figure caption={<>twelve small items. the JDK grew a lot since 2018, so <C k="hot">amber</C> shows up more here than anywhere else.</>}>
+<ItemMap
+  items={[
+    { n: 57, t: "the smallest scope wins", lens: "var" },
+    { n: 58, t: "for-each over index loops" },
+    { n: 59, t: "the library already did it", lens: "RandomGenerator, HexFormat, Files.readString" },
+    { n: 60, t: "no double for money" },
+    { n: 61, t: "primitives over boxes", lens: "valhalla" },
+    { n: 62, t: "strings aren't every type", lens: "records, enums" },
+    { n: 63, t: "concatenation in a loop is quadratic", lens: "indy string concat" },
+    { n: 64, t: "declare the interface, not the class", lens: "var" },
+    { n: 65, t: "reflection is a last resort", lens: "strong encapsulation" },
+    { n: 66, t: "native code, rarely", lens: "FFM API" },
+    { n: 67, t: "measure before you optimize", lens: "JMH, JFR" },
+    { n: 68, t: "name things the java way" },
+  ]}
+/>
+</Figure>
+
+## writing it
+
+### item 57 · the smallest scope wins
+
+declare a variable where it's first used, initialize it right there, and keep methods small. a variable that lives longer than it's needed is a variable someone can misuse later. `for` loops are better than `while` loops for exactly this reason: the loop variable dies with the loop.
+
+<Compare>
+<Bad label="i2 outlives its loop">
+```java
+Iterator<String> i = a.iterator();
+while (i.hasNext()) use(i.next());
+
+Iterator<String> i2 = b.iterator();
+while (i.hasNext()) use(i2.next());
+// copy-paste bug: checks i, not i2.
+// compiles, silently does nothing
+```
+</Bad>
+<Good label="scoped to the loop">
+```java
+for (String s : a) use(s);
+for (String s : b) use(s);
+// the old s is gone. nothing to
+// confuse it with
+```
+</Good>
+</Compare>
+
+<Lens v={10}>`var` (10) makes "declare at first use, initialize immediately" the natural way to write a local, since `var` *requires* an initializer. it's local-only and the type is still static. see [var](/learn/basics/var).</Lens>
+
+### item 58 · for-each over index loops
+
+an index or an iterator is one more variable to get wrong (and nested loops multiply the chances). for-each works on arrays and on anything `Iterable`, and costs nothing. use an explicit iterator or index only when you need to remove while iterating (or just use `removeIf`), replace elements (`replaceAll`), or walk several collections in lockstep.
+
+### item 59 · the library already did it
+
+library code is written by experts, used by millions, and gets faster with every JDK, for free. the classic trap is random numbers: `Math.abs(rnd.nextInt()) % n` is biased, and is negative for one unlucky value. the library's version isn't. some things people still rewrite by hand:
+
+| you need | the JDK has it | since |
+| --- | --- | --- |
+| a random int in a range | `rng.nextInt(1, 7)`, `RandomGenerator.of(...)` | 17 |
+| modulo that's never negative | `Math.floorMod(-7, 3)` → `2` | 8 |
+| bytes ↔ hex | `HexFormat.of().formatHex(bytes)` | 17 |
+| read a whole file | `Files.readString(path)` | 11 |
+| an http call | `HttpClient.newHttpClient()` | 11 |
+| repeat a string | `"ab".repeat(3)` | 11 |
+| two results from one stream pass | `Collectors.teeing(a, b, merge)` | 12 |
+| clamp a number | `Math.clamp(x, lo, hi)` | 21 |
+
+```java title="Main.java" run output="true\n2 -1\nababab cafe"
+import java.util.random.RandomGenerator;
+
+void main() {
+    var rng = RandomGenerator.of("L64X128MixRandom");
+    int die = rng.nextInt(1, 7);              // 1..6, unbiased
+    IO.println(die >= 1 && die <= 6);
+    IO.println(Math.floorMod(-7, 3) + " " + (-7 % 3));
+    IO.println("ab".repeat(3) + " " + HexFormat.of().formatHex(new byte[] { (byte) 0xCA, (byte) 0xFE }));
+}
+```
+
+know `java.lang`, `java.util`, `java.util.function`, `java.util.stream`, `java.util.concurrent` and `java.io`/`java.nio.file` well; skim the release notes of each new JDK (that's what [java 8 → 27](/learn/modern/release-timeline) is for).
+
+## numbers and strings
+
+### item 60 · no double for money
+
+`float` and `double` are binary fractions. `0.1` has no exact binary representation, the same way `1/3` has no exact decimal one, so errors creep in with every operation:
+
+<Figure caption={<>the real bits of <code>0.1</code> as a <code>double</code>. the fraction repeats forever in binary, so it gets rounded to the nearest of 2⁵² steps. close, never exact.</>}>
+<Bits type="double" value={0.1} />
+</Figure>
+
+```java title="Main.java" run output="1.3877787807814457E-16\n0.00\n0"
+import java.math.BigDecimal;
+
+void main() {
+    double wallet = 1.00;
+    for (int i = 0; i < 10; i++) wallet -= 0.10;  // ten 10-cent candies
+    IO.println(wallet);                           // not zero
+
+    BigDecimal exact = new BigDecimal("1.00");    // from a String, never from a double
+    for (int i = 0; i < 10; i++) exact = exact.subtract(new BigDecimal("0.10"));
+    IO.println(exact);
+
+    long cents = 100;                             // or: count the smallest unit in a long
+    for (int i = 0; i < 10; i++) cents -= 10;
+    IO.println(cents);
+}
+```
+
+`BigDecimal` is exact and lets you choose rounding, at the cost of speed and verbosity. `int` or `long` cents are fast and exact if you track the decimal point yourself (a `long` counts up to about 92 quadrillion dollars in cents). why floats work this way is in [floating point](/learn/basics/floating-point).
+
+### item 61 · primitives over boxes
+
+`int` and `Integer` differ in three ways that bite: boxes have identity (so `==` compares references), boxes can be `null` (so unboxing can throw), and boxes cost allocations (item 6).
+
+<Predict options={["true true", "true false", "false false"]} answer={1}>
+```java
+void main() {
+    Map<String, Integer> stock = new HashMap<>(Map.of("pen", 1000, "cap", 100));
+    Integer pens = stock.get("pen"), want = 1000;
+    Integer caps = stock.get("cap"), few = 100;
+    IO.println((caps == few) + " " + (pens == want));
+}
+```
+<Explain>
+`==` on two `Integer`s compares references. `Integer.valueOf` caches -128 to 127, so both 100s are the same cached object and `==` happens to work. 1000 is outside the cache: two different objects, `false`. code like this passes every test with small numbers and fails in production. compare boxes with `equals`, or unbox first. the cache is explained in [the integer cache](/learn/deep-dives/integer-cache).
+</Explain>
+</Predict>
+
+and the null case: `int ink = stock.get("ink");` compiles fine, then unboxes a `null`:
+
+```text nolines
+Exception in thread "main" java.lang.NullPointerException: Cannot invoke "java.lang.Integer.intValue()"
+    because the return value of "java.util.Map.get(Object)" is null
+```
+
+use boxes only where you must: collection elements, type arguments, and reflection.
+
+<Lens v="28 preview">under valhalla's preview (jdk 28), `Integer` is a value class: `==` compares values, so the 1000 case prints `true`, and the JVM can stop allocating boxes it can flatten. it's preview, it's not the default, and `null` is still a possible `Integer`. see [valhalla](/learn/future/valhalla).</Lens>
+
+### item 62 · strings aren't every type
+
+a string is a fine type for text. it's a bad stand-in for numbers, enums, booleans, keys made of several parts (`"user:" + id + ":" + region`), or capabilities. parsing it back out is fragile, and the compiler can't help.
+
+<Compare>
+<Bad label="a key glued from strings">
+```java
+String key = className + "#" + userId;
+cache.put(key, value);
+// what if className contains '#'?
+```
+</Bad>
+<Good label="a type that says what it is">
+```java
+record CacheKey(String className,
+                long userId) {}
+cache.put(new CacheKey(cls, id), value);
+// equals and hashCode for free
+```
+</Good>
+</Compare>
+
+### item 63 · concatenation in a loop is quadratic
+
+strings are immutable, so `s += x` copies all of `s` every time. inside a loop that's 1 + 2 + 3 + ... + n copies, which is n²/2:
+
+<Figure caption={<>building a string of n lines. best of 5, jdk 25, arm mac. every time n doubles, <C k="dead">+=</C> takes about 4x longer; <C k="live">StringBuilder</C> barely moves. log scale.</>}>
+<Bars
+  unit="ms"
+  log
+  data={[
+    { label: "+= , n = 5,000", value: 4.03, tone: "dead" },
+    { label: "+= , n = 10,000", value: 14.45, tone: "dead" },
+    { label: "+= , n = 20,000", value: 54.7, tone: "dead" },
+    { label: "+= , n = 40,000", value: 207.62, tone: "dead" },
+    { label: "StringBuilder, n = 40,000", value: 0.28, tone: "live" },
+  ]}
+/>
+</Figure>
+
+<Compare>
+<Bad label="copies everything, every time">
+```java
+String report = "";
+for (var line : lines)
+    report += line + "\n";
+```
+</Bad>
+<Good label="one growing buffer">
+```java
+var sb = new StringBuilder();
+for (var line : lines)
+    sb.append(line).append('\n');
+String report = sb.toString();
+// or: String.join("\n", lines)
+```
+</Good>
+</Compare>
+
+<Lens v={9}>since java 9, a single `a + b + c` expression compiles to one `invokedynamic` call that sizes the result exactly, so one-line concatenation is fine and often faster than a hand-written builder. it doesn't help loops: each iteration is still a new string. details in [string concatenation internals](/learn/deep-dives/string-concatenation).</Lens>
+
+## types and tools
+
+### item 64 · declare the interface, not the class
+
+declare `List<Order> orders`, not `ArrayList<Order> orders`, even when you create an `ArrayList`. code that talks to the interface can switch implementations (to a `LinkedList`, a `CopyOnWriteArrayList`, an unmodifiable view) by changing one line. use the class only when you need its specific behavior (like `LinkedHashMap`'s order) and no interface captures it.
+
+<Lens v={21}>for locals, `var` infers the class type (`ArrayList<Order>`), which is fine in a short scope. for fields, parameters and return types, keep the interface. java 21's `SequencedCollection` and `SequencedMap` are new interfaces for "has a defined order", so "I need `LinkedHashMap` for the order" can now be `SequencedMap`.</Lens>
+
+### item 65 · reflection is a last resort
+
+reflection gives up compile-time checking, is verbose, and is slower. use it only to *create* objects of classes unknown at compile time (plugins, frameworks), then talk to them through an interface or superclass known at compile time:
+
+```java
+Class<? extends Codec> cls = Class.forName(name).asSubclass(Codec.class);
+Codec codec = cls.getDeclaredConstructor().newInstance();   // reflection stops here
+codec.encode(data);                                          // normal, checked calls from here
+```
+
+<Lens v={17}>since java 16/17, JDK internals are strongly encapsulated, so reflective access to private JDK fields fails by default. `MethodHandles` (7) and `VarHandle` (9) are the faster, checked alternatives for dynamic invocation, and `ServiceLoader` is often the right way to find plugins. see [reflection](/learn/meta/reflection).</Lens>
+
+### item 66 · native code, rarely
+
+native methods used to be the way to reach platform APIs, legacy libraries, or (supposedly) speed. today the JVM is fast enough that native code is rarely a performance win, and every native call is a chance for memory corruption that java can't catch.
+
+<Lens v={22}>JNI (the book's era) needed C glue code and a header generator. the [FFM API](/learn/performance/ffm-api) (final in 22) calls C straight from java, and its `Arena` frees native memory deterministically:</Lens>
+
+```java title="Main.java" run output="5"
+import java.lang.foreign.*;
+import java.lang.invoke.MethodHandle;
+
+void main() throws Throwable {
+    Linker linker = Linker.nativeLinker();
+    MethodHandle strlen = linker.downcallHandle(
+        linker.defaultLookup().findOrThrow("strlen"),
+        FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
+
+    try (Arena arena = Arena.ofConfined()) {
+        MemorySegment cString = arena.allocateFrom("hello");   // freed when the arena closes
+        long n = (long) strlen.invokeExact(cString);
+        IO.println(n);
+    }
+}
+```
+
+(java prints a warning about calling a restricted method; run with `--enable-native-access=ALL-UNNAMED` to acknowledge it.)
+
+### item 67 · measure before you optimize
+
+write good programs, not fast ones: clean architecture and good APIs are what let you fix performance later. hard-to-change decisions (an API that forces copies, a wire format) are where to think about speed up front. everything else: measure first, optimize the part the profiler points at, measure again. the JIT makes guessing especially unreliable in java.
+
+<Lens v={11}>JDK Flight Recorder became free and open in java 11, so "profile production" is one flag (`-XX:StartFlightRecording`). see [measuring performance](/learn/performance/measuring-performance), [JMH](/learn/performance/jmh) and [flight recorder](/learn/performance/jfr-and-jmc).</Lens>
+
+### item 68 · name things the java way
+
+| what | convention | example |
+| --- | --- | --- |
+| package, module | lowercase, reverse domain | `com.example.billing` |
+| class, interface, record, enum | UpperCamelCase noun | `InvoiceLine`, `Comparable` |
+| method | lowerCamelCase verb | `toString`, `isEmpty`, `asList` |
+| field, local | lowerCamelCase | `lineCount` |
+| constant (`static final`, immutable) | UPPER_SNAKE | `MAX_LINES` |
+| type parameter | one capital letter | `T`, `E`, `K`, `V`, `R` |
+
+grammar matters too: `is`/`has` for booleans, `to` for conversions (`toList`), `as` for views (`asList`), `of`/`from`/`valueOf` for factories (item 1).
+
+<Keylines>
+- declare variables at first use, in the smallest scope. for-each wherever it fits.
+- check the JDK before writing a utility. it's probably there and faster.
+- money is `BigDecimal` or `long` cents, never `double`.
+- `==` on boxes compares references. unboxing null throws. prefer primitives.
+- give structured data a type. build strings in loops with a StringBuilder.
+- refer to objects by interfaces; reflection and native code only as a last resort; measure before optimizing.
+</Keylines>

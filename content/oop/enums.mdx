@@ -1,0 +1,193 @@
+import { EnumSetBits } from "@/components/figures/oop/EnumSetBits";
+
+<InShort>
+an `enum` is a class with a **fixed list of instances**, created once when the class is initialized. each constant is a `public static final` field pointing at a **singleton object**. that's why `==` works on enums, why they can have fields, constructors and methods, and why each constant can even override a method with its own body.
+</InShort>
+
+## the picture
+
+you know the old way: `static final int RED = 0, GREEN = 1;`. nothing stops someone passing `42`, printing gives you a number, and `RED + GREEN` compiles. kinda cursed.
+
+an enum is a guest list for a party where the door is locked once everyone's in. the class decides exactly who exists (`MERCURY`, `VENUS`, `EARTH`), makes each of them once, and never lets anyone else in. there's no public constructor, no `new Planet()`, no way to sneak a fourth planet in at runtime (not even with reflection or deserialization).
+
+<Figure caption={<>three constants, three objects, created once by the class's static init and held by its static fields (plus a hidden array, <code>$VALUES</code>, that backs <code>values()</code>). a variable like <code>home</code> is just another <C k="ref">reference</C> to one of them. (each also has a <code>name</code> field pointing at its String, left out to keep it readable.)</>}>
+<Memory
+  frames={[{ name: "main", locals: { home: { ref: "p2" } } }]}
+  heap={{
+    cls: { type: "class Planet", tag: "static fields", fields: { MERCURY: { ref: "p0" }, VENUS: { ref: "p1" }, EARTH: { ref: "p2" }, $VALUES: { ref: "arr" } } },
+    p0: { type: "Planet", fields: { ordinal: 0, mass: "3.303e23" } },
+    p1: { type: "Planet", fields: { ordinal: 1, mass: "4.869e24" } },
+    p2: { type: "Planet", fields: { ordinal: 2, mass: "5.976e24" } },
+    arr: { type: "Planet[]", items: [{ ref: "p0" }, { ref: "p1" }, { ref: "p2" }] },
+  }}
+/>
+</Figure>
+
+## what javac actually writes
+
+```java title="Planet.java"
+enum Planet {
+    MERCURY(3.303e23, 2.4397e6),
+    VENUS(4.869e24, 6.0518e6),
+    EARTH(5.976e24, 6.37814e6);
+
+    private final double mass;    // kg
+    private final double radius;  // m
+
+    Planet(double mass, double radius) {
+        this.mass = mass;
+        this.radius = radius;
+    }
+
+    double surfaceGravity() {
+        return 6.67300E-11 * mass / (radius * radius);
+    }
+}
+```
+
+`javap -p Planet` shows what that turned into:
+
+```text nolines
+final class Planet extends java.lang.Enum<Planet> {
+  public static final Planet MERCURY;
+  public static final Planet VENUS;
+  public static final Planet EARTH;
+  private final double mass;
+  private final double radius;
+  private static final Planet[] $VALUES;
+  public static Planet[] values();
+  public static Planet valueOf(java.lang.String);
+  private Planet(double, double);
+  double surfaceGravity();
+  private static Planet[] $values();
+  static {};
+}
+```
+
+so an enum is:
+
+- a **final class** extending `java.lang.Enum` (which is why an enum can't extend anything else, but can implement interfaces).
+- one `public static final` field per constant, filled in by `static {}`, which runs `new Planet("MERCURY", 0, 3.303e23, 2.4397e6)` and so on. the constructor secretly takes the **name** and **ordinal** first: its real descriptor is `(String, int, double, double)`.
+- a **private** constructor. you couldn't call it if you tried.
+- `values()` and `valueOf(String)`, generated for you.
+
+all the [static init rules](/learn/oop/static) apply: the constants are created once, the first time the class is used, and everyone after that shares them.
+
+## the built-in methods
+
+```java title="Main.java" run output="1 true true\nfalse\n[SMALL, MEDIUM, LARGE] MEDIUM"
+enum Size { SMALL, MEDIUM, LARGE }
+
+void main() {
+    IO.println(Size.valueOf("MEDIUM").ordinal() + " " + (Size.LARGE.compareTo(Size.SMALL) > 0) + " " + (Size.valueOf("SMALL") == Size.SMALL));
+    IO.println(Size.values() == Size.values());
+    IO.println(java.util.Arrays.toString(Size.values()) + " " + Size.MEDIUM.name());
+}
+```
+
+| method | what it does |
+| --- | --- |
+| `name()` | the constant's name exactly as declared. `toString()` returns the same unless you override it |
+| `ordinal()` | its position, from 0. assigned by declaration order |
+| `compareTo(o)` | negative, zero or positive by declaration order. enums are `Comparable` that way |
+| `values()` | a **new copy** of the constants array, every call (see the `false` above) |
+| `valueOf("X")` | the constant named `X`, case-sensitive. unknown name: `IllegalArgumentException: No enum constant Size.X` |
+
+`==` is the right way to compare enums. there's only ever one `Size.SMALL`, so identity and equality are the same thing, and `==` can't throw on `null`.
+
+<Predict options={["1 true true", "2 true true", "1 false true", "1 true false"]} answer={0}>
+```java
+enum Size { SMALL, MEDIUM, LARGE }
+
+IO.println(Size.valueOf("MEDIUM").ordinal() + " "
+    + (Size.LARGE.compareTo(Size.SMALL) > 0) + " "
+    + (Size.valueOf("SMALL") == Size.SMALL));
+```
+<Explain>
+`MEDIUM` is declared second, so its ordinal is `1` (ordinals start at 0). `compareTo` follows declaration order, so `LARGE` is greater than `SMALL`: positive. (on HotSpot it literally returns the ordinal difference, `2`, but the contract only promises the sign, so never depend on the number.) and `valueOf` returns the one existing `SMALL` object, so `==` is `true`.
+</Explain>
+</Predict>
+
+## constants with their own behaviour
+
+a constant can have a body. each one becomes an anonymous subclass of the enum, so it can override methods, and the enum can declare `abstract` ones that every constant must implement:
+
+```java title="Main.java" run output="2 + 3 = 5\n2 * 3 = 6"
+enum Op {
+    PLUS("+") {
+        int apply(int a, int b) { return a + b; }
+    },
+    TIMES("*") {
+        int apply(int a, int b) { return a * b; }
+    };
+
+    final String symbol;
+
+    Op(String symbol) { this.symbol = symbol; }
+
+    abstract int apply(int a, int b);
+}
+
+void main() {
+    for (Op op : Op.values()) {
+        IO.println("2 " + op.symbol + " 3 = " + op.apply(2, 3));
+    }
+}
+```
+
+compile that and you get `Op.class`, `Op$1.class` and `Op$2.class`: one class per constant body. that's [polymorphism](/learn/oop/polymorphism) with a closed, known set of subclasses.
+
+## switching on enums
+
+the arrow form of `switch` checks that you covered every constant. no `default` needed, and adding a constant later breaks the build at every switch that forgot it, which is exactly what you want:
+
+```java title="Main.java"
+enum Light { RED, YELLOW, GREEN, BLINKING }
+
+void main() {
+    Light l = Light.RED;
+    String action = switch (l) {  // [!code error]
+        case RED -> "stop";
+        case YELLOW -> "slow down";
+        case GREEN -> "go";
+    };
+}
+```
+
+`error: the switch expression does not cover all possible input values`. more on this in [switch](/learn/basics/switch) and [pattern matching](/learn/modern/pattern-matching).
+
+## EnumSet and EnumMap
+
+because the constants are known and numbered, the JDK can store sets and maps of them in the cheapest possible way. an `EnumSet` is a bit vector: one `long`, bit *i* set when the constant with ordinal *i* is in the set.
+
+<Figure caption={<>toggle days. the whole set is the one <code>long</code> below, and <code>contains</code> is a single AND. <C k="hot">amber</C> is the bit you touched last. enums with more than 64 constants get a <code>long[]</code> instead.</>}>
+<EnumSetBits />
+</Figure>
+
+an `EnumMap` is the same idea for maps: a plain array of values, indexed by ordinal. `put(WEDNESDAY, "swim")` is `vals[2] = "swim"`.
+
+<Figure caption="EnumMap<Day, String> after put(MONDAY, &quot;gym&quot;) and put(WEDNESDAY, &quot;swim&quot;): one array slot per constant, the key is the index.">
+<ArrayViz values={["gym", null, "swim", null, null, null, null]} label="EnumMap vals (index = ordinal)" tones={{ 0: "live", 2: "live" }} cell={56} />
+</Figure>
+
+both are faster and smaller than `HashSet` / `HashMap` for enum keys, and iterate in declaration order. use them. more in [sets](/learn/collections/sets).
+
+<Gotcha title="never store ordinal()">
+`ordinal()` is an implementation detail of declaration order. insert a constant in the middle, and every ordinal after it shifts. if you saved ordinals in a database or a file, your data now means something else. store `name()`, or give the enum an explicit field (`final int code;`) and store that.
+</Gotcha>
+
+<Effective item="34–37" title="enums over int constants, instance fields over ordinals, EnumSet over bit fields, EnumMap over ordinal indexing">
+use enums whenever you have a fixed set of constants known at compile time. attach data with fields and constructors, behaviour with methods or constant-specific bodies. never derive a value from `ordinal()`. reach for `EnumSet` instead of hand-rolled bit flags and `EnumMap` instead of arrays indexed by ordinal: same speed, none of the bugs. bonus from item 3: a single-element enum is the best way to write a singleton, because the JVM guarantees one instance even across serialization and reflection.
+</Effective>
+
+<Interview q="why can you compare enums with ==?">
+because every enum constant is a singleton. the class's static initializer creates each constant exactly once, the constructor is private, `clone` throws, deserialization resolves back to the existing constant by name, and reflection refuses to instantiate enums. so for a given enum there's exactly one object per constant, and identity is equality. `==` is also null-safe and checked at compile time against the enum type, which `equals` isn't.
+</Interview>
+
+<Keylines>
+- an enum is a final class with a fixed set of singleton instances.
+- each constant is a `public static final` field, created once in static init.
+- enums can have fields, constructors, methods, and per-constant bodies.
+- compare with `==`. switch on them, and let the compiler check you covered every case.
+- EnumSet is a bit vector, EnumMap is an array. never persist `ordinal()`.
+</Keylines>

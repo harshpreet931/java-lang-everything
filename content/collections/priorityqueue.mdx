@@ -1,0 +1,113 @@
+import { HeapLab } from "@/components/figures/collections/HeapLab";
+
+<InShort>
+a `PriorityQueue` hands you the smallest element first (or the "best", by your `Comparator`). inside it's a **binary heap stored in a plain array**: a tree where every parent beats its children, laid out level by level.
+
+`offer` adds at the end and **sifts up**, `poll` takes the root and **sifts down**. both O(log n). the array is *not* sorted, and neither is iterating it.
+</InShort>
+
+## the picture
+
+you know how a hospital emergency room doesn't serve patients in arrival order? whoever's worst goes next. but nobody keeps the whole waiting room in perfect order either: they just make sure they always know who's worst *right now*. that's a priority queue, and the trick that makes it cheap is the heap.
+
+a heap is a tree with one rule: **every parent beats its children** (for a min-heap: is smaller or equal). nothing is promised between siblings or cousins. so the root is always the overall winner, and fixing the tree after a change only takes one path from top to bottom.
+
+and the tree doesn't need any pointers. store it level by level in an array and the arithmetic does the linking:
+
+- the children of index `i` are at `2i + 1` and `2i + 2`
+- the parent of `i` is at `(i - 1) >>> 1`
+
+<Figure wide caption={<>the same heap, as a tree and as the array it really is. <code>offer</code> a small number and watch it <C k="hot">climb</C> past bigger parents. <code>poll</code> and watch the last element drop into the root and sink. it <C k="live">stops</C> as soon as the rule holds. flip to a max-heap to see the comparator flip every decision.</>}>
+<HeapLab />
+</Figure>
+
+## sift up, sift down
+
+**offer(x)**: put `x` in the first free slot (the end of the array, the bottom-left-most free spot of the tree). while it beats its parent, swap them. at most one swap per level, so O(log n).
+
+**poll()**: the answer is `queue[0]`. to fill the hole, take the *last* element (removing it is free), put it at the root, and while it loses to its better child, swap them. again one path, O(log n).
+
+**peek()**: `queue[0]`. O(1).
+
+the real code in jdk 25 (`siftUpComparable`, `siftDownComparable`) doesn't actually swap. it carries the moving element in a local variable, slides parents (or children) into the hole, and writes the element once at the end. same comparisons, fewer writes.
+
+```java title="Main.java" run output="[1, 2, 4, 5, 3] peek=1\n1 2 3 4 5"
+void main() {
+    var pq = new PriorityQueue<Integer>();
+    for (int x : new int[] {5, 1, 4, 2, 3}) pq.offer(x);
+    IO.println(pq + " peek=" + pq.peek());
+    var out = new StringBuilder();
+    while (!pq.isEmpty()) out.append(pq.poll()).append(' ');
+    IO.println(out.toString().trim());
+}
+```
+
+<Gotcha title="printing or iterating a PriorityQueue isn't sorted">
+`[1, 2, 4, 5, 3]`: `toString`, the iterator, `forEach` and `stream()` all walk the raw array, which is heap order. only `poll()` (repeatedly) gives you sorted order. if you need a sorted snapshot without emptying it, copy it: `new ArrayList<>(pq)` then `sort`, or poll a copy.
+</Gotcha>
+
+## comparators: max-heaps and real objects
+
+a `PriorityQueue` is a min-heap by natural order. anything else is a `Comparator`:
+
+```java title="Main.java" run output="7 [7, 8, 9] 9"
+void main() {
+    int k = 3;
+    var top = new PriorityQueue<Integer>();
+    for (int x : new int[] {5, 1, 9, 3, 7, 2, 8}) {
+        top.offer(x);
+        if (top.size() > k) top.poll();
+    }
+    var max = new PriorityQueue<Integer>(Comparator.reverseOrder());
+    max.addAll(List.of(5, 1, 9, 3));
+    IO.println(top.peek() + " " + new TreeSet<>(top) + " " + max.poll());
+}
+```
+
+the first half is the classic **top-k** trick: to keep the k *largest*, use a *min*-heap of size k and evict its smallest whenever it grows past k. what's left is the k largest, and `peek()` is the k-th largest. O(n log k) time, O(k) memory, works on a stream you can't hold in memory.
+
+<Predict options={["abcdef", "fedcba", "afedcb", "it varies run to run"]} answer={2}>
+```java
+record Task(String name, int priority) {}
+
+void main() {
+    var pq = new PriorityQueue<Task>(Comparator.comparingInt(Task::priority));
+    for (String n : List.of("a", "b", "c", "d", "e", "f")) pq.offer(new Task(n, 1));
+    var out = new StringBuilder();
+    while (!pq.isEmpty()) out.append(pq.poll().name());
+    IO.println(out);
+}
+```
+<Explain>
+all six have priority 1, so the comparator says they're all tied, and a heap makes no promise about ties. `a` happens to come out first (it's the root), then every poll moves the *last* element to the root, and with all ties, sift-down never moves it. so you get `a`, then `f`, `e`, `d`, `c`, `b`. deterministic, just not FIFO. a `PriorityQueue` is **not stable**. if equal priorities must come out in arrival order, add a sequence number as a tie-breaker: `comparingInt(Task::priority).thenComparingLong(Task::seq)`.
+</Explain>
+</Predict>
+
+## what it costs
+
+| operation | cost |
+| --- | --- |
+| `offer`, `poll`, `remove()` | O(log n) |
+| `peek`, `element`, `size` | O(1) |
+| `contains(o)`, `remove(o)` | O(n), it's a linear scan of the array |
+| `new PriorityQueue<>(collection)` | O(n), it builds the heap bottom-up ("heapify") instead of n offers |
+| iteration | O(n), in heap order |
+
+the array starts at 11 slots and grows like `ArrayDeque`'s: roughly doubling while small (under 64), then by 50%. `null` elements are rejected (`poll` uses `null` to mean empty). it isn't thread-safe; for producer/consumer work there's `PriorityBlockingQueue` (see [concurrent collections](/learn/concurrency/concurrent-collections)).
+
+<Deep title="why not just keep a sorted list?">
+a sorted `ArrayList` gives you the minimum in O(1) too, but every insert has to find its spot and shift everything after it: O(n). a balanced tree (`TreeMap`, `TreeSet`) does both in O(log n), but each element is a 40-byte node with three pointers, and a `TreeSet` drops "duplicates" that compare equal. the heap only keeps *partial* order, exactly enough to know the winner, which is why it fits in a flat array and beats both for "keep giving me the next best". it's also the engine behind heapsort, Dijkstra's shortest paths, and every job scheduler you've used.
+</Deep>
+
+<Interview q="find the k largest numbers in a huge stream">
+a min-heap of size k. offer each number; when the heap holds more than k, poll the smallest. the heap always holds the k largest seen so far, and its root is the k-th largest. that's O(n log k) time and O(k) memory, much better than sorting everything (O(n log n), O(n) memory). the trap is reaching for a max-heap: then you'd have to keep all n elements to pop k of them.
+</Interview>
+
+<Keylines>
+- a `PriorityQueue` is a binary heap in an array. children of i: 2i+1, 2i+2.
+- `offer` sifts up, `poll` sifts down. O(log n). `peek` is O(1).
+- iteration and `toString` are heap order, not sorted. only `poll` sorts.
+- max-heap or custom order: pass a `Comparator`.
+- not stable: ties come out in no particular order. add a tie-breaker.
+- top-k largest: a min-heap of size k.
+</Keylines>

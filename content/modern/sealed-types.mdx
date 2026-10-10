@@ -1,0 +1,108 @@
+import { Exhaustiveness } from "@/components/figures/modern/Exhaustiveness";
+
+<InShort>
+a **sealed** class or interface lists exactly who may extend it: `sealed interface Shape permits Circle, Square, Rect`. every permitted subclass must itself say **final**, **sealed** or **non-sealed**. final in java 17.
+
+the payoff is that the compiler knows the full list of subtypes, so a `switch` over a sealed type can be checked for **exhaustiveness**: miss a case and it doesn't compile, no `default` needed.
+</InShort>
+
+## the picture
+
+you know how any class can implement your interface, so a method that takes a `Shape` can never be sure it has handled every kind of shape? you end up writing `default -> throw new IllegalStateException("unknown shape")` and hoping. sealed types replace the hope with a list.
+
+think of a party with a guest list at the door. a normal interface is an open house: anyone can walk in, you'll never know the full list. a sealed interface is the guest list. and each guest decides about plus-ones: `final` means no plus-ones, `sealed` means "only these people", `non-sealed` means "bring whoever you like".
+
+<Figure caption={<>a closed hierarchy. <code>Shape</code> knows its three direct subtypes. <code>Circle</code> and <code>Square</code> are records (implicitly final). <code>Rect</code> is <code>non-sealed</code>, so it opens the door again: anything can extend it, but every one of those is still a <code>Rect</code>.</>}>
+<Tree>{`
+Shape // sealed interface ... permits Circle, Square, Rect
+    Circle // record: final, closed
+    Square // record: final, closed
+    Rect // non-sealed: open again from here
+        RoundedRect // anyone may extend Rect
+        Window
+`}</Tree>
+</Figure>
+
+## the rules
+
+every permitted subclass has to pick one of three modifiers, out loud:
+
+<Defs>
+<dt>final</dt><dd>no subclasses at all. records and enums are implicitly final, so they need nothing.</dd>
+<dt>sealed</dt><dd>closed again, with its own `permits` list. hierarchies can be sealed several levels deep.</dd>
+<dt>non-sealed</dt><dd>open. anyone can extend this one. it's a deliberate escape hatch, and it's spelled with a hyphen because it's the first hyphenated keyword java ever got.</dd>
+</Defs>
+
+forget to pick, or try to sneak in a subclass that isn't on the list, and javac stops you:
+
+```text
+class Circle implements Shape {}
+error: sealed, non-sealed or final modifiers expected
+
+final class Blob implements Shape {}
+error: class is not allowed to extend sealed class: Shape (as it is not listed in its 'permits' clause)
+```
+
+the permitted subclasses have to live in the same module as the sealed type (or the same package, if you're not using modules). when they're all in the same file, you can leave `permits` out and the compiler fills it in:
+
+```java title="Main.java" run output="square 2.0\ntrue\n[class Main$Circle, class Main$Square]"
+import java.util.*;
+
+sealed interface Shape {}                        // no permits: inferred from this file
+record Circle(double r) implements Shape {}
+record Square(double side) implements Shape {}
+
+void main() {
+    Shape s = new Square(2);
+    String d = switch (s) {                      // no default needed
+        case Circle c -> "circle " + c.r();
+        case Square q -> "square " + q.side();
+    };
+    IO.println(d);
+    IO.println(Shape.class.isSealed());
+    IO.println(Arrays.toString(Shape.class.getPermittedSubclasses()));
+}
+```
+
+## exhaustiveness
+
+here's the reason sealed types exist. turn cases on and off, and see what javac thinks.
+
+<Figure wide caption={<>toggle the cases. the switch only compiles when every permitted subtype is handled, or there's a <code>default</code>. then add <code>Triangle</code> to the hierarchy and watch a switch that was fine <C k="dead">stop compiling</C>. the error text is javac 25's, verbatim.</>}>
+<Exhaustiveness />
+</Figure>
+
+that second part is the whole point. when someone adds `Triangle`, every switch over `Shape` that doesn't handle it turns into a compile error, in every file, at once. the compiler hands you the to-do list. with a `default`, those switches would have compiled, and triangles would have quietly fallen into "something else".
+
+<Quiz question="Shape is sealed with permits Circle, Square. you switch over a Shape with case Circle and case Square, and a default. what does the default do?" options={["it's a compile error: the default is unreachable", "nothing ever reaches it, but it hides future missing cases", "it handles null"]} answer={1}>
+<Explain>
+it compiles (javac 25 accepts it) and can never run today. but the day `Triangle` is added, triangles go to the default silently instead of the switch failing to compile. it doesn't handle `null` either: a switch on a `null` throws `NullPointerException` unless it has an explicit `case null` ([pattern matching](/learn/modern/pattern-matching)). leave the default out of switches over sealed types.
+</Explain>
+</Quiz>
+
+## why not an enum?
+
+an enum is a closed set of **instances**: exactly one `RED`, one `GREEN`. a sealed type is a closed set of **types**, and each type can have as many instances as you like, each with its own data. `Circle(1.0)` and `Circle(2.5)` are both circles. that's why sealed interfaces and records go together so well: the sealed interface says "these are the shapes", the records say what each shape carries. the full pattern is [data-oriented programming](/learn/modern/data-oriented-programming).
+
+<Gotcha title="a class compiled before the new subtype throws MatchException">
+the exhaustiveness check happens when the *switch* is compiled. if `Shape` gains `Triangle` and only the hierarchy is recompiled, an old `Area.class` still thinks there are two shapes. hand it a triangle and javac's safety net turns into a runtime error:
+
+```text
+Exception in thread "main" java.lang.MatchException
+	at Area.area(Area.java:3)
+```
+
+(checked on jdk 25 by recompiling everything except `Area`.) inside one build this can't happen. across libraries, adding a permitted subtype is a breaking change: treat it like one.
+</Gotcha>
+
+<Interview q="what are sealed classes for?">
+they restrict which classes can extend or implement a type, with a `permits` list, and every permitted subclass must be `final`, `sealed` or `non-sealed`. that turns an open hierarchy into a closed one the compiler can reason about: a `switch` over a sealed type can be exhaustive without a `default`, so adding a new subtype becomes a compile error everywhere it isn't handled. bonus points: records are implicitly final, so `sealed interface` + records is how you model algebraic data types in java, and `Class.getPermittedSubclasses()` exposes the list at runtime.
+</Interview>
+
+<Keylines>
+- `sealed ... permits A, B`: only A and B may extend it. in the same file you can drop `permits`.
+- every permitted subclass says `final`, `sealed` or `non-sealed`. records are already final.
+- a switch over a sealed type with a case per subtype is exhaustive. no default needed.
+- skip the default: it hides the next subtype someone adds.
+- enums close the set of instances. sealed types close the set of types.
+</Keylines>

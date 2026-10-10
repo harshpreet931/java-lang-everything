@@ -1,0 +1,106 @@
+import { ColoredPointer } from "@/components/figures/gc/ColoredPointer";
+import { LoadBarrier } from "@/components/figures/gc/LoadBarrier";
+import { ZgcCycle } from "@/components/figures/gc/cycles";
+
+<InShort>
+ZGC does almost everything while your app keeps running, including **moving objects**. its pauses don't grow with the heap or the live set: they're well under a millisecond (never more than 57 microseconds in the runs below).
+
+two tricks make it work: **colored pointers** (GC metadata stored in the pointer itself) and a **load barrier** (a check on every reference you load that fixes stale pointers on the spot). since java 24, ZGC is always generational.
+</InShort>
+
+## the picture
+
+you know how [G1](/learn/gc/g1) still stops the world to evacuate regions? the copying is fast, but it's a pause, and it grows with how much is alive in the regions it picks. ZGC moves objects while the app is running. which sounds impossible: the app might be holding a pointer to the old copy at the exact moment it moves.
+
+think of a library reshuffling its shelves during opening hours. books move all day. people still walk in with old catalog cards. so the desk checks the stamp on every card handed over. a current stamp: go straight to the shelf. an old stamp: look the book up in the move log, fix the card, stamp it, then send them to the right shelf. no one ever gets a wrong shelf, every card gets fixed the first time it's used, and the library never closes.
+
+the stamp is the **color** in the pointer. the desk is the **load barrier**.
+
+<Figure caption={<>a colored pointer, 64 bits. hover the groups. then start a new relocation phase: the good <C k="hot">remapped</C> bit changes, and this pointer is suddenly stale without anyone touching it. load it, and the barrier heals it.</>}>
+<ColoredPointer />
+</Figure>
+
+see the trick in "start a new relocation phase"? the GC doesn't visit a single pointer to invalidate them. it changes which color counts as good, and every pointer in the heap that carries the old color is stale from that moment. each one gets fixed lazily, the first time someone loads it.
+
+## the load barrier
+
+the JIT puts a few instructions after every load of a reference from the heap (`obj.field`, `array[i]`). not on stores of ints, not on locals, just on reference loads:
+
+```text title="the load barrier, roughly" nolines
+p = obj.field                 // the colored pointer, as stored
+if (p & bad_mask)             // a stale color? rare
+    p = slow_path(obj.field)  // find where the object really is,
+                              // and write the good pointer back into obj.field
+x = p >> 16                   // drop the color bits: now it's a plain address
+```
+
+the fast path is a test and a branch. the slow path does whatever the current phase needs: remap the pointer through a forwarding table, copy the object if nobody has yet, or mark it. and it **heals** the field, so the next load of the same field takes the fast path.
+
+<Figure wide caption={<>step through one object being moved while the app uses it. the <C k="meta">forwarding table</C> lives off to the side, per page, so the old page can be reused as soon as it's emptied. the app thread pays for the fix-up exactly once.</>}>
+<LoadBarrier />
+</Figure>
+
+notice who did the work in steps 4 to 6: the **app thread**. ZGC doesn't need every pointer fixed before the app may continue. it only needs every pointer fixed before it's **used**, and the barrier makes sure of that.
+
+<Quiz question="a ZGC load barrier finds a stale pointer to an object that the GC hasn't copied yet. what happens?" options={["the app thread waits for a GC thread to copy it", "the app thread copies the object itself, then heals the field", "the old address is still fine, so it's used as is"]} answer={1}>
+<Explain>
+the app thread does the relocation itself, right there in the barrier's slow path: copy the object to its new page, install the forwarding entry (whoever wins the race to install it wins, the other copy is dropped), heal the field, carry on. nobody waits for a GC thread. that's why relocation can be fully concurrent.
+</Explain>
+</Quiz>
+
+## what's left for the pauses
+
+a ZGC cycle still has three stop-the-world pauses: **mark start**, **mark end** and **relocate start**. none of them walks the heap. they flip the phase (and the good color), deal with a small fixed set of roots, and get out. thread stacks are processed concurrently too since java 16 (JEP 376), so a thousand threads don't make the pauses longer. here's a real young collection (`-Xlog:gc,gc+phases`, the same toy service, 256 MB heap):
+
+<Figure wide caption={<>the three <C k="hot">pauses</C> are 12, 6 and 19 microseconds: at this scale they're thinner than a line. everything that actually costs time, marking and relocating, is <C k="meta">concurrent</C>. hover to read the log lines.</>}>
+<ZgcCycle />
+</Figure>
+
+and here's the longest pause each collector produced on that same program (default settings, `-Xmx256m`, jdk 25, a 14-core laptop that was busy with other work, median of three runs). same code, same allocation pattern, five collectors:
+
+<Figure caption="longest stop-the-world pause in a run, log scale. Serial and Parallel copy and compact with the app stopped; G1 evacuates with the app stopped; Shenandoah and ZGC do both concurrently. Shenandoah's worst pauses were final-mark pauses stretched by the busy machine; ZGC's never went past 57 µs in any run.">
+<Bars
+  unit="ms"
+  log
+  data={[
+    { label: "Serial", value: 26.6, tone: "dead" },
+    { label: "Parallel", value: 21.7, tone: "dead" },
+    { label: "G1", value: 8.3 },
+    { label: "Shenandoah", value: 5.0, tone: "live" },
+    { label: "ZGC", value: 0.039, tone: "live" },
+  ]}
+/>
+</Figure>
+
+<Gotcha title="allocation stalls">
+ZGC keeps up by collecting concurrently, which means it needs **headroom**: free memory to keep allocating into while a cycle runs. if your app allocates faster than ZGC can reclaim, the heap runs dry mid-cycle and the allocating thread has to wait. the log says `Allocation Stall`, and those waits are pauses in everything but name, often longer than any G1 pause would have been. the fix is more heap (or less garbage). ZGC also spends CPU on concurrent work and barriers that a stop-the-world collector doesn't. on a machine with idle cores you won't notice; on a saturated one, GC threads compete with yours.
+</Gotcha>
+
+## how ZGC got here
+
+| java | JEP | what changed |
+| --- | --- | --- |
+| 11 | 333 | ZGC arrives, experimental |
+| 15 | 377 | production ready |
+| 16 | 376 | thread stacks processed concurrently: pauses no longer scale with threads |
+| 21 | 439 | generational ZGC (opt in with `-XX:+ZGenerational`) |
+| 23 | 474 | generational becomes the default mode |
+| 24 | 490 | the non-generational mode is removed. ZGC is always generational |
+
+turn it on with `-XX:+UseZGC`. for java 28 there's a proposal for ZGC to size the heap by itself (JEP 546), so you'd stop setting `-Xmx` at all. it isn't final yet.
+
+<Deep title="what changed when ZGC went generational">
+the original ZGC had 4 color bits sitting just above the address bits and mapped the whole heap three times in virtual memory (once per color), so any colored pointer could be dereferenced directly. generational ZGC moved the colors into the low 16 bits and strips them with a shift in the barrier instead: no more multi-mapping. it also added **store barriers**, because a young collection needs to know about old-to-young pointers (that's what the "remembered" color bits and ZGC's remembered sets are for), and because marking the old generation concurrently needs to see overwritten references (the same problem [SATB](/learn/gc/gc-fundamentals) solves). the payoff: young objects are collected often and cheaply, so ZGC needs much less headroom than before for the same allocation rate.
+</Deep>
+
+<Interview q="how can ZGC move objects while the application is running?">
+every reference load goes through a load barrier. when ZGC starts relocating, it changes which pointer color counts as good, which makes every existing pointer stale without touching memory. GC threads copy live objects out of the pages being evacuated and record the moves in forwarding tables. when the app loads a stale pointer, the barrier looks up the new location (or copies the object itself if it hasn't moved yet), writes the corrected pointer back into the field, and continues. so the app can never observe an old copy, and the only stop-the-world pauses left are short phase switches that don't depend on heap size.
+</Interview>
+
+<Keylines>
+- ZGC marks and moves objects concurrently. its pauses are microseconds, whatever the heap size.
+- colored pointers keep GC state in the pointer's low 16 bits.
+- flipping the good color invalidates every pointer at once. the load barrier fixes each one on first use.
+- the app thread that hits a stale pointer heals it, and can even relocate the object itself.
+- it needs headroom: allocate faster than it can collect and you get allocation stalls.
+</Keylines>

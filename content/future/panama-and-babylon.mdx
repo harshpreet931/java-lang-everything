@@ -1,0 +1,150 @@
+import { Lanes } from "@/components/figures/future/Lanes";
+import { StatusBoard } from "@/components/figures/future/StatusBoard";
+
+export const board = [
+  { name: "foreign function and memory API", jep: "JEP 454", status: "final", where: "java 22", note: "call native functions and manage off-heap memory with Linker, MemorySegment and Arena, no C glue code. java's replacement for most JNI." },
+  { name: "prepare to restrict JNI", jep: "JEP 472", status: "final", where: "java 24", note: "JNI and FFM's restricted methods print warnings unless you grant --enable-native-access. a future release is expected to block them by default." },
+  { name: "jextract", status: "exploring", where: "a separate openjdk project", note: "a tool that reads a C header and generates the FFM bindings for it. it's developed and shipped on its own, not as part of the JDK." },
+  { name: "vector API", jep: "JEP 537", status: "incubator", where: "jdk 27, twelfth incubator", note: "incubating since jdk 16 (JEP 338). it stays an incubator until valhalla's value classes are available as a preview, then moves to preview using them. value objects are integrated into jdk 28's preview, but no vector API JEP is on the 28 list yet." },
+  { name: "code reflection", status: "exploring", where: "openjdk/babylon repository", note: "babylon's core: a jdk.incubator.code module (in babylon's own repository, not in any JDK build) that turns a marked method or lambda into a code model you can inspect and transform. no JEP as of october 2026." },
+  { name: "HAT, GPU programming", status: "exploring", where: "openjdk/babylon repository", note: "the Heterogeneous Accelerator Toolkit, built on code reflection: java kernels lowered to GPU code. articles in january and may 2026 show it optimizing GPU programs and using tensor cores." },
+];
+
+<InShort>
+**Project Panama** connects java to native code and hardware. its **foreign function and memory API** has been final since java 22: call C functions and manage off-heap memory with no JNI glue. its **vector API** (SIMD) is still an **incubator**, twelve rounds in, deliberately waiting for [valhalla](/learn/future/valhalla)'s value classes.
+
+**Project Babylon** is earlier: **code reflection**, letting a library read a java method as a model it can transform into something else, like a GPU kernel. as of october 2026 it lives in its own repository with no JEP.
+</InShort>
+
+## the picture
+
+you know how java has always been a little awkward at the edges: calling a C library meant writing JNI glue in C, and using the CPU's vector instructions meant hoping the JIT noticed? Panama is about those edges. Babylon is about a different edge: running java code somewhere other than a CPU (a GPU, a database, a machine learning runtime).
+
+think of java as a country with very good roads inside its borders. Panama builds proper border crossings: to native libraries (FFM) and to the CPU's wide lanes (vectors). Babylon is about translation: taking a java method and re-expressing it in another country's language entirely.
+
+## foreign functions: done
+
+this part shipped. here's C's `strlen`, called straight from java on jdk 25, with the string allocated off the heap in an arena that frees it the moment the block ends:
+
+```java title="Main.java" run output="13"
+import java.lang.foreign.*;
+import java.lang.invoke.MethodHandle;
+
+void main() throws Throwable {
+    Linker linker = Linker.nativeLinker();
+    MethodHandle strlen = linker.downcallHandle(                 // C's size_t strlen(const char*)
+            linker.defaultLookup().find("strlen").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS));
+    try (Arena arena = Arena.ofConfined()) {
+        MemorySegment s = arena.allocateFrom("hello, panama");    // a C string, off the heap
+        IO.println((long) strlen.invokeExact(s));
+    }                                                             // freed here, deterministically
+}
+```
+
+it prints `13`, and on jdk 25 also four `WARNING:` lines on stderr, starting with "A restricted method in java.lang.foreign.Linker has been called". that's JEP 472 (java 24) preparing to restrict native access: calling native code can crash the JVM, so you'll be expected to opt in with `--enable-native-access=ALL-UNNAMED` (or a module name). the full API is in [the FFM API](/learn/performance/ffm-api); the old way, and why it's being fenced in, is in [JNI](/learn/performance/jni).
+
+## vectors: one instruction, many lanes
+
+a CPU's SIMD instructions apply one operation to a whole register of numbers at once. the vector API lets you write that directly, portably, and have the JIT turn each vector operation into one instruction.
+
+<Figure wide caption={<>pick a vector width. each row is one instruction; each cell a float in a <C k="hot">lane</C>. then turn on the mask: lanes where <code>b &gt; c</code> count, the rest are ignored, with no branch at all. the 128-bit row is what <code>SPECIES_PREFERRED</code> gave on the M4 mac this site measures on.</>}>
+<Lanes />
+</Figure>
+
+so does it make code faster? i measured two loops over a million floats on jdk 25, scalar against the vector API (the API shape is in [in preview](/learn/modern/in-preview)):
+
+```java title="Vec.java (the two interesting loops)"
+// a[i] = b[i] * c[i] + a[i]
+static void fmaScalar(float[] a, float[] b, float[] c) {
+    for (int i = 0; i < a.length; i++) a[i] = b[i] * c[i] + a[i];
+}
+
+// the sum of b[i] wherever b[i] > c[i], with a mask instead of an if
+static float condVector(float[] b, float[] c) {
+    var acc = FloatVector.zero(S);
+    int i = 0;
+    for (; i < S.loopBound(b.length); i += S.length()) {
+        var vb = FloatVector.fromArray(S, b, i);
+        var m = vb.compare(VectorOperators.GT, FloatVector.fromArray(S, c, i));
+        acc = acc.add(vb, m);                       // add only the lanes where b > c
+    }
+    float s = acc.reduceLanes(VectorOperators.ADD);
+    for (; i < b.length; i++) if (b[i] > c[i]) s += b[i];   // the leftover tail
+    return s;
+}
+```
+
+```bash
+$ java --add-modules jdk.incubator.vector Vec.java fma-scalar      # and so on, one case per run
+```
+
+<Figure caption={<>microseconds per million floats, jdk 25, apple M4 Pro (4 float lanes), median of 16 rounds after warmup, the same in three separate runs. the plain loop doesn't get faster because C2 had already vectorized the scalar version on its own. the branchy sum does: 4.0x.</>}>
+<Bars
+  unit="µs"
+  data={[
+    { label: "fma, scalar loop", value: 165 },
+    { label: "fma, vector API", value: 164, tone: "live" },
+    { label: "conditional sum, scalar", value: 1750, tone: "dead" },
+    { label: "conditional sum, vector API", value: 439, tone: "live" },
+  ]}
+/>
+</Figure>
+
+that's the honest summary of the vector API. for simple loops over arrays, C2's auto-vectorizer already emits SIMD instructions, and writing vectors by hand buys nothing. the API pays off where the JIT won't go on its own: here, a float sum (the JIT won't reorder float additions, since that can change the result) with a condition inside (random data, so the scalar branch is mispredicted half the time). the vector version reorders on purpose and has no branches. its result can differ from the scalar sum in the last few bits, for exactly that reason.
+
+<Quiz question="why has the vector API been an incubator since jdk 16?" options={["it's too slow to release", "waiting for valhalla's value classes", "it only works on x64", "nobody uses SIMD in java"]} answer={1}>
+<Explain>
+its JEPs say it'll incubate "until necessary features of Project Valhalla become available as preview features", then move to preview and adopt them. a `FloatVector` is conceptually a value: it should live in registers, never be compared by identity, never need a header. as an identity class it relies on the JIT's escape analysis to avoid allocating, which works in simple loops and not always beyond. value objects are integrated into jdk 28 as a preview (as of october 2026), so the precondition is close; no vector API JEP is on the 28 list yet. and it isn't x64-only: these measurements were on an arm mac.
+</Explain>
+</Quiz>
+
+## babylon: code as data
+
+Babylon starts from a question: what if a library could read the *code* of a java method, not just call it? not bytecode (too low-level), not source text (too unstructured), but a **code model**: a tree of operations, types and values that keeps the structure of the java you wrote. a library could then transform it: into SQL for a query, into its own derivative for machine learning, into a kernel for a GPU.
+
+<Figure caption={<>the pipeline Babylon is building, with HAT (the Heterogeneous Accelerator Toolkit) as the GPU example. everything here is in Babylon's own repository, not in any JDK build.</>}>
+<Flow
+  stages={[
+    { label: "java method", sub: "marked for code reflection", note: "ordinary java, plus an annotation" },
+    { label: "code model", sub: "read at run time", note: "operations, types, values, structure intact" },
+    { label: "transform", sub: "a library's own passes", note: "lower it, rewrite it, analyze it" },
+    { label: "target", sub: "GPU kernel, SQL, ...", note: "HAT generates GPU code from it" },
+  ]}
+/>
+</Figure>
+
+```java
+// Babylon (the openjdk/babylon repository, module jdk.incubator.code). not in any jdk:
+// illustrative only, and the names have changed more than once.
+import jdk.incubator.code.Reflect;
+
+@Reflect                                    // "keep a code model for this method"
+static float squaredDistance(float x, float y) {
+    return x * x + y * y;
+}
+// a library asks for the method's model (Op.ofMethod(...) in the current repository),
+// walks or transforms it, and generates its own code from it.
+```
+
+be honest with yourself about the status: as of october 2026 there's no Babylon JEP, the module only exists in Babylon's repository, and the API has been reworked repeatedly. the project page's recent material (articles in january and may 2026 on optimizing GPU programs and using tensor cores from java) shows it's very active. but it's research you can build and try, not a feature you can depend on.
+
+<Figure caption={<>where panama and babylon stand, checked against the JEP pages and the babylon project page on openjdk.org (october 2026). click a row.</>}>
+<StatusBoard rows={board} open={3} />
+</Figure>
+
+<Gotcha title="the incubator warning is the point">
+every run that uses the vector API prints a warning that it's using an incubator module, and every FFM downcall without `--enable-native-access` prints a restricted-method warning. both are deliberate. an incubator module can change or vanish in the next release (twelve releases, twelve chances), and native code can corrupt memory the JVM can't protect. don't silence them in a library, and pin the JDK version if you ship an application that uses the incubator.
+</Gotcha>
+
+<Interview q="what are the FFM API and the vector API, and what's their status?">
+both come from Project Panama. the foreign function and memory API (final since java 22) lets java call native functions through `Linker` and method handles, and allocate and access off-heap memory through `MemorySegment` and `Arena`, safely and without writing JNI glue in C. the vector API exposes SIMD: operations on vectors of numbers that the JIT compiles to single CPU instructions, with masks for conditional work. it's been an incubator since jdk 16 and stays one until valhalla's value classes are available as a preview, since vectors should be values. in practice C2 already auto-vectorizes simple loops; the vector API matters for loops it won't vectorize, like reductions and conditional logic.
+</Interview>
+
+<Keylines>
+- panama's FFM API is final (java 22): call C, manage off-heap memory, no JNI glue.
+- native access is being fenced in: warnings since java 24 unless you use `--enable-native-access`.
+- the vector API is still an incubator (twelfth in jdk 27), waiting for valhalla's value classes.
+- measured: no gain where C2 already vectorizes; 4x on a branchy float sum with masks.
+- babylon's code reflection is research in its own repository. no JEP as of october 2026.
+</Keylines>

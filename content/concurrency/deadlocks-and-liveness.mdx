@@ -1,0 +1,227 @@
+import { Philosophers } from "@/components/figures/concurrency/Philosophers";
+import { WaitForGraph } from "@/components/figures/concurrency/WaitForGraph";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const livelock = [
+  { mem: { A: "free", B: "free" }, note: "two threads, both need locks A and B, and both use tryLock to avoid deadlock. politely." },
+  { ops: ["lock A", "lock B"], mem: { A: "T1", B: "T2" }, note: "each grabs its first lock." },
+  { ops: [{ t: "tryLock B: no", k: "hot" }, { t: "tryLock A: no", k: "hot" }], note: "each tries for the other's. both fail." },
+  { ops: ["unlock A, retry", "unlock B, retry"], mem: { A: "free", B: "free" }, note: "being polite, both let go and immediately try again..." },
+  { ops: ["lock A", "lock B"], mem: { A: "T1", B: "T2" }, note: "...in exactly the same rhythm." },
+  { ops: [{ t: "tryLock B: no", k: "dead" }, { t: "tryLock A: no", k: "dead" }], note: "and again. both threads are RUNNABLE and burning CPU the whole time, and neither ever finishes. that's a livelock: two people in a corridor stepping aside into each other forever." },
+  { ops: [{ t: "back off 3 ms", wait: true }, { t: "back off 11 ms", wait: true }], mem: { A: "free", B: "free" }, note: "the fix is to break the symmetry: back off for a random time before retrying." },
+  { ops: [{ t: "lock A, lock B, done", k: "live" }, { t: "BACKING OFF", wait: true }], mem: { A: "T1", B: "T1" }, note: "T1 comes back first and gets both. T2 gets its turn after." },
+];
+
+<InShort>
+a **deadlock** is a set of threads each holding a lock while waiting for another lock held by someone else in the set: a cycle, and nobody can ever move. **livelock** is threads that keep reacting to each other and never get anywhere. **starvation** is a thread that could run but never gets its turn. the main fix for deadlock is boring and absolute: **always take locks in the same order**.
+</InShort>
+
+## the picture
+
+four cars at a four-way stop, each pulled halfway into the intersection, each waiting for the car on its left to go first. no car is broken. every driver is following a sensible rule. and none of them will ever move again.
+
+that's the frustrating thing about deadlock: every thread is doing something reasonable on its own. the bug is in the combination.
+
+## a real one
+
+two transfers in opposite directions, each locking its source account first:
+
+```java title="Deadlock.java"
+public class Deadlock {
+    static final Object accountA = new Object();
+    static final Object accountB = new Object();
+
+    static void transfer(Object from, Object to, String name) {
+        synchronized (from) {
+            sleep(100);                       // just long enough for the other thread to lock its first account
+            synchronized (to) {
+                System.out.println(name + " done");
+            }
+        }
+    }
+
+    static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    public static void main(String[] args) {
+        Thread.ofPlatform().name("alice").start(() -> transfer(accountA, accountB, "alice"));
+        Thread.ofPlatform().name("bob").start(() -> transfer(accountB, accountA, "bob"));
+    }
+}
+```
+
+alice locks A and wants B. bob locks B and wants A. this one hangs every time, printing nothing (the `sleep` makes sure both get their first lock). no exception, no CPU use, nothing in the logs. the only way to see it is a thread dump. here's the real `jstack` output from jdk 25, trimmed to the interesting part:
+
+```text title="jstack <pid>"
+"alice" #25 [43011] prio=5 os_prio=31 cpu=0.14ms elapsed=2.26s ... waiting for monitor entry
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at Deadlock.transfer(Deadlock.java:9)
+	- waiting to lock <0x0000007018418418> (a java.lang.Object)
+	- locked <0x0000007018418408> (a java.lang.Object)
+
+Found one Java-level deadlock:
+=============================
+"alice":
+  waiting to lock monitor 0x00000079254be680 (object 0x0000007018418418, a java.lang.Object),
+  which is held by "bob"
+
+"bob":
+  waiting to lock monitor 0x00000079254be760 (object 0x0000007018418408, a java.lang.Object),
+  which is held by "alice"
+
+Found 1 deadlock.
+```
+
+the JVM found the cycle for you. read it as a graph: each thread **holds** one lock and **waits for** another, and following the arrows brings you back to the start.
+
+<Figure caption={<>the wait-for graph for alice and bob. <C k="meta">purple</C>: which thread holds each lock. <C k="dead">red</C>: which lock each thread waits for. any cycle in this graph is a deadlock.</>}>
+<WaitForGraph />
+</Figure>
+
+you can ask the JVM for that cycle from inside the program too, which is how monitoring tools detect deadlocks in prod:
+
+```java title="Main.java" run output="alice waits for bob\nbob waits for alice"
+import java.lang.management.ManagementFactory;
+import java.util.Arrays;
+
+void lockBoth(Object first, Object second) {
+    synchronized (first) {
+        try { Thread.sleep(100); } catch (InterruptedException e) { return; }
+        synchronized (second) {
+            IO.println("never printed");
+        }
+    }
+}
+
+void main() throws InterruptedException {
+    Object a = new Object();
+    Object b = new Object();
+    Thread.ofPlatform().name("alice").daemon().start(() -> lockBoth(a, b));
+    Thread.ofPlatform().name("bob").daemon().start(() -> lockBoth(b, a));
+    Thread.sleep(500);
+
+    var threads = ManagementFactory.getThreadMXBean();
+    long[] stuck = threads.findDeadlockedThreads();
+    String[] names = Arrays.stream(threads.getThreadInfo(stuck))
+            .map(info -> info.getThreadName() + " waits for " + info.getLockOwnerName())
+            .sorted()
+            .toArray(String[]::new);
+    IO.println(String.join("\n", names));
+}
+```
+
+(the threads are daemons so the program can exit while they're still stuck.) `findDeadlockedThreads` covers `synchronized` monitors and `java.util.concurrent` locks; `jstack` and `jcmd <pid> Thread.print` report both kinds too.
+
+## the dining philosophers
+
+the classic, from Dijkstra. five philosophers around a table, five forks, one between each pair. to eat you need both forks next to you. so each philosopher is a thread, and each fork is a lock shared by two neighbours.
+
+<Figure wide caption={<>press <strong>everyone hungry at once</strong> with "left, then right": every philosopher picks up their left fork, and the <C k="dead">wait-for cycle</C> closes. switch to "lower fork first" and try again: P4 reaches for fork 0 first, competes with P0 instead of grabbing fork 4, and the cycle can't form. "tryLock, back off" never deadlocks, but watch the meal counts for <C k="hot">hungry</C> philosophers who keep losing.</>}>
+<Philosophers />
+</Figure>
+
+## four conditions, break one
+
+a deadlock needs all four of these at once (the Coffman conditions). take any one away and deadlock is impossible:
+
+| condition | meaning | how to break it |
+| --- | --- | --- |
+| mutual exclusion | a lock has one owner at a time | use lock-free structures or immutable data, so no lock is needed |
+| hold and wait | threads hold one lock while waiting for another | acquire everything at once, or never hold a lock while calling unknown code |
+| no preemption | nobody can take a lock away from its owner | `tryLock` with a timeout: give up your locks and retry |
+| circular wait | a cycle in the wait-for graph | **a global lock order**: everybody locks in the same order |
+
+lock ordering is the one to reach for first. for the transfer example, order by account id, so both directions lock the lower id first:
+
+```java title="Main.java" run output="1000 1000"
+class Account {
+    final int id;
+    int balance;
+    Account(int id, int balance) { this.id = id; this.balance = balance; }
+}
+
+void transfer(Account from, Account to, int amount) {
+    Account first = from.id < to.id ? from : to;    // always lock the lower id first
+    Account second = first == from ? to : from;
+    synchronized (first) {
+        synchronized (second) {
+            from.balance -= amount;
+            to.balance += amount;
+        }
+    }
+}
+
+void main() throws InterruptedException {
+    Account a = new Account(1, 1000);
+    Account b = new Account(2, 1000);
+    Thread t1 = Thread.ofPlatform().start(() -> { for (int i = 0; i < 100_000; i++) transfer(a, b, 1); });
+    Thread t2 = Thread.ofPlatform().start(() -> { for (int i = 0; i < 100_000; i++) transfer(b, a, 1); });
+    t1.join();
+    t2.join();
+    IO.println(a.balance + " " + b.balance);
+}
+```
+
+200,000 transfers in opposite directions, no deadlock, every unit of money accounted for.
+
+<Gotcha title="the lock you didn't know you were holding">
+the hard deadlocks aren't two `synchronized` blocks next to each other. they're a synchronized method that calls a listener, which calls into another object, which takes its own lock, while another thread goes the opposite way. that's why [effective java item 79](/learn/concurrency/synchronized) says never call alien code while holding a lock: you can't keep a lock order across code you didn't write.
+</Gotcha>
+
+## livelock
+
+tryLock-and-retry prevents deadlock, but if two threads back off and retry in perfect lockstep, they can keep colliding forever. nobody is blocked, every thread is busy, and nothing finishes.
+
+<Figure wide caption={<>both threads are always <C k="hot">doing something</C>, which is what makes livelock harder to spot than deadlock: the CPU is busy and the thread dump shows RUNNABLE. a random back-off breaks the symmetry.</>}>
+<Lanes threads={["T1", "T2"]} cells={["A", "B"]} steps={livelock} />
+</Figure>
+
+## starvation
+
+starvation is a thread that's able to run but never gets what it needs, because others keep winning:
+
+- a **non-fair lock** lets running threads barge in, so an unlucky thread can lose the race over and over. a fair `ReentrantLock` fixes that at a throughput cost.
+- a steady stream of **readers** can starve a writer on a read-write lock (which is why [ReentrantReadWriteLock](/learn/concurrency/locks-and-aqs) queues new readers behind a waiting writer).
+- **thread priorities** are hints the OS mostly ignores, and relying on them for correctness invites starvation.
+
+and one that's halfway to deadlock: **thread-starvation deadlock** in a pool. a task submits a subtask to the *same* bounded pool and waits for it. if every pool thread is busy waiting like that, the subtasks are queued with nobody left to run them:
+
+```java title="Main.java" run output="outer failed: TimeoutException"
+import java.util.concurrent.*;
+
+void main() throws Exception {
+    try (ExecutorService pool = Executors.newSingleThreadExecutor()) {
+        Future<String> outer = pool.submit(() -> {
+            Future<String> inner = pool.submit(() -> "inner result");  // queued behind outer
+            return inner.get(500, TimeUnit.MILLISECONDS);             // waits for the only thread: itself
+        });
+        try {
+            IO.println(outer.get());
+        } catch (ExecutionException e) {
+            IO.println("outer failed: " + e.getCause().getClass().getSimpleName());
+        }
+    }
+}
+```
+
+without the timeout, that hangs forever, and no thread dump calls it a deadlock, because no lock is involved, just a queue. don't make pool tasks wait on other tasks from the same pool; [fork/join](/learn/concurrency/fork-join) and [structured concurrency](/learn/concurrency/structured-concurrency) are built for that shape.
+
+<Quiz question="two threads are deadlocked on two ReentrantLocks acquired with lock(). which tool won't help you break out at runtime?" options={["tryLock with a timeout in the code", "lockInterruptibly plus interrupt()", "calling Thread.interrupt() on a thread blocked in synchronized"]} answer={2}>
+<Explain>
+a thread blocked entering a `synchronized` block ignores interrupts entirely; it stays BLOCKED until it gets the monitor. `lockInterruptibly` and `tryLock(timeout)` are the escape hatches, and they only exist on explicit locks. for monitors, the only cure is prevention: lock ordering.
+</Explain>
+</Quiz>
+
+<Interview q="how would you find and fix a deadlock in production?">
+take a thread dump (`jstack <pid>` or `jcmd <pid> Thread.print`, or `kill -3` on unix). the JVM detects monitor and j.u.c lock cycles and prints "Found one Java-level deadlock" with each thread's held and wanted locks and their stack traces. to fix it, establish a global lock order (for example by id) so every code path acquires locks the same way, shrink critical sections so they don't call out to other locked code, or use tryLock with a timeout to back out. monitoring can poll `ThreadMXBean.findDeadlockedThreads()` to alert on it.
+</Interview>
+
+<Keylines>
+- deadlock: a cycle of threads each holding a lock the next one wants. it never resolves itself.
+- `jstack` / `jcmd Thread.print` find it for you: "Found one Java-level deadlock".
+- break any one of the four conditions. lock ordering breaks the cycle, and is the default fix.
+- tryLock with back-off can't deadlock, but needs randomness to avoid livelock.
+- starvation: runnable but always losing. unfair locks, reader floods, tasks waiting on their own pool.
+</Keylines>

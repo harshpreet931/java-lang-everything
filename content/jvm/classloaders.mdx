@@ -1,0 +1,158 @@
+import { Delegation } from "@/components/figures/jvm/Delegation";
+import { TwoLoaders } from "@/components/figures/jvm/TwoLoaders";
+
+<InShort>
+a **class loader** is the object that finds a class's bytes and defines it. the JDK ships three: **bootstrap** (the core modules, built into the JVM), **platform** (the rest of the JDK's modules) and **app** (your classpath). each one asks its **parent** first, and only looks itself if the parent comes back empty.
+
+and the twist: a class is identified by its name *and* the loader that defined it. same bytes, two loaders, two different classes.
+</InShort>
+
+## the picture
+
+you know that `ClassCastException: class Greeter cannot be cast to class Greeter`? it reads like the JVM is broken. it isn't: those really are two different classes that happen to share a name.
+
+think of a library system with three branches: the central archive (bootstrap), the city library (platform), and your neighbourhood branch (app). you always ask at your local branch, but the rule is that each branch first phones the one above it: "do you have this?". only if the answer is no does the local branch check its own shelves. that's why the archive's copy of a famous book always wins over anything your branch has: you can't shadow the classics. and if two branches each print their own copy of a book, those are two different copies, even if every page is identical.
+
+## the three loaders
+
+```java title="Main.java" run output="null\nplatform\napp\nplatform"
+void main() {
+    IO.println(String.class.getClassLoader());
+    IO.println(java.sql.Connection.class.getClassLoader().getName());
+    IO.println(ClassLoader.getSystemClassLoader().getName());
+    IO.println(ClassLoader.getSystemClassLoader().getParent().getName());
+}
+```
+
+`null` is how java spells "bootstrap": that loader is part of the JVM's C++ code and has no java object. and which modules belong to which loader isn't a secret, you can just ask `ModuleLayer.boot()`. here's jdk 25, launched from the classpath:
+
+<Figure caption={<>the built-in loaders on jdk 25. click a loader to fold it. the counts are from grouping <code>ModuleLayer.boot().modules()</code> by <code>getClassLoader()</code>.</>}>
+<Tree>{`
+bootstrap #meta                    // 21 modules, inside the JVM, getClassLoader() == null
+    java.base                      // java.lang, java.util, java.io...
+    java.logging
+    java.xml
+    java.management
+    java.desktop
+    ... 16 more
+platform #meta                     // 21 modules, parent = bootstrap
+    java.sql
+    java.net.http
+    java.compiler
+    jdk.httpserver
+    ... 17 more
+app #meta                          // the classpath, parent = platform
+    your classes and jars #hot
+    jdk.compiler
+    jdk.jshell
+    ... 17 more jdk tool modules
+`}</Tree>
+</Figure>
+
+<Note title="java Main.java is a fourth loader">
+when you run a single source file with `java Main.java` (like every runnable snippet on this site), the launcher compiles it in memory and defines your classes with its own loader, `com.sun.tools.javac.launcher.MemoryClassLoader`, whose parent is the app loader. walk `getParent()` from your class and you get `null` (it has no name), `app`, `platform`. compile with `javac` and run with `java -cp`, and the walk starts at `app`.
+</Note>
+
+## parent delegation
+
+when a loader is asked for a class it hasn't loaded yet, it delegates to its parent first. only when the parent (and its parent) can't find it does it search its own sources.
+
+<Figure wide caption={<>pick a class and step. the request goes <C k="hot">up</C> first, then back down until someone has it. the loader that <C k="live">defines</C> the class is the one that counts, not the one you asked.</>}>
+<Delegation />
+</Figure>
+
+delegation is why you can't break the JDK by putting your own `java/lang/String.class` on the classpath: the app loader asks bootstrap first, and bootstrap always has the real one. and if you write a loader that tries to define a class in `java.*` itself, the JVM refuses outright:
+
+```text
+Exception in thread "main" java.lang.SecurityException: Prohibited package name: java.lang
+	at java.base/java.lang.ClassLoader.preDefineClass(ClassLoader.java:847)
+```
+
+<Deep title="since java 9, the built-in loaders don't really walk the chain">
+with modules, every package belongs to exactly one module, and every module to one loader. so the JDK's built-in loaders keep a map from package to module. ask the app loader for `java.sql.Connection` and it sees that `java.sql` is a package of the `java.sql` module, defined to the platform loader, and goes straight there. the classic "parent first, then me" walk still happens for packages that aren't in any named module (your classpath), and custom loaders that extend `ClassLoader` get the classic `loadClass` behaviour unless they override it. the result is the same as the walk in the figure, just with fewer hops.
+</Deep>
+
+## a class is (name, loader)
+
+the JVM identifies a class by its binary name *and* its defining loader. two loaders can define a class with the same name from the very same bytes, and the JVM treats them as unrelated types. here it is, for real: compile `Greeter` into a temp directory, then load it through two separate `URLClassLoader`s.
+
+```java title="Main.java" run output="same name:  true\nsame class: false\ninstance of a: true\ninstance of b: false\njava.lang.ClassCastException: Cannot cast Greeter to Greeter"
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import javax.tools.ToolProvider;
+
+void main() throws Exception {
+    // write Greeter.java to a temp dir and compile it there (not on our classpath)
+    Path dir = Files.createTempDirectory("greeter");
+    Path src = dir.resolve("Greeter.java");
+    Files.writeString(src, "public class Greeter { public String hi() { return \"hi\"; } }");
+    ToolProvider.getSystemJavaCompiler().run(null, null, null, src.toString());
+
+    URL[] path = { dir.toUri().toURL() };
+    Class<?> a = new URLClassLoader(path).loadClass("Greeter");
+    Class<?> b = new URLClassLoader(path).loadClass("Greeter");
+
+    IO.println("same name:  " + a.getName().equals(b.getName()));
+    IO.println("same class: " + (a == b));
+
+    Object greeter = a.getDeclaredConstructor().newInstance();
+    IO.println("instance of a: " + a.isInstance(greeter));
+    IO.println("instance of b: " + b.isInstance(greeter));
+    try {
+        b.cast(greeter);
+    } catch (ClassCastException e) {
+        IO.println(e);
+    }
+}
+```
+
+<Figure caption={<>one file, two <C k="meta">loaders</C>, two classes. an object made from <code>a</code> is not an instance of <code>b</code>, so the cast <C k="dead">fails</C>.</>}>
+<TwoLoaders />
+</Figure>
+
+`Class.cast` gives the short message. when the same mismatch hits a real cast in compiled code (a `checkcast` instruction), the JVM tells you exactly what happened. this is from a variant of that program where code defined by loader b casts an object from loader a:
+
+```text
+java.lang.ClassCastException: class Greeter cannot be cast to class Greeter
+  (Greeter is in unnamed module of loader java.net.URLClassLoader @71809907;
+   Greeter is in unnamed module of loader java.net.URLClassLoader @158da8e)
+```
+
+when you see the same name on both sides, stop looking at your types and start looking at your loaders. it shows up in app servers that load each webapp with its own loader, in plugin systems, and in dev tools that hot-reload your code with a fresh loader while an old object is still cached somewhere.
+
+<Quiz question="a jar on your classpath contains its own copy of java/util/ArrayList.class. what happens when your code uses ArrayList?" options={["your copy wins, it's first on the classpath", "the JDK's ArrayList is used", "LinkageError at startup", "it depends on the order of jars"]} answer={1}>
+<Explain>
+the JDK's. the request reaches the app loader, which (since `java.util` belongs to `java.base`) hands it to the bootstrap loader, which already has the real `ArrayList`. your copy is never even read. this is one of the main things delegation is for: nothing on the classpath can shadow a JDK class.
+</Explain>
+</Quiz>
+
+## the context class loader
+
+delegation only goes up. so what happens when code in a parent loader needs to load a class that only a child can see? `java.sql.DriverManager` lives in the platform loader, but the JDBC driver it needs to find is in your jar, on the app loader. the platform loader can't see down.
+
+the escape hatch is the thread's **context class loader**: a loader stashed on every `Thread` (by default, the app loader) that library code can use explicitly.
+
+```java
+ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+ServiceLoader<Driver> drivers = ServiceLoader.load(Driver.class, tccl);
+```
+
+`ServiceLoader.load(Class)` without a loader argument uses the context loader for exactly this reason. app servers and frameworks set it to the right loader before calling into your code. it's a convention, not a rule the JVM enforces, which is why "works in the IDE, fails in the server" bugs often come down to someone forgetting to set it.
+
+<Gotcha title="class loader leaks">
+a class loader stays alive as long as anything references it: any of its classes, any object of any of its classes (every object knows its class, every class knows its loader), or a `ThreadLocal` value or static cache in a parent loader that holds one of those objects. and while it's alive, every class it defined stays in metaspace. so one forgotten reference keeps an entire old version of your app loaded. redeploy ten times without restarting and you get `OutOfMemoryError: Metaspace`. the usual suspects: a `ThreadLocal` on a pooled thread, a JDBC driver registered from the webapp and never deregistered, a static map in a shared library. see [memory leaks](/learn/gc/memory-leaks).
+</Gotcha>
+
+<Interview q="can you replace java.lang.String with your own class?">
+no, for two independent reasons. delegation: every request for `java.lang.String` ends at the bootstrap loader, which has the real one, so a class file on the classpath is never consulted. and even if you write a custom loader that skips delegation and calls `defineClass("java.lang.String", ...)` itself, the JVM rejects any non-bootstrap definition in a `java.*` package with `SecurityException: Prohibited package name`. (the supported way to patch a JDK module is `--patch-module`, at startup, on purpose.)
+</Interview>
+
+<Keylines>
+- bootstrap, platform, app. each asks its parent before looking itself.
+- the bootstrap loader has no java object. getClassLoader() returns null.
+- a class is (name, defining loader). same bytes in two loaders are two classes.
+- "X cannot be cast to X" means two loaders. look at the loader names in the message.
+- a loader lives as long as any of its objects. leaks keep whole apps in metaspace.
+</Keylines>

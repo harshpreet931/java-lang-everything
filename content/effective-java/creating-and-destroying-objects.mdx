@@ -1,0 +1,373 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { BuilderVsTelescope } from "@/components/figures/effective-java/BuilderVsTelescope";
+import { ObsoleteRefs } from "@/components/figures/effective-java/ObsoleteRefs";
+
+<InShort>
+items 1 to 9 are about how objects come into the world and how they leave it. give creation a **name** (static factories), give long parameter lists a **builder**, don't create what you can reuse, and let go of references you're done with. cleanup is **try-with-resources**, never a finalizer.
+</InShort>
+
+<Note title="what this part is">
+a companion to Joshua Bloch's *Effective Java* (3rd edition, 2018). item numbers match the book. the titles here are our paraphrases, the code is ours, and every item gets a "2026 lens" when modern java changed the advice. the book explains the why in far more depth than any page here. it's still worth owning.
+</Note>
+
+<Figure caption={<>the nine items, at a glance. <C k="hot">amber</C> marks the ones modern java changed. click a card to jump to it.</>}>
+<ItemMap
+  items={[
+    { n: 1, t: "named factories beat constructors", lens: "List.of, Path.of, records" },
+    { n: 2, t: "long parameter lists want a builder", lens: "records, withers in amber" },
+    { n: 3, t: "singletons: a private constructor or an enum" },
+    { n: 4, t: "utility classes get a private constructor" },
+    { n: 5, t: "pass dependencies in, don't hardwire them" },
+    { n: 6, t: "don't make objects you don't need", lens: "escape analysis, valhalla" },
+    { n: 7, t: "let go of references you're done with" },
+    { n: 8, t: "finalizers and cleaners are not destructors", lens: "finalization deprecated (JEP 421)" },
+    { n: 9, t: "try-with-resources, always", lens: "effectively final resources" },
+  ]}
+/>
+</Figure>
+
+## making objects
+
+### item 1 · named factories beat constructors
+
+a constructor has one name (the class's) and always returns a brand new object of exactly that class. a static method that returns an instance has none of those limits: it can say what it does, hand back a cached object, or return any subtype it likes.
+
+<Compare>
+<Bad label="what does true mean?">
+```java
+var t = new Temp(70.7, true);
+```
+</Bad>
+<Good label="the name says it">
+```java
+var t = Temp.fahrenheit(70.7);
+var zero = Temp.FREEZING; // cached
+```
+</Good>
+</Compare>
+
+the JDK is full of these. and the "can return any subtype" part isn't theory, you can watch it happen:
+
+```java title="Main.java" run output="List12\nListN\ntrue"
+void main() {
+    IO.println(List.of(1).getClass().getSimpleName());       // a tiny class for 1-2 items
+    IO.println(List.of(1, 2, 3).getClass().getSimpleName()); // a general one for more
+    IO.println(Integer.valueOf(127) == Integer.valueOf(127)); // same cached object
+}
+```
+
+same method, two hidden classes, and you never had to know. the cost: a class with only private constructors can't be subclassed, and factories don't stand out in the javadoc the way constructors do (hence the naming habits: `of`, `from`, `valueOf`, `newInstance`, `getInstance`).
+
+<Lens v={9}>`List.of`, `Set.of`, `Map.of` (9) and `Path.of` (11) made factories the default way to get JDK objects. records go the other way: a record's canonical constructor must be as accessible as the record, so you can't hide it behind a factory. if you need "factory only", use a class.</Lens>
+
+### item 2 · long parameter lists want a builder
+
+four or more parameters, several optional? telescoping constructors (one per combination) force positional arguments nobody can read. setters (the JavaBeans way) leave the object half-built and mutable. a builder gives you named, optional arguments and an immutable result.
+
+<Figure caption={<>toggle the options you care about. with a telescoping constructor you pay for every argument up to the last one you want, including the <C k="dead">ones you didn't ask for</C>. the builder only mentions your choices.</>}>
+<BuilderVsTelescope />
+</Figure>
+
+```java title="Main.java" run output="350ml, 2 shot(s), milk=oat, iced"
+final class Coffee {
+    private final int ml, shots;
+    private final String milk;
+    private final boolean iced;
+
+    private Coffee(Builder b) { ml = b.ml; shots = b.shots; milk = b.milk; iced = b.iced; }
+
+    static Builder ofSize(int ml) { return new Builder(ml); }
+
+    static final class Builder {
+        private final int ml;          // required
+        private int shots = 1;         // optional, with defaults
+        private String milk = "none";
+        private boolean iced;
+
+        private Builder(int ml) { this.ml = ml; }
+        Builder shots(int n) { shots = n; return this; }
+        Builder milk(String m) { milk = m; return this; }
+        Builder iced() { iced = true; return this; }
+
+        Coffee build() {
+            if (shots < 1 || shots > 4) throw new IllegalArgumentException("shots: " + shots);
+            return new Coffee(this); // validate once, on the finished set of values
+        }
+    }
+
+    @Override public String toString() {
+        return ml + "ml, " + shots + " shot(s), milk=" + milk + (iced ? ", iced" : "");
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(Coffee.ofSize(350).shots(2).milk("oat").iced().build());
+    }
+}
+```
+
+the JDK's own: `HttpClient.newBuilder()`, `HttpRequest.newBuilder()`, `Thread.ofVirtual().name("w-", 0)`, `StringBuilder` (a builder for strings, sort of).
+
+<Lens v={16}>for plain data with every component required, a [record](/learn/modern/records) is shorter than a builder. records still have the positional-constructor problem once they grow, and "copy this record but change one field" is what derived record creation (`with`) is for. that JEP is a candidate, on hold, see [amber](/learn/future/amber).</Lens>
+
+### item 3 · singletons: a private constructor or an enum
+
+two classic shapes (a `public static final` field, or a static `getInstance()`), both with a private constructor. the catch: reflection can call a private constructor, and plain serialization creates a second copy on read. a single-element enum shuts both doors.
+
+```java title="Main.java" run output="false\nException in thread \"main\" java.lang.IllegalArgumentException: Cannot reflectively create enum objects"
+import java.lang.reflect.Constructor;
+
+class Registry {
+    static final Registry INSTANCE = new Registry();
+    private Registry() {}
+}
+
+enum Config { INSTANCE }
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        Constructor<Registry> c = Registry.class.getDeclaredConstructor();
+        c.setAccessible(true);
+        System.out.println(c.newInstance() == Registry.INSTANCE); // a second "singleton"
+
+        Constructor<Config> e = Config.class.getDeclaredConstructor(String.class, int.class);
+        e.setAccessible(true);
+        e.newInstance("INSTANCE", 0); // the JVM refuses
+    }
+}
+```
+
+the enum way can't extend a class (it already extends `Enum`), which is the only reason not to use it. lazy versions, double-checked locking and the holder idiom are in [singletons and DCL](/learn/deep-dives/singleton-and-dcl).
+
+### item 4 · utility classes get a private constructor
+
+a class that's just static methods (`Math`, `Collections`, `Arrays`) should not be instantiable. making it `abstract` doesn't work: anyone can subclass it and instantiate the subclass. a private constructor does.
+
+```java
+public final class Units {
+    private Units() { throw new AssertionError("no instances"); }
+
+    public static double kmToMiles(double km) { return km * 0.621371; }
+}
+```
+
+### item 5 · pass dependencies in, don't hardwire them
+
+a class that builds its own resources (a dictionary, a clock, a database) can only ever use that one, and can't be tested without it. take the resource in the constructor instead. that's all dependency injection is; frameworks just automate the wiring.
+
+<Compare>
+<Bad label="welded to one dictionary">
+```java
+class SpellChecker {
+    final Dictionary dict =
+        new EnglishDictionary();
+
+    boolean ok(String w) {
+        return dict.has(w);
+    }
+}
+```
+</Bad>
+<Good label="any dictionary, including a fake one in tests">
+```java
+class SpellChecker {
+    final Dictionary dict;
+
+    SpellChecker(Dictionary dict) {
+        this.dict = dict;
+    }
+
+    boolean ok(String w) {
+        return dict.has(w);
+    }
+}
+```
+</Good>
+</Compare>
+
+a variant: pass a factory, typically a `Supplier<? extends Dictionary>`, when the class needs to make several. the JDK's version of this lesson is `java.time.Clock`: code that takes a `Clock` can be tested at any time of day.
+
+## not making objects
+
+### item 6 · don't make objects you don't need
+
+some objects are expensive to make and safe to reuse. `String.matches(regex)` compiles the regex into a `Pattern` on every call. accidental autoboxing (`Long total` instead of `long total`) can make a new `Long` per iteration.
+
+<Figure caption={<>best of 7 runs, jdk 25 on an arm mac, after warm-up. plain <code>System.nanoTime</code>, not JMH, so read the ratios, not the digits. <C k="dead">red</C> is the version that makes objects it doesn't need.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "1M × s.matches(re)", value: 56, tone: "dead" },
+    { label: "1M × compiled Pattern", value: 16, tone: "live" },
+    { label: "100M × Long total += i", value: 38, tone: "dead" },
+    { label: "100M × long total += i", value: 26, tone: "live" },
+  ]}
+/>
+</Figure>
+
+<Compare>
+<Bad label="compiles the regex on every call">
+```java
+static boolean isHex(String s) {
+    return s.matches("[0-9a-f]+");
+}
+```
+</Bad>
+<Good label="compile once, reuse forever">
+```java
+static final Pattern HEX =
+    Pattern.compile("[0-9a-f]+");
+
+static boolean isHex(String s) {
+    return HEX.matcher(s).matches();
+}
+```
+</Good>
+</Compare>
+
+<Deep title="why the Long loop was only 1.5x slower">
+because the JIT saw that the boxed `total` never escapes the method and removed most of the boxing (escape analysis, see [JIT optimizations](/learn/jvm/jit-optimizations)). run the same loop with `-Xint` (interpreter only) and it's 6,779 ms vs 449 ms, about 15x. the JIT can save you in a tight loop. it can't when the box is stored in a field, a collection, or passed somewhere it can't see.
+</Deep>
+
+the flip side matters just as much: don't pool small objects to "help the GC". allocation is a pointer bump in a thread-local buffer ([TLABs](/learn/gc/allocation-and-tlabs)) and short-lived garbage is nearly free to collect. pool only what's truly expensive, like database connections.
+
+<Lens v="28 preview">project valhalla makes `Integer`, `Long` and friends value classes (preview in jdk 28): boxes without identity, which the JVM is free to never allocate. see [valhalla](/learn/future/valhalla).</Lens>
+
+### item 7 · let go of references you're done with
+
+garbage collection doesn't mean memory leaks are impossible. if your code keeps a reference to something it will never use again (an "obsolete reference"), the GC has to assume it's live. the classic spot: a class that manages its own array of references.
+
+<Figure wide caption={<>step through it, then flip <code>pop()</code>. the slots below <C k="hot">size</C> are the stack. a reference left above it is <C k="dead">obsolete</C>: logically dead, but it keeps its object alive.</>}>
+<ObsoleteRefs />
+</Figure>
+
+```java title="Main.java" run output="still alive: true"
+import java.lang.ref.WeakReference;
+import java.util.Arrays;
+
+class Stack<T> {
+    private Object[] items = new Object[8];
+    private int size;
+
+    void push(T x) {
+        if (size == items.length) items = Arrays.copyOf(items, size * 2);
+        items[size++] = x;
+    }
+
+    @SuppressWarnings("unchecked")
+    T pop() {
+        T x = (T) items[--size];
+        // forgot: items[size] = null;
+        return x;
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        var stack = new Stack<byte[]>();
+        stack.push(new byte[1 << 20]);
+        var watch = new WeakReference<>(stack.pop()); // we drop our only strong ref
+        System.gc();
+        System.out.println("still alive: " + (watch.get() != null));
+    }
+}
+```
+
+add `items[size] = null;` and it prints `still alive: false`. don't go nulling every local, though. a local goes out of scope on its own. null out only when a class manages its own memory, and watch the other two usual suspects: caches (use a size bound or `WeakHashMap`) and listeners you register but never remove. more in [memory leaks](/learn/gc/memory-leaks).
+
+## destroying objects
+
+### item 8 · finalizers and cleaners are not destructors
+
+a finalizer might run late, in some random thread, or never. it slows allocation, it can resurrect objects, and an exception inside one is silently dropped. cleaners (`java.lang.ref.Cleaner`, java 9) fix some of that, but they're still unpredictable. neither is how you close things.
+
+the right answer: implement `AutoCloseable` and let callers use try-with-resources. a cleaner is acceptable only as a **safety net** for when a caller forgets, typically around native memory.
+
+```java title="Main.java" run output="using it\nfreed 51966\ndone"
+import java.lang.ref.Cleaner;
+
+final class NativeBuffer implements AutoCloseable {
+    private static final Cleaner CLEANER = Cleaner.create();
+
+    // the cleanup action must not reference the NativeBuffer itself,
+    // or the buffer can never become unreachable
+    private record Release(long address) implements Runnable {
+        public void run() { System.out.println("freed " + address); }
+    }
+
+    private final Cleaner.Cleanable cleanable;
+
+    NativeBuffer(long address) { cleanable = CLEANER.register(this, new Release(address)); }
+
+    @Override public void close() { cleanable.clean(); } // runs Release at most once
+}
+
+public class Main {
+    public static void main(String[] args) {
+        try (var buf = new NativeBuffer(0xCAFE)) {
+            System.out.println("using it");
+        }
+        System.out.println("done");
+    }
+}
+```
+
+<Lens v={18}>JEP 421 deprecated finalization for removal in java 18. run your app with `--finalization=disabled` today to find out what breaks when it's gone. for native memory, the [FFM API](/learn/performance/ffm-api)'s `Arena` gives you deterministic, scoped freeing without any cleaner.</Lens>
+
+### item 9 · try-with-resources, always
+
+`try`/`finally` gets ugly with two resources, and it has a real bug: if the body throws and then `close()` throws too, the second exception replaces the first. you get "close failed" in the logs and lose the reason it actually broke.
+
+<Predict options={["read failed", "close failed", "both, chained together"]} answer={1}>
+```java
+class Conn implements AutoCloseable {
+    void read() { throw new IllegalStateException("read failed"); }
+    public void close() { throw new IllegalStateException("close failed"); }
+}
+
+void main() {
+    Conn c = new Conn();
+    try {
+        c.read();
+    } finally {
+        c.close();
+    }
+}
+```
+<Explain>
+`read()` throws, then `finally` runs `close()`, which throws too. an exception thrown from `finally` replaces the one in flight, so `read failed` is gone without a trace. try-with-resources keeps the first exception and attaches the second as **suppressed**.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="caught: read failed\nsuppressed: close failed"
+class Conn implements AutoCloseable {
+    void read() { throw new IllegalStateException("read failed"); }
+    public void close() { throw new IllegalStateException("close failed"); }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        try (Conn c = new Conn()) {
+            c.read();
+        } catch (IllegalStateException e) {
+            System.out.println("caught: " + e.getMessage());
+            for (Throwable s : e.getSuppressed()) System.out.println("suppressed: " + s.getMessage());
+        }
+    }
+}
+```
+
+resources close in reverse order of opening, even when one of the closes throws. the whole mechanism is in [try-with-resources](/learn/core-api/try-with-resources).
+
+<Lens v={9}>you can list an existing effectively final variable instead of declaring a new one: `try (in; out) { ... }`. and `ExecutorService` is `AutoCloseable` since java 19, so a pool opened in a `try` waits for its tasks on the way out.</Lens>
+
+<Keylines>
+- a static factory can have a name, cache, and return any subtype. constructors can't.
+- many optional parameters: builder. all required, plain data: record.
+- the enum singleton is the one reflection and serialization can't break.
+- reuse what's expensive (compiled regexes), never pool what's cheap (small objects).
+- the GC can't free what you still point at. clear slots in classes that manage their own arrays.
+- close with try-with-resources. cleaners are a safety net, finalizers are on their way out.
+</Keylines>

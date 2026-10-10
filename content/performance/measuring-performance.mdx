@@ -1,0 +1,132 @@
+import { LatencyHistogram } from "@/components/figures/performance/LatencyHistogram";
+import { TailOdds } from "@/components/figures/performance/TailOdds";
+import { CoordinatedOmission } from "@/components/figures/performance/CoordinatedOmission";
+
+<InShort>
+latency isn't a number, it's a **distribution**, and the **mean** is the least useful thing you can say about it. measure a histogram and report **percentiles**: p50 for the typical case, p99 and p99.9 for the tail, and the max.
+
+then check that the tool doing the measuring isn't lying: **coordinated omission** is when a load generator stops sending requests exactly while the system is slow, so the slowness never gets recorded.
+</InShort>
+
+## the picture
+
+your commute is "25 minutes on average". once a month there's an accident and it's two hours. when you have a flight to catch, which number do you plan around? the average doesn't even hint that the two-hour day exists. that's the whole problem with averages: they're dominated by the boring majority and they smear the rare disaster into a rounding error.
+
+servers have accident days constantly. a GC pause, a cache miss storm, a lock convoy, a slow disk. each one is rare per request, and each one is exactly what a user remembers.
+
+## a real distribution
+
+here's a tiny "request" (build a `HashMap` of 40 entries, walk it), called two million times in a row, each call timed on its own:
+
+```java title="Latency.java" run
+import java.util.*;
+
+public class Latency {
+    static long sink;
+
+    static long handle(int id) {
+        HashMap<String, Integer> m = new HashMap<>();
+        for (int i = 0; i < 40; i++) m.put("item-" + (id + i), i);
+        long sum = 0;
+        for (Map.Entry<String, Integer> e : m.entrySet()) sum += e.getKey().hashCode() ^ e.getValue();
+        return sum;
+    }
+
+    public static void main(String[] args) {
+        int warm = 300_000, n = 2_000_000;
+        for (int i = 0; i < warm; i++) sink += handle(i);   // let the JIT finish first
+        long[] lat = new long[n];
+        for (int i = 0; i < n; i++) {
+            long t0 = System.nanoTime();
+            sink += handle(i);
+            lat[i] = System.nanoTime() - t0;
+        }
+        long[] s = lat.clone();
+        Arrays.sort(s);
+        System.out.printf("mean %.0f ns%n", Arrays.stream(lat).average().orElse(0));
+        for (double p : new double[] {50, 90, 99, 99.9, 99.99})
+            System.out.printf("p%s %d ns%n", p, s[(int) Math.ceil(p / 100 * n) - 1]);
+        System.out.printf("max %d ns  (sink %d)%n", s[n - 1], sink & 1);
+    }
+}
+```
+
+no output shown because it changes every run. here's one run, with `-Xmx64m`, as a histogram:
+
+<Figure wide caption={<>two million requests, jdk 25 on an apple M4 Pro. click the statistics. both axes are logarithmic, or the tail would be invisible. the <C k="dead">red</C> bump on the right is a couple of hundred requests that ran into a GC pause.</>}>
+<LatencyHistogram />
+</Figure>
+
+look at where the mean is: 855 ns, right next to the median. by the mean, this code is fine. and it mostly is. but one request in ten thousand took over 100 µs, and the slowest took 225 µs, and the mean has no way of telling you. those requests barely move it: the worst one shifted it by about a tenth of a nanosecond.
+
+the bump is the garbage collector. in a rerun with `-Xlog:gc` ([reading GC logs](/learn/gc/reading-gc-logs)), G1 logged 244 young pauses of 0.1 to 0.4 ms while the loop ran, which is about how many requests landed out there. that rerun also had a p99.99 of 155 µs and a max of 2.3 ms. the tail of a distribution is noisy from run to run, which is one more reason to look at the whole shape instead of one number.
+
+## why the tail matters more than it looks
+
+"p99" sounds like an edge case: one percent of requests, who cares. but a user doesn't make one request. loading one page in a typical app fans out into dozens of calls to backends, caches and databases, and the page is as slow as its slowest call.
+
+<Figure caption={<>drag the number of calls. each square is one page load; <C k="dead">red</C> ones include at least one call slower than the chosen percentile. this is just 1 − 0.99<sup>n</sup>, assuming the calls are independent.</>}>
+<TailOdds />
+</Figure>
+
+forty calls per page, and a third of all page loads include a p99 call. that's why big services set their targets on p99 and p99.9, and why "our average latency is 20 ms" is not a defence when users say the site feels slow.
+
+<Quiz question="three servers report their p99 latency: 10 ms, 12 ms and 50 ms, each handling the same traffic. what's the p99 across all three?" options={["24 ms, the average", "50 ms, the worst", "can't tell from those numbers"]} answer={2}>
+<Explain>
+you can't tell. percentiles don't average, and they don't combine. the overall p99 depends on the whole shape of all three distributions: it's somewhere between 10 and 50 ms here, but where exactly needs the raw data. that's why monitoring systems ship *histograms* around (HdrHistogram, prometheus histograms) and compute percentiles at the end, instead of averaging percentiles from each machine or each minute. averaging p99s is one of the most common mistakes on dashboards.
+</Explain>
+</Quiz>
+
+## coordinated omission
+
+now the subtle one. here's how most hand-written load tests work: send a request, wait for the response, record how long it took, wait for the next tick, repeat. it looks completely reasonable.
+
+i wrote exactly that: a loop that wants one request every 10 ms for 5 seconds, against a "server" that answers in 1 ms, except that request #200 hits a one-second stall (think GC pause). here's what the loop recorded, next to what callers would actually have experienced:
+
+```text
+requests the loop actually sent: 401 of 500
+p50.0  naive     1000 us   corrected     1000 us
+p90.0  naive     1000 us   corrected   551000 us
+p99.0  naive     1001 us   corrected   956000 us
+p99.9  naive  1008072 us   corrected  1001000 us
+p100.0 naive  1008072 us   corrected  1001000 us
+```
+
+the naive loop's p99 is one millisecond. the honest p99 is almost a second. same system, same stall.
+
+<Figure wide caption={<>switch between the two views and change the stall. the loop only measures requests it sends, and it can't send while it's stuck waiting for the slow one. callers in real life don't wait for each other: every request that <em>should</em> have been sent during the stall was queued behind it.</>}>
+<CoordinatedOmission />
+</Figure>
+
+the name comes from Gil Tene: the load generator *coordinates* with the system under test (it backs off whenever the system is slow) and so *omits* exactly the samples that would have shown the problem. the system effectively decides which of its own bad moments get recorded.
+
+the fixes:
+
+- **measure from the intended start time**, not the moment you actually managed to send. that's what the corrected column does: a request scheduled at 2.01 s that could only start at 3.0 s waited 990 ms, and it's recorded that way.
+- **use an open-model load generator** that keeps sending on schedule no matter what (wrk2, Gatling's open injection profiles, k6's arrival-rate executors), instead of a fixed pool of users that each wait for their own response.
+- **record into a histogram** that can do the correction for you: HdrHistogram's `recordValueWithExpectedInterval` back-fills the samples a stalled loop missed.
+
+<Gotcha title="benchmarks that report only an average">
+"1.2 ms average" from a load test tells you almost nothing, and if the tool is closed-loop it may not even be true for the average. before trusting a latency number, ask four questions: what percentile is it, how many samples, measured from when (intended or actual start), and what was the max. if nobody can answer the third one, assume coordinated omission.
+</Gotcha>
+
+## the short list
+
+1. **look at the distribution.** a histogram, on log scales, before any single number.
+2. **report percentiles and the max**, with the sample count. p50, p90, p99, p99.9 are a good default.
+3. **never average percentiles.** merge histograms, then compute.
+4. **measure from the intended start time**, and drive load open-loop.
+5. **warm up and know your environment.** the JIT changes the numbers for the first seconds ([the JIT](/learn/jvm/interpreter-and-jit)), GC changes the tail ([choosing a collector](/learn/gc/choosing-a-gc)), and a laptop is not a server.
+6. **for tiny pieces of code, don't use a loop and `nanoTime` at all.** the JIT will happily delete the code you're timing. that's the [next chapter](/learn/performance/jmh).
+
+<Interview q="our average latency is 40 ms but users say the app is slow. what's going on?">
+the average hides the tail. latency distributions are skewed: most requests are fast and a few are very slow (GC pauses, cache misses, contention, slow dependencies), and the mean stays low while p99 or p99.9 is terrible. users feel the tail more than the mean, because one page makes many calls: with 40 calls per page, a third of page loads include a p99-slow call. i'd pull the latency histogram and look at p99, p99.9 and max, check how the numbers were measured (closed-loop load tests suffer from coordinated omission and hide stalls), and line the slow requests up with GC logs or a JFR recording to find the cause.
+</Interview>
+
+<Keylines>
+- latency is a distribution. the mean is its least useful summary.
+- report p50, p99, p99.9 and max, from a histogram, with a sample count.
+- tails compound: a page with 40 calls hits a p99 call a third of the time.
+- percentiles can't be averaged. merge histograms instead.
+- a load tool that waits for responses stops measuring exactly when things are slow. measure from the intended start.
+</Keylines>

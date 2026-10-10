@@ -1,0 +1,90 @@
+import { GcPicker } from "@/components/figures/gc/GcPicker";
+
+<InShort>
+every collector trades between three things: **throughput** (how much of the CPU your app gets), **latency** (how long the pauses are) and **footprint** (how much memory it all takes). you can have two of them cheaply. all three costs money, usually in the form of more heap or more cores.
+
+start with the default (G1), measure, and switch only when a GC log tells you to.
+</InShort>
+
+## the picture
+
+you know the "fast, cheap, good: pick two" joke? garbage collection is that, with real numbers attached. a stop-the-world collector wastes the least CPU but makes everyone wait. a concurrent collector barely pauses but needs spare cores and spare heap to stay ahead. a tiny collector saves memory but can't be both.
+
+<Figure caption={<>drag the <C k="hot">point</C> toward what you care about most. the numbers under each collector are measured on the same program (the toy service from <a href="/learn/gc/serial-and-parallel">serial and parallel</a>, 256 MB heap, jdk 25, median of three runs on a busy 14-core laptop), so compare them with each other, not with your production.</>}>
+<GcPicker />
+</Figure>
+
+see how lopsided it is? on this program, ZGC's longest pause is hundreds of times shorter than Serial's, and its pauses add up to under 2 ms for the whole run. but this laptop had idle cores to lend. take those away and the picture changes: concurrent collectors do their work on other threads, and if there's no spare CPU, they fall behind.
+
+## the whole table
+
+here are all five on the same program, same settings. read it as "what happens to this workload", not as a ranking:
+
+| collector | longest pause | all pauses | wall clock | CPU (user) | GC's own memory |
+| --- | --- | --- | --- | --- | --- |
+| Serial | 26.6 ms | 1,413 ms | 2.08 s | 2.07 s | 0.8 MB |
+| Parallel | 21.7 ms | 521 ms | 1.19 s | 2.50 s | 37.9 MB |
+| G1 | 8.3 ms | 515 ms | 1.30 s | 2.65 s | 59.6 MB |
+| Shenandoah | 5.0 ms | 49 ms | 1.16 s | 1.50 s | 15.5 MB |
+| ZGC | 0.039 ms | 1.7 ms | 1.11 s | 1.65 s | 1.4 MB |
+
+a few honest caveats. this program has one app thread on a 14-core machine, so the concurrent collectors had 13 cores to themselves (which is why their CPU numbers look so good). "GC's own memory" is the native memory tracking `GC` category of an idle program with a 256 MB heap: ZGC keeps most of its bookkeeping elsewhere and reserves a lot more address space than the others, so don't read that column as "ZGC is free". and one toy program is one toy program. your app's mix of allocation rate, live set and thread count decides which collector wins. that's why the last step is always [reading the logs](/learn/gc/reading-gc-logs) of your own app under real load.
+
+<Quiz question="a 2 vCPU container, 1 GB of memory, a REST service. what's the reasonable first pick?" options={["ZGC, for the low pauses", "G1, the default, then measure", "Epsilon, to avoid GC entirely"]} answer={1}>
+<Explain>
+with 2 vCPUs, a concurrent collector has almost no spare CPU to work with, so its pauses stop being free. and 1 GB gives little headroom. G1 is the default for a reason: predictable pauses with modest overhead. on JDKs before 27 the JVM might actually pick Serial here by itself (fewer than 2 CPUs or less than 1792 MB), which is also often fine for a small heap. measure before switching.
+</Explain>
+</Quiz>
+
+## what the JVM picks for you
+
+| JDK | if you don't choose |
+| --- | --- |
+| 8 | Parallel (Serial on small "client" machines) |
+| 9 to 26 | G1, except Serial when the machine has 1 CPU or less than 1792 MB of memory (JEP 248) |
+| 27+ | G1, always (JEP 523) |
+
+in a container, "the machine" is whatever the container limits say. i checked on jdk 25: `-XX:ActiveProcessorCount=1` is enough to make the JVM pick Serial. the default max heap is 25% of the memory it sees (`-XX:MaxRAMPercentage=25`), except on tiny machines where it goes up to half: with a 256 MB limit you get a 128 MB heap, with 512 MB also 128 MB, with 4 GB 1 GB. more in [the JVM in containers](/learn/performance/jvm-in-containers).
+
+## Epsilon: the collector that doesn't
+
+`-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC` (java 11, JEP 318) allocates and never frees anything. when the heap is full, the JVM exits. here's the toy service on a 64 MB heap:
+
+```text title="java -XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC -Xmx64m -Xlog:gc Service.java" nolines
+[0.010s][info][gc] Using Epsilon
+[0.029s][info][gc] Heap: 65536K reserved, 65536K (100.00%) committed, 5510K (8.41%) used
+...
+[0.058s][info][gc] Heap: 65536K reserved, 65536K (100.00%) committed, 63399K (96.74%) used
+Terminating due to java.lang.OutOfMemoryError: Java heap space
+```
+
+58 milliseconds. that's the point: it's for runs where you know the total allocation fits (short-lived jobs, some serverless functions), for measuring a program's raw allocation and barrier-free speed, and for testing that latency-sensitive code really doesn't allocate. it is not a production collector for anything long-running.
+
+## the cheat sheet
+
+| you want | flags |
+| --- | --- |
+| the default, with a pause goal | `-XX:MaxGCPauseMillis=100` (G1, nothing else needed) |
+| max throughput, batch | `-XX:+UseParallelGC` |
+| tiny heap, few cores | `-XX:+UseSerialGC` |
+| lowest pauses | `-XX:+UseZGC` |
+| lowest pauses, compressed oops | `-XX:+UseShenandoahGC` (generational: add `-XX:ShenandoahGCMode=generational`) |
+| no GC at all | `-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC` |
+| heap size | `-Xmx`, `-Xms`, or `-XX:MaxRAMPercentage` in containers |
+| see what it's doing | `-Xlog:gc*:file=gc.log:time,uptime,level,tags` |
+
+<Gotcha title="tuning before measuring">
+the most common GC tuning is a block of flags copied from a blog post about a different JVM, a different collector and a different app, ten years ago. `-Xmn`, `-XX:SurvivorRatio`, `-XX:+UseConcMarkSweepGC` (removed in java 14), `-XX:+AggressiveOpts` (gone for years). on a modern JVM, a heap size, a collector, and maybe a pause goal is usually all it needs. turn on GC logging first, and change one flag at a time with the log open.
+</Gotcha>
+
+<Interview q="how would you choose a garbage collector for a new service?">
+start from the default, G1, with a sensible heap size, and turn on GC logging. run it under realistic load and look at pause times, how often GCs happen, and how much CPU the GC uses. if p99 latency is dominated by GC pauses and there are spare cores and heap, try ZGC (or Shenandoah). if it's a batch job where only total runtime matters, try Parallel. if it's a tiny container, Serial may be best. compare with the same load, change one thing at a time, and keep whatever the measurements say, not what a blog said.
+</Interview>
+
+<Keylines>
+- throughput, latency, footprint: every collector picks a spot in that triangle.
+- G1 is the default (since 9, and everywhere since 27). start there.
+- ZGC and Shenandoah buy tiny pauses with spare CPU and heap headroom.
+- Parallel wins batch jobs. Serial wins tiny heaps. Epsilon never frees anything.
+- tune from your own GC logs, one flag at a time.
+</Keylines>

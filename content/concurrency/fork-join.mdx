@@ -1,0 +1,139 @@
+import { SplitTree } from "@/components/figures/concurrency/SplitTree";
+import { WorkStealing } from "@/components/figures/concurrency/WorkStealing";
+
+<InShort>
+**fork/join** is divide and conquer on threads: a task too big to do directly splits itself in two, **forks** one half, computes the other, and **joins** the results. a **`ForkJoinPool`** runs these with **work stealing**: every worker has its own deque of tasks, and a worker that runs dry steals from the other end of someone else's deque. it's what parallel streams run on.
+</InShort>
+
+## the picture
+
+a stack of 64 exam papers to grade, four teachers. one teacher takes the whole stack, splits it, puts half on her own pile and keeps grading-and-splitting the rest. the others are standing around with nothing, so they walk over and take from the *bottom* of her pile, which is where the biggest untouched chunk is. she keeps working from the top of her own pile, they work from the bottom, and they almost never reach for the same papers.
+
+that's the trick: the owner and the thieves work opposite ends of the same pile, so they rarely collide, and a thief who steals grabs a big chunk and doesn't need to come back for a while.
+
+## split, compute, join
+
+the classic shape is `RecursiveTask<V>` (returns a value) or `RecursiveAction` (doesn't). `compute()` either does the work directly or splits:
+
+```java title="Main.java" run output="49999995000000\n49999995000000"
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RecursiveTask;
+import java.util.stream.LongStream;
+
+class Sum extends RecursiveTask<Long> {
+    static final int THRESHOLD = 10_000;
+    final long[] a;
+    final int lo, hi;
+
+    Sum(long[] a, int lo, int hi) { this.a = a; this.lo = lo; this.hi = hi; }
+
+    @Override
+    protected Long compute() {
+        if (hi - lo <= THRESHOLD) {                    // small enough: just do it
+            long s = 0;
+            for (int i = lo; i < hi; i++) s += a[i];
+            return s;
+        }
+        int mid = (lo + hi) >>> 1;
+        Sum left = new Sum(a, lo, mid);
+        left.fork();                                   // push the left half onto my deque
+        long right = new Sum(a, mid, hi).compute();    // do the right half myself
+        return right + left.join();                    // then collect the left half
+    }
+}
+
+void main() {
+    long[] a = LongStream.range(0, 10_000_000).toArray();
+    long total = ForkJoinPool.commonPool().invoke(new Sum(a, 0, a.length));
+    IO.println(total);
+    IO.println(LongStream.of(a).parallel().sum());     // a parallel stream: same pool, same idea
+}
+```
+
+<Figure wide caption={<>the task tree for summing 16 numbers. step through the splits, the <C k="hot">leaves</C> computed with a plain loop, and the joins adding results back up to <C k="live">136</C>. a smaller threshold means a deeper tree: more parallelism, but more overhead per element.</>}>
+<SplitTree />
+</Figure>
+
+notice the shape of `compute()`: fork one half, **compute the other yourself**, then join. the current thread never sits idle waiting for both halves.
+
+<Compare>
+<Bad label="fork both, then wait">
+```java
+left.fork();
+right.fork();
+return left.join() + right.join();
+```
+</Bad>
+<Good label="fork one, do the other">
+```java
+left.fork();
+long r = right.compute();
+return r + left.join();
+```
+</Good>
+</Compare>
+
+the left version works, but this thread pushes two tasks and then immediately waits, so one task's worth of work moves through the deque for nothing. and if you join in the wrong order (`right.join()` first, when `left` was forked last), the thread can't just pop its own most recent task, and has to do more expensive helping. fork one, compute one.
+
+## work stealing
+
+each worker owns a **double-ended queue**. the owner pushes forked tasks onto the **top** and pops from the top (LIFO: the newest task, the smallest one, whose data is still in its cache). an idle worker picks a victim and takes from the **base** (FIFO: the oldest task, which, in a divide-and-conquer tree, is the biggest one left).
+
+<Figure wide caption={<>press run. worker 0 starts with everything and forks halves onto the top of its deque. the others are idle, so they <C k="hot">steal</C> from the base, getting the biggest chunks. then they split those, and the work spreads by itself. each leaf takes 2 ticks; joins aren't drawn.</>}>
+<WorkStealing />
+</Figure>
+
+the numbers from a real run line up with that. summing 200 million longs with a threshold of 100,000 (so 2,000 leaf tasks) on a 14-worker pool, jdk 25, arm mac:
+
+<Figure caption={<>median of 5 runs after warm-up, plain wall-clock timing. 2,000 leaf tasks needed only <C k="hot">31 steals</C> in total: each steal moved a big subtree, not a single leaf.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "sequential loop", value: 75 },
+    { label: "fork/join, 14 workers", value: 16, tone: "live" },
+    { label: "parallel stream", value: 13, tone: "live" },
+  ]}
+/>
+</Figure>
+
+about 4.7× faster with 14 workers, not 14×. summing is memory-bound: the cores spend most of their time waiting for the array to stream in from RAM, and adding more cores doesn't make RAM faster. CPU-heavy leaves (hashing, image filters, simulations) scale much closer to the core count.
+
+## join doesn't just wait
+
+when a worker calls `join()` on a task that isn't done, it doesn't simply park. if the task is still sitting in its own deque, it pops it and runs it right there. if a thief took it, the worker can help by running tasks from the thief's deque. so a pool of 4 threads can run a recursion thousands of tasks deep without 4,000 blocked threads. that's also why fork/join tasks should be small, CPU-bound and non-blocking: the whole scheme assumes a worker is always either computing or helping.
+
+## the common pool
+
+`ForkJoinPool.commonPool()` is one JVM-wide pool, with parallelism of (cores − 1) by default, since the thread that submits work usually helps too. on my 14-core machine, that's 13. it's used by:
+
+- parallel streams (`list.parallelStream()`, `stream.parallel()`)
+- `CompletableFuture.supplyAsync(...)` and the other `*Async` methods without an executor
+- `Arrays.parallelSort`, `Arrays.parallelSetAll`...
+
+so one library that blocks in the common pool slows down every parallel stream in your app. if you need isolation, create your own `new ForkJoinPool(n)` and `invoke` tasks on it.
+
+<Gotcha title="don't block inside fork/join tasks">
+a fork/join worker stuck on I/O or a lock is a core doing nothing, and the pool won't add a thread to compensate (unless you go through `ForkJoinPool.managedBlock`). a parallel stream that calls a REST API per element is the classic way to freeze the common pool. for blocking work use a regular executor or [virtual threads](/learn/concurrency/virtual-threads).
+</Gotcha>
+
+<Quiz question="why do thieves take from the base of a deque instead of the top?" options={["it's the only end that's thread-safe", "the base holds the oldest, largest tasks, and it's the end the owner isn't using", "the top is reserved for the common pool"]} answer={1}>
+<Explain>
+in a recursive split, the oldest task left in a deque is the biggest unsplit chunk, so one steal gives the thief lots of work. and since the owner pushes and pops at the top, thieves at the base rarely collide with it: the two ends only fight when the deque is down to its last task.
+</Explain>
+</Quiz>
+
+<Deep title="the same pool runs virtual threads">
+the scheduler that mounts [virtual threads](/learn/concurrency/virtual-threads) on carrier threads is a `ForkJoinPool` too, in FIFO "async mode", with work stealing between carriers. different jobs, same machinery: a set of workers with per-worker queues, stealing whenever one runs dry.
+</Deep>
+
+<Interview q="what is work stealing?">
+each worker thread in a ForkJoinPool has its own deque. it pushes the subtasks it forks onto one end and pops from that same end, so it works LIFO on its own most recent, cache-hot tasks. when a worker runs out of work, it steals from the other end of another worker's deque, taking the oldest and typically largest task. contention is low because owners and thieves work opposite ends, and load balances itself without a central queue.
+</Interview>
+
+<Keylines>
+- fork/join: split until small, compute the leaves, combine on the way back up.
+- fork one half, compute the other yourself, then join.
+- every worker has a deque. owners use the top, thieves take from the base.
+- a stolen task is the oldest and biggest, so steals are rare and cheap.
+- parallel streams and `*Async` without an executor share the common pool. never block in it.
+</Keylines>

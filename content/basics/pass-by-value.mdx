@@ -1,0 +1,167 @@
+import { ValueVsReference } from "@/components/figures/basics/ValueVsReference";
+
+export const pbv = {
+  file: "Main.java",
+  source: `public class Main {
+    static class Box {
+        int value;
+        Box(int value) { this.value = value; }
+    }
+
+    static void swap(int a, int b) {
+        int temp = a;
+        a = b;
+        b = temp;
+    }
+
+    static void fill(Box b) {
+        b.value = 99;
+    }
+
+    static void replace(Box b) {
+        b = new Box(-1);
+    }
+
+    public static void main(String[] args) {
+        int x = 1, y = 2;
+        swap(x, y);
+        Box box = new Box(7);
+        fill(box);
+        replace(box);
+        System.out.println(x + " " + y + " " + box.value);
+    }
+}`,
+  steps: [
+    {"line": 22, "frames": [{"name": "main", "locals": {}}], "heap": {}, "note": "main starts."},
+    {"line": 23, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}], "heap": {}, "note": "x and y are two ints, sitting right in main's frame."},
+    {"line": 8, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}, {"name": "swap", "locals": {"a": 1, "b": 2}}], "heap": {}, "note": "swap(x, y) copies the VALUES 1 and 2 into swap's own a and b. two brand new variables that happen to start with the same numbers."},
+    {"line": 9, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}, {"name": "swap", "locals": {"a": 1, "b": 2, "temp": 1}}], "heap": {}, "note": "temp = a."},
+    {"line": 10, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}, {"name": "swap", "locals": {"a": 2, "b": 2, "temp": 1}}], "heap": {}, "note": "a = b. swap's a changes. main's x is a different variable, untouched."},
+    {"line": 11, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}, {"name": "swap", "locals": {"a": 2, "b": 1, "temp": 1}}], "heap": {}, "note": "b = temp. a and b are swapped... inside swap's frame, and nowhere else."},
+    {"line": 24, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}], "heap": {}, "note": "swap returns and its frame is thrown away, swap and all. x is still 1, y is still 2."},
+    {"line": 4, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}, {"name": "new Box", "locals": {"this": {"ref": "o1"}, "value": 7}}], "heap": {"o1": {"type": "Box", "fields": {"value": 0}, "state": "new"}}, "note": "new Box(7): the object appears on the heap with value 0, then the constructor runs."},
+    {"line": 24, "frames": [{"name": "main", "locals": {"x": 1, "y": 2}}], "heap": {"o1": {"type": "Box", "fields": {"value": 7}}}},
+    {"line": 25, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 7}}}, "note": "box holds a reference: an arrow to the Box, not the Box itself."},
+    {"line": 14, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}, {"name": "fill", "locals": {"b": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 7}}}, "note": "fill(box) copies the arrow. b and box are now two arrows to ONE object."},
+    {"line": 15, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}, {"name": "fill", "locals": {"b": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}}, "note": "b.value = 99 follows b's arrow and changes the object. main's box points at the same object, so it'll see 99."},
+    {"line": 26, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}}, "note": "fill returns. the change stuck, because it was made to the object, not to a variable."},
+    {"line": 18, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}, {"name": "replace", "locals": {"b": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}}, "note": "replace(box): b gets a copy of the arrow, again."},
+    {"line": 4, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}, {"name": "replace", "locals": {"b": {"ref": "o1"}}}, {"name": "new Box", "locals": {"this": {"ref": "o2"}, "value": -1}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}, "o2": {"type": "Box", "fields": {"value": 0}, "state": "new"}}, "note": "inside replace, a new Box(-1) is built..."},
+    {"line": 18, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}, {"name": "replace", "locals": {"b": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}, "o2": {"type": "Box", "fields": {"value": -1}}}},
+    {"line": 19, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}, {"name": "replace", "locals": {"b": {"ref": "o2"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}, "o2": {"type": "Box", "fields": {"value": -1}}}, "note": "...and b = new Box(-1) moves replace's arrow to it. main's box is a separate variable: it still points at the old Box."},
+    {"line": 27, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}, "o2": {"type": "Box", "fields": {"value": -1}, "state": "dead"}}, "note": "replace returns. nothing points at the Box(-1) anymore: garbage. main never saw it."},
+    {"line": 28, "frames": [{"name": "main", "locals": {"x": 1, "y": 2, "box": {"ref": "o1"}}}], "heap": {"o1": {"type": "Box", "fields": {"value": 99}}}, "stdout": "1 2 99\n", "note": "1 2 99. swap changed nothing, fill changed the object, replace changed only its own copy of the arrow."},
+  ],
+};
+
+<InShort>
+java **always** passes arguments **by value**: the method gets a **copy** of whatever is in the caller's variable. for a primitive, that's a copy of the number. for an object, the variable holds a **reference**, so the method gets a copy of the reference: it can change the object both arrows point at, but it can never make the caller's variable point somewhere else.
+</InShort>
+
+## the picture
+
+you know how a method can change an object you pass it, but can't swap two ints? people explain that as "primitives by value, objects by reference". it's a tempting story, and it's wrong. there's one rule, and it covers both.
+
+think of a house and its address on a slip of paper. passing a variable to a method is photocopying the slip and handing over the copy. the method can drive to the house and repaint it (you'll see the new paint, it's the same house). it can scribble a different address on its photocopy. that changes nothing on your slip. your slip still says where your house is.
+
+## the proof, step by step
+
+three methods, three experiments. `swap` gets two ints, `fill` changes an object's field, `replace` points its parameter at a new object.
+
+<Figure wide caption={<>a real recording from the JVM. watch the <C k="ref">arrows</C>. at step 11, two arrows lead to one Box, so the change shows up in main. at step 17, <code>replace</code> moved only its own arrow, and the new Box turns into <C k="dead">garbage</C> the moment it returns.</>}>
+<MemoryStepper trace={pbv} />
+</Figure>
+
+the program prints `1 2 99`, and every piece of that is the same rule:
+
+- **`swap(x, y)`**: `a` and `b` are copies of 1 and 2. swapping copies swaps copies.
+- **`fill(box)`**: `b` is a copy of the reference. copy or not, it leads to the same `Box`, and `b.value = 99` changes that `Box`.
+- **`replace(box)`**: `b = new Box(-1)` changes what `b` holds. `b` is a copy, so `box` in main never moves.
+
+<Figure caption={<>the whole chapter in one snapshot: inside <code>fill</code>, two separate variables in two separate frames, holding two copies of the same <C k="ref">reference</C>. one object. change the object and both see it; change a variable and only that variable changes.</>}>
+<Memory
+  frames={[
+    { name: "main", locals: { x: 1, y: 2, box: { ref: "b1" } } },
+    { name: "fill", locals: { b: { ref: "b1" } } },
+  ]}
+  heap={{ b1: { type: "Box", fields: { value: 99 } } }}
+/>
+</Figure>
+
+## what "by reference" would mean
+
+"pass by reference" is a real thing in other languages: the parameter isn't a copy at all, it's another name for the caller's variable. C++ has it (`int&`), C# has it (`ref`). java doesn't, for anything.
+
+<Figure wide caption={<>flip between what java does and what pass-by-reference would do, for both calls. the "reference" side is hypothetical: there's no syntax for it in java. the question to ask is always "is the parameter a separate slot?". in java, it always is.</>}>
+<ValueVsReference />
+</Figure>
+
+<Predict options={['"duke"', '"DUKE"', "null"]} answer={0}>
+```java
+void shout(String s) {
+    s = s.toUpperCase();
+}
+
+void main() {
+    String name = "duke";
+    shout(name);
+    IO.println(name);
+}
+```
+<Explain>
+`"duke"`. `s` is a copy of the reference. `toUpperCase()` builds a new string, and `s = ...` points the copy at it. `name` still points at `"duke"`. (and since strings are [immutable](/learn/basics/strings-101), there's no `fill`-style trick either: no method can change the `"duke"` object itself.)
+</Explain>
+</Predict>
+
+<Predict options={["[1, 2, 3]", "[99, 2, 3]", "[]"]} answer={1}>
+```java
+void reset(int[] arr) {
+    arr[0] = 99;
+    arr = new int[0];
+}
+
+void main() {
+    int[] nums = {1, 2, 3};
+    reset(nums);
+    IO.println(Arrays.toString(nums));
+}
+```
+<Explain>
+`[99, 2, 3]`. both moves in one method. `arr[0] = 99` follows the copied reference to the shared array, so `nums` sees it. `arr = new int[0]` re-points only the copy, so `nums` doesn't. same as `fill` then `replace`.
+</Explain>
+</Predict>
+
+## so how do you "return" more than one thing?
+
+since a method can't reassign the caller's variables, you hand results back instead:
+
+```java title="Main.java" run output="2 1"
+record Pair(int first, int second) {}
+
+Pair swap(int a, int b) {
+    return new Pair(b, a);
+}
+
+void main() {
+    var p = swap(1, 2);
+    IO.println(p.first() + " " + p.second());
+}
+```
+
+return a value (or a small [record](/learn/modern/records) holding several), and let the caller decide what to assign. it's also easier to read: you can see the change happening at the call site. the "mutate an object you were passed" style works too, and the JDK uses it (`Arrays.sort(a)`), but it's easy to surprise people with. [immutability](/learn/oop/immutability) is the story of avoiding those surprises.
+
+<Gotcha title="final parameters don't make the object final">
+`void fill(final Box b)` stops the method from re-pointing `b` (`b = new Box(-1)` won't compile), but `b.value = 99` still works: `final` locks the slot, not the object it points to. same for `final` fields and `final` locals. it's a promise about the arrow, never about the thing at the end of it.
+</Gotcha>
+
+<Interview q="is java pass-by-value or pass-by-reference?">
+always pass-by-value. the subtlety is what the value is: for object types, the variable holds a reference, so the method receives a copy of that reference. through it, the method can mutate the shared object, which looks like pass-by-reference. but assigning a new object to the parameter only changes the method's copy, and the caller's variable never moves, which is the actual test: you can't write a `swap(a, b)` in java that swaps the caller's variables. the JLS describes method invocation as initializing fresh parameter variables with the argument values.
+</Interview>
+
+<Keylines>
+- java passes everything by value: the parameter is a new variable holding a copy.
+- for objects, the copy is a copy of the reference. both arrows lead to one object.
+- changing the object through the parameter is visible to the caller.
+- re-pointing the parameter (`param = new ...`) never is.
+- want more than one result? return it, in a record if needed.
+</Keylines>

@@ -1,0 +1,221 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { Hoist } from "@/components/figures/effective-java/Hoist";
+import { SafetyLadder } from "@/components/figures/effective-java/SafetyLadder";
+
+<InShort>
+items 78 to 84: when threads share mutable data, **every** access needs synchronization, for visibility as much as for atomicity. keep locked regions small and never call unknown code inside them. use **executors** and the `java.util.concurrent` toolkit instead of raw threads and `wait`/`notify`, document how thread-safe your classes are, and never rely on the scheduler. **virtual threads** changed the economics of item 80, not the rules.
+</InShort>
+
+<Figure caption={<>items 78 to 84. virtual threads, the pinning fix and lazy constants touched four of them.</>}>
+<ItemMap
+  items={[
+    { n: 78, t: "share mutable data only with synchronization" },
+    { n: 79, t: "don't call alien code while holding a lock", lens: "synchronized no longer pins" },
+    { n: 80, t: "executors and tasks, not raw threads", lens: "virtual threads" },
+    { n: 81, t: "concurrency utilities over wait and notify" },
+    { n: 82, t: "document how thread-safe it is" },
+    { n: 83, t: "lazy initialization only when it pays", lens: "LazyConstant (preview)" },
+    { n: 84, t: "never depend on the thread scheduler", lens: "virtual threads" },
+  ]}
+/>
+</Figure>
+
+## sharing
+
+### item 78 · share mutable data only with synchronization
+
+synchronization does two jobs. **atomicity**: no thread sees an object halfway through a change. **visibility**: a write by one thread is guaranteed to be seen by another. people remember the first and forget the second, and the second is the one that makes programs hang:
+
+<Figure wide caption={<>flip <code>stop</code> to <code>volatile</code>. without it, the java memory model lets the JIT read the flag once and never again, so the worker <C k="dead">never stops</C>.</>}>
+<Hoist />
+</Figure>
+
+`volatile` fixes visibility only. `count++` is still three steps (read, add, write), so two threads can interleave and lose updates:
+
+<Compare>
+<Bad label="a plain long: lost updates">
+```java title="Main.java" run
+class Counter {
+    private long n;
+    void hit() { n++; }   // 3 steps
+    long get() { return n; }
+}
+
+static final int N = 1_000_000;
+
+void main() throws Exception {
+    var c = new Counter();
+    Runnable w = () -> {
+        for (int i = 0; i < N; i++)
+            c.hit();
+    };
+    var a = new Thread(w);
+    var b = new Thread(w);
+    a.start(); b.start();
+    a.join(); b.join();
+    IO.println(c.get()); // rarely 2000000
+}
+```
+</Bad>
+<Good label="AtomicLong: one atomic step">
+```java title="Main.java" run output="2000000"
+class Counter {
+    private final AtomicLong n =
+        new AtomicLong();
+    void hit() { n.incrementAndGet(); }
+    long get() { return n.get(); }
+}
+
+static final int N = 1_000_000;
+
+void main() throws Exception {
+    var c = new Counter();
+    Runnable w = () -> {
+        for (int i = 0; i < N; i++)
+            c.hit();
+    };
+    var a = new Thread(w);
+    var b = new Thread(w);
+    a.start(); b.start();
+    a.join(); b.join();
+    IO.println(c.get());
+}
+```
+</Good>
+</Compare>
+
+the left one printed 1,088,651, then 1,835,826, then 1,177,360 on three runs. the best way to avoid all of this is not to share mutable data: confine it to one thread, or share only immutable objects. why the rules are what they are is in [the java memory model](/learn/concurrency/java-memory-model) and [race conditions](/learn/concurrency/race-conditions).
+
+### item 79 · don't call alien code while holding a lock
+
+inside a `synchronized` block, never call a method you don't control: an overridable method, a listener, a callback, a lambda passed in by a client. it might take a long time (everyone waits), call back into your object (reentrancy surprises), or try to take another lock from another thread (deadlock). copy what you need under the lock, then call out after you release it (an "open call"):
+
+```java
+void publish(Event e) {
+    List<Listener> snapshot;
+    synchronized (this) { snapshot = List.copyOf(listeners); }  // short, nothing alien inside
+    for (var l : snapshot) l.onEvent(e);                       // alien code, no lock held
+}
+// or just keep listeners in a CopyOnWriteArrayList and skip the lock
+```
+
+and keep synchronized regions small in general: the cost today isn't the lock itself, it's lost parallelism and the CPUs agreeing on memory. classes meant for concurrent use should synchronize internally only if they can do much better than callers (like `ConcurrentHashMap` does); otherwise leave it to callers and say so (item 82).
+
+<Lens v={24}>there's a new reason for this item since virtual threads: before java 24, a virtual thread blocking inside `synchronized` **pinned** its carrier thread. JEP 491 (24) removed that, so `synchronized` and `ReentrantLock` are both fine with virtual threads now. see [virtual threads, inside](/learn/deep-dives/virtual-thread-internals).</Lens>
+
+## working
+
+### item 80 · executors and tasks, not raw threads
+
+a `Thread` is both the unit of work and the mechanism that runs it. an `ExecutorService` separates them: you submit tasks (`Runnable`, `Callable`), it decides how they run, and it gives you `Future`s, `invokeAll`, shutdown and (since 19) `close()` for try-with-resources. pick the executor by the kind of work.
+
+<Lens v={21}>for tasks that mostly wait (I/O, calls to other services), the right executor is now a virtual-thread-per-task one (`Executors` has a factory for it). virtual threads are cheap enough for one per task, so you stop sizing pools for blocking work:</Lens>
+
+<Figure caption={<>10,000 tasks that each sleep 10 ms, jdk 25, arm mac. a pool of 16 platform threads can only wait on 16 at a time. log scale.</>}>
+<Bars
+  unit="ms"
+  log
+  data={[
+    { label: "fixed pool, 16 threads", value: 7462, tone: "dead" },
+    { label: "fixed pool, 200 threads", value: 599 },
+    { label: "virtual thread per task", value: 34, tone: "live" },
+  ]}
+/>
+</Figure>
+
+CPU-bound work still wants a pool about the size of your core count (or a parallel stream, or fork/join). and don't pool virtual threads: they're meant to be created per task and thrown away. the full story is in [executors](/learn/concurrency/executors) and [virtual threads](/learn/concurrency/virtual-threads); [structured concurrency](/learn/concurrency/structured-concurrency) is the next step after that.
+
+### item 81 · concurrency utilities over wait and notify
+
+`wait` and `notify` are low-level and easy to misuse (always `wait` in a loop, prefer `notifyAll`, hold the lock). `java.util.concurrent` covers what people built with them: concurrent collections (`ConcurrentHashMap`, `BlockingQueue`) and synchronizers (`CountDownLatch`, `Semaphore`, `CyclicBarrier`, `Phaser`). here's a starting gun for workers, no `wait` in sight:
+
+```java title="Main.java" run output="all 3 finished, in parallel: true"
+import java.util.concurrent.*;
+
+void main() throws Exception {
+    int workers = 3;
+    var ready = new CountDownLatch(workers);
+    var go = new CountDownLatch(1);
+    var done = new CountDownLatch(workers);
+    try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+        for (int i = 0; i < workers; i++) {
+            pool.submit(() -> {
+                ready.countDown();          // "i'm here"
+                go.await();                 // wait for the starting gun
+                Thread.sleep(20);           // the actual work
+                done.countDown();
+                return null;
+            });
+        }
+        ready.await();                      // everyone is lined up
+        long start = System.nanoTime();
+        go.countDown();                     // bang
+        done.await();
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        IO.println("all " + workers + " finished, in parallel: " + (ms < 60));
+    }
+}
+```
+
+and for timing, `System.nanoTime`, never `currentTimeMillis` (it's not monotonic). more in [synchronizers](/learn/concurrency/synchronizers) and [wait and notify](/learn/concurrency/wait-and-notify).
+
+## promising
+
+### item 82 · document how thread-safe it is
+
+`synchronized` in a method signature is an implementation detail, not documentation (and it doesn't appear in javadoc). say which level the class offers, and for conditionally thread-safe classes, which lock callers must hold for which sequences:
+
+<Figure caption={<>the levels a class can promise, most to least friendly. click one to see what callers have to do.</>}>
+<SafetyLadder />
+</Figure>
+
+one more trick: a class that synchronizes on a **private lock object** (`private final Object lock = new Object()`) instead of `this` can't be disrupted by a client that grabs `this` as a lock for its own purposes.
+
+### item 83 · lazy initialization only when it pays
+
+lazy initialization trades a cheaper construction for a slower access, and adds a concurrency hazard. initialize normally unless measurement says otherwise. if you need it, pick the right idiom:
+
+- an instance field: a `synchronized` getter, or double-checked locking on a `volatile` field (details in [singletons and DCL](/learn/deep-dives/singleton-and-dcl)).
+- a static field: the **holder class** idiom. the JVM initializes the holder on first use, exactly once, with no locking on later reads:
+
+```java title="Main.java" run output="start\nloading...\nprod\nprod"
+class Config {
+    static String load() { IO.println("loading..."); return "prod"; }
+
+    private static class Holder {                 // initialized on first use, by the JVM,
+        static final String VALUE = load();       // exactly once, thread-safely
+    }
+    static String get() { return Holder.VALUE; }
+}
+
+void main() {
+    IO.println("start");
+    IO.println(Config.get());
+    IO.println(Config.get());
+}
+```
+
+<Lens v="27 preview">lazy constants (JEP 531, third preview in 27; first previewed as `StableValue` in 25) make this a one-liner: `LazyConstant.of(Config::load)` computes on the first `get()`, at most once, and the JIT can treat the result as a true constant afterwards. it's still preview, so code below needs `--enable-preview` on jdk 27 or 28:</Lens>
+
+```java title="Config.java (jdk 27+, preview)"
+class Config {
+    private static final LazyConstant<String> VALUE = LazyConstant.of(Config::load);
+    static String get() { return VALUE.get(); }
+}
+```
+
+### item 84 · never depend on the thread scheduler
+
+a program whose correctness or speed depends on how the OS schedules threads won't port and will break under load. keep the number of runnable threads close to the number of cores: threads that have no work should block (on a queue, a latch, a lock), not spin in a loop checking a flag. don't fix starvation with `Thread.yield()` or thread priorities, both are hints with platform-specific effects.
+
+<Lens v={21}>virtual threads make "one thread per task, blocked most of the time" cheap, which is exactly the shape this item recommends: lots of threads waiting, few running. if you truly must spin, `Thread.onSpinWait()` (9) tells the CPU you're spinning.</Lens>
+
+<Keylines>
+- synchronization is about visibility as much as atomicity. a plain flag can loop forever.
+- `volatile` gives visibility, not atomicity. `count++` needs an atomic or a lock.
+- copy under the lock, call alien code after. small locked regions.
+- submit tasks to executors. for blocking work, one virtual thread per task.
+- reach for java.util.concurrent before wait and notify.
+- document thread safety, lazy-initialize only when measured, never lean on the scheduler.
+</Keylines>

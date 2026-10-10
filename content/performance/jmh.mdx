@@ -1,0 +1,194 @@
+import { Bench } from "@/components/figures/meta/Bench";
+import { WarmupCurve } from "@/components/figures/performance/WarmupCurve";
+import { JmhRun } from "@/components/figures/performance/JmhRun";
+
+<InShort>
+timing a small piece of java with a loop and `System.nanoTime()` mostly measures what the JIT did to your loop. it deletes work whose result you ignore (**dead code elimination**), precomputes work on constants (**constant folding**), and the code gets faster for thousands of calls while it **warms up**.
+
+**JMH**, the java microbenchmark harness, exists to defend against all of that: separate JVMs per benchmark, warmup iterations that don't count, `Blackhole`s to keep results alive, and statistics on what's left.
+</InShort>
+
+## the benchmark that measured nothing
+
+you know the move: wrap the thing in a loop, check the clock before and after, divide. here it is, timing `Math.sqrt` and a small hash-mixing function, 200 million calls each, once with the result thrown away and once with it added to a sum:
+
+```java title="Main.java" run
+static int mix(int h) {
+    h ^= h >>> 16;
+    h *= 0x85ebca6b;
+    h ^= h >>> 13;
+    h *= 0xc2b2ae35;
+    return h ^ (h >>> 16);
+}
+
+void main() {
+    int n = 200_000_000;
+    for (int round = 1; round <= 5; round++) {
+        long t0 = System.nanoTime();
+        for (int i = 0; i < n; i++) Math.sqrt(i);          // result ignored
+        long t1 = System.nanoTime();
+        for (int i = 0; i < n; i++) mix(i);                // result ignored
+        long t2 = System.nanoTime();
+        int acc = 0;
+        for (int i = 0; i < n; i++) acc += mix(i);         // result used
+        long t3 = System.nanoTime();
+        double sum = 0;
+        for (int i = 0; i < n; i++) sum += Math.sqrt(i);   // result used
+        long t4 = System.nanoTime();
+        IO.println("round " + round + " (ps per call): sqrt ignored " + (t1 - t0) / (n / 1000)
+            + ", mix ignored " + (t2 - t1) / (n / 1000) + ", mix used " + (t3 - t2) / (n / 1000)
+            + ", sqrt used " + (t4 - t3) / (n / 1000) + "   " + acc + " " + sum);
+    }
+}
+```
+
+the real numbers from jdk 25 on an apple M4 Pro (rounds 3 to 5 agree to within a few picoseconds; here in nanoseconds per call):
+
+<Figure caption={<>zero is not fast. zero is <C k="dead">gone</C>: 200 million calls finished in no measurable time because the JIT proved nobody looks at the results and deleted the loop. the <C k="live">used</C> versions are the real cost.</>}>
+<Bench
+  unit="ns/op"
+  data={[
+    { label: "Math.sqrt, result ignored", value: 0.000, tone: "dead" },
+    { label: "mix(i), result ignored", value: 0.000, tone: "dead" },
+    { label: "mix(i), added to a sum", value: 0.505, tone: "live" },
+    { label: "Math.sqrt, added to a sum", value: 0.771, tone: "live" },
+  ]}
+/>
+</Figure>
+
+the first round (before C2 had finished with `main`'s loops) printed 6 picoseconds for the ignored `sqrt`, which is already absurd: a 4.5 GHz core can't do anything in a fortieth of a clock cycle. from round three on, both "ignored" loops took no time at all.
+
+this is [dead code elimination](/learn/jvm/jit-optimizations): `mix` has no side effects, so once it's inlined, a call whose result goes nowhere is a call that doesn't need to happen, and an empty loop doesn't need to run. it's a great optimization for real code and a disaster for benchmarks.
+
+## what JMH does about it
+
+the same experiment as JMH benchmarks:
+
+```java title="DeadCode.java"
+@BenchmarkMode(Mode.AverageTime)
+@OutputTimeUnit(TimeUnit.NANOSECONDS)
+@Warmup(iterations = 5, time = 1)
+@Measurement(iterations = 5, time = 1)
+@Fork(2)
+@State(Scope.Thread)
+public class DeadCode {
+    double x = 12345.678;                         // a field: the JIT can't treat it as a constant
+    static final double CONSTANT = 12345.678;     // a constant: it can
+
+    @Benchmark public void baseline() {}
+    @Benchmark public void sqrtDiscarded() { Math.sqrt(x); }
+    @Benchmark public double sqrtReturned() { return Math.sqrt(x); }
+    @Benchmark public void sqrtBlackhole(Blackhole bh) { bh.consume(Math.sqrt(x)); }
+    @Benchmark public double sqrtFolded() { return Math.sqrt(CONSTANT); }
+    @Benchmark public void logDiscarded() { Math.log(x); }
+    @Benchmark public double logReturned() { return Math.log(x); }
+}
+```
+
+<Figure caption={<>JMH 1.37, 2 forks × 5 one-second iterations. the <C k="dead">red</C> rows cost exactly as much as an empty method: their work was deleted (discarded) or done at compile time (folded). returning the value or handing it to a <code>Blackhole</code> keeps it <C k="live">alive</C>.</>}>
+<Bench
+  unit="ns/op"
+  data={[
+    { label: "baseline (empty method)", value: 0.384, err: 0.001 },
+    { label: "sqrt, result discarded", value: 0.384, err: 0.01, tone: "dead" },
+    { label: "sqrt of a static final constant", value: 0.381, err: 0.001, tone: "dead" },
+    { label: "sqrt, result returned", value: 0.707, err: 0.009, tone: "live" },
+    { label: "sqrt, into a Blackhole", value: 0.712, err: 0.005, tone: "live" },
+    { label: "log, result discarded", value: 4.687, err: 0.018 },
+    { label: "log, result returned", value: 4.773, err: 0.209 },
+  ]}
+/>
+</Figure>
+
+two defences, both visible there:
+
+- **return the result, or `consume` it.** JMH takes whatever a `@Benchmark` method returns and feeds it to a `Blackhole`, an object designed so the JIT can't prove the value is unused. with more than one value, take a `Blackhole` parameter and call `bh.consume(...)` on each. (on jdk 25 JMH uses the JVM's built-in "compiler blackholes", and prints a note saying so at startup.)
+- **read inputs from `@State` fields, not constants.** `Math.sqrt(CONSTANT)` was computed by the JIT once, at compile time, and the benchmark measured returning a number.
+
+and one honest surprise. `Math.log` was *not* eliminated: discarded and returned cost the same. on this CPU the JIT turns `Math.log` into a call to a hand-written stub it can't see inside, so it can't prove the call is side-effect free. on another JVM or CPU, the same broken benchmark might get deleted. a benchmark that's only correct by accident on your machine is still broken.
+
+## warmup, forks, iterations
+
+the other trap is time. a method's first call and its ten-thousandth call are running different code: interpreted, then C1-compiled with profiling, then C2-compiled with everything the profile taught it. JMH can show this directly with single-shot mode, which times individual calls in a fresh JVM:
+
+<Figure wide caption={<>the first sixty calls of a stream that groups 5,000 strings by length, in three separate JVMs. click the phases. the <C k="live">dashed line</C> is the same method fully warmed up. call one is 80 times slower.</>}>
+<WarmupCurve />
+</Figure>
+
+that's why a JMH run is shaped the way it is:
+
+<Figure caption={<>a real run, iteration by iteration. light cells were warmup, dark cells were measured. the score is the mean of the 15 dark cells; the ± is a 99.9% confidence interval computed from them.</>}>
+<JmhRun />
+</Figure>
+
+- **forks** (`@Fork`): each benchmark runs in its own freshly started JVM, so benchmark A's profile can't pollute benchmark B's. the JIT compiles call sites based on the types it has seen; run a benchmark that passes `ArrayList` and then one that passes `LinkedList` in the same JVM, and the second one inherits a megamorphic call site the first one never had. more than one fork also shows you how much the result varies from JVM to JVM (it can, because JIT decisions aren't deterministic).
+- **warmup iterations** (`@Warmup`): run the benchmark for a while and throw the numbers away, until the JIT and the caches settle.
+- **measurement iterations** (`@Measurement`): run it more, and keep these.
+- **modes**: `AverageTime` (time per call), `Throughput` (calls per time), `SampleTime` (a latency histogram of individual calls), `SingleShotTime` (cold, one call per iteration, which is how the curve above was made).
+
+## running one
+
+the official way is the maven archetype (`org.openjdk.jmh:jmh-java-benchmark-archetype`), which sets up the annotation processor and builds a `benchmarks.jar`. the processor matters: JMH is itself an [annotation processor](/learn/meta/annotation-processing) that generates the harness code around your methods. without a build tool, it's two commands:
+
+```bash
+$ javac -cp jmh-core-1.37.jar -processorpath jmh-generator-annprocess-1.37.jar:jmh-core-1.37.jar:jopt-simple-5.0.4.jar:commons-math3-3.6.1.jar -d classes DeadCode.java
+$ java -cp classes:jmh-core-1.37.jar:jopt-simple-5.0.4.jar:commons-math3-3.6.1.jar org.openjdk.jmh.Main DeadCode
+...
+Benchmark               Mode  Cnt  Score   Error  Units
+DeadCode.baseline       avgt   10  0.384 ± 0.001  ns/op
+DeadCode.sqrtDiscarded  avgt   10  0.384 ± 0.010  ns/op
+DeadCode.sqrtReturned   avgt   10  0.707 ± 0.009  ns/op
+```
+
+useful flags: `-f`, `-wi`, `-i` override the annotations; `-prof gc` adds allocation per operation (often more telling than time); `-prof stack` shows where threads spend time; on linux, `-prof perfasm` prints the hottest generated assembly, which is how you *prove* the JIT did what you think.
+
+<Quiz question="spot the bug. this benchmark reports 0.3 ns for building a list of 1000 elements." options={["the list is too small to measure", "the result is never used, so the work is deleted", "ArrayList should be presized", "it needs more warmup"]} answer={1}>
+```java
+@Benchmark
+public void build() {
+    List<Integer> list = new ArrayList<>();
+    for (int i = 0; i < 1000; i++) list.add(i);
+}
+```
+<Explain>
+the list never escapes the method and nothing reads it, so after inlining, escape analysis and dead code elimination can remove the allocation and the loop. 0.3 ns is "an empty method" on most machines, a giveaway. return `list` (JMH will consume it) or pass a `Blackhole`. presizing would change what you measure, not fix the bug.
+</Explain>
+</Quiz>
+
+<Quiz question="spot the bug. this benchmark of a sort looks great: 2 µs for 10,000 ints." options={["Arrays.sort is just that fast", "after the first call, the array is already sorted", "the result isn't consumed", "the state should be Scope.Benchmark"]} answer={1}>
+```java
+@State(Scope.Thread)
+public class SortBench {
+    int[] data = new Random(42).ints(10_000).toArray();
+
+    @Benchmark
+    public int[] sort() {
+        Arrays.sort(data);
+        return data;
+    }
+}
+```
+<Explain>
+`Arrays.sort` sorts in place. the first call sorts the data and every call after that sorts an already-sorted array, which is much cheaper. you need fresh input each time: copy it (`int[] a = data.clone(); Arrays.sort(a);`, and measure the clone separately), or reset it in a `@Setup(Level.Invocation)` method, which JMH warns has its own timing overhead for very short benchmarks.
+</Explain>
+</Quiz>
+
+<Gotcha title="running benchmarks from the IDE with forks off">
+JMH's `@Fork(0)` (or `-f 0`) runs every benchmark inside one JVM, usually the one your IDE started with a debugger agent attached. results then depend on which benchmarks ran before (profile pollution), and the JVM flags aren't the ones you'd use in production. fine for checking that a benchmark compiles. never for numbers you're going to quote.
+</Gotcha>
+
+<Deep title="what a microbenchmark can and can't tell you">
+JMH tells you how fast a small piece of code is in isolation, on this JVM, this CPU, with this input. it can't tell you what happens when that code runs next to everything else: the caches it shares with other code ([mechanical sympathy](/learn/performance/mechanical-sympathy)), the GC pressure from the rest of the app, the inlining budget it competes for. use it to compare alternatives for a hot spot you've already found with a [profiler](/learn/performance/profiling-and-flame-graphs), and expect the real-world difference to be smaller than the benchmark says. the JMH samples (`JMHSample_01` to `_39`, in the JMH repository) are the best tour of the traps, one per file.
+</Deep>
+
+<Interview q="how would you benchmark two implementations of a method in java?">
+with JMH, not a loop and `System.nanoTime()`. a hand-rolled loop gets optimized in ways that make the number meaningless: dead code elimination removes work whose result is unused, constant folding precomputes work on constant inputs, and the code speeds up while the JIT warms up. JMH runs each benchmark in forked JVMs, does warmup iterations that don't count, keeps results alive through a `Blackhole`, reads inputs from `@State` fields, and reports a mean with a confidence interval. i'd return or consume every result, use realistic inputs with `@Param`, run several forks, check `-prof gc` for allocation, and only trust a difference that's bigger than the error bars. then i'd confirm it matters in the real application with a profiler.
+</Interview>
+
+<Keylines>
+- a loop and `nanoTime` measures what the JIT left of your code. sometimes that's nothing.
+- return or `consume` every result, and read inputs from `@State` fields, not constants.
+- the first call can be 80× slower than the warmed-up one. warmup iterations don't count.
+- each fork is a fresh JVM, so benchmarks can't pollute each other's profiles.
+- a result that's only right by accident on your machine is still wrong.
+</Keylines>

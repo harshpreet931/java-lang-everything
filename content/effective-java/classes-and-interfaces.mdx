@@ -1,0 +1,372 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { AccessRings } from "@/components/figures/effective-java/AccessRings";
+import { SelfUse } from "@/components/figures/effective-java/SelfUse";
+
+<InShort>
+items 15 to 25 are about the shape of your types. hide everything you can (**encapsulation**), make objects **immutable** unless there's a reason not to, **compose** instead of extending classes you don't control, and model "one of these kinds" as a **sealed** hierarchy instead of a class with a type tag.
+</InShort>
+
+<Figure caption={<>eleven items. <C k="hot">amber</C> marks the ones records, sealed types, modules and default methods changed.</>}>
+<ItemMap
+  items={[
+    { n: 15, t: "make everything as private as it can be", lens: "modules" },
+    { n: 16, t: "public classes expose methods, not fields", lens: "records" },
+    { n: 17, t: "make things immutable", lens: "records, List.copyOf" },
+    { n: 18, t: "compose, don't extend" },
+    { n: 19, t: "design for subclassing, or forbid it", lens: "sealed classes" },
+    { n: 20, t: "prefer interfaces to abstract classes", lens: "default methods" },
+    { n: 21, t: "default methods can't save a bad interface", lens: "java 8 learned this" },
+    { n: 22, t: "interfaces are types, not bags of constants" },
+    { n: 23, t: "no tagged classes, use a hierarchy", lens: "sealed + switch patterns" },
+    { n: 24, t: "nested classes: static unless you need the outer this", lens: "javac drops unused this$0" },
+    { n: 25, t: "one top-level class per source file", lens: "multi-file launcher" },
+  ]}
+/>
+</Figure>
+
+## hiding things
+
+### item 15 · make everything as private as it can be
+
+encapsulation is what lets you change a class without breaking its users. start every member at `private`, and loosen only when a real caller needs it. `protected` feels cozy but it's public API: any subclass anywhere can depend on it forever.
+
+<Figure caption={<>pick an access level and see who can reach a member. <C k="live">green</C> can see it. since java 17 the module boundary is real: a public class in an unexported package is invisible outside its module.</>}>
+<AccessRings />
+</Figure>
+
+one sneaky leak: a `public static final` array. `final` stops you from replacing the array, not from changing what's in it.
+
+<Compare>
+<Bad label="anyone can rewrite it">
+```java title="Main.java" run output="delete"
+class Config {
+    public static final String[] MODES =
+        {"read", "write"};
+}
+
+void main() {
+    Config.MODES[0] = "delete";
+    IO.println(Config.MODES[0]);
+}
+```
+</Bad>
+<Good label="hand out an unmodifiable list">
+```java
+class Config {
+    public static final
+        List<String> MODES =
+            List.of("read", "write");
+}
+// Config.MODES.set(0, "x") throws
+// UnsupportedOperationException
+```
+</Good>
+</Compare>
+
+<Lens v={9}>modules added a level above `public`: a package is only reachable from other modules if `module-info.java` exports it. java 16 and 17 made the JDK's own internals strongly encapsulated, which is why reaching into `sun.*` now needs `--add-opens`. see [modules](/learn/tooling/modules).</Lens>
+
+### item 16 · public classes expose methods, not fields
+
+a public field can't validate, can't change representation, can't be made thread-safe, and can't be removed. an accessor can do all four. (package-private and private nested classes can expose fields, they're not API.)
+
+<Compare>
+<Bad label="the field is the API now">
+```java
+public class Point {
+    public int x;
+    public int y;
+}
+```
+</Bad>
+<Good label="the method is the API">
+```java
+public record Point(int x, int y) {}
+// p.x() is an accessor. the field
+// stays private and final.
+```
+</Good>
+</Compare>
+
+<Lens v={16}>for plain data, records end this item: private final fields, public accessors, nothing to write. `java.awt.Point` and `Dimension` are the JDK's eternal reminders of what public mutable fields cost.</Lens>
+
+### item 17 · make things immutable
+
+an immutable object has one state, forever. it's thread-safe without locks, it can be shared and cached freely, and it makes a perfect map key or set element. the rules: no setters, a `final` class (or private constructors), `private final` fields, and no way for anyone to reach a mutable field inside.
+
+that last rule is the one records don't do for you. a record is **shallowly** immutable:
+
+<Compare>
+<Bad label="the record changed behind its back">
+```java title="Main.java" run output="[ada, bo]"
+record Team(String name,
+            List<String> members) {}
+
+void main() {
+    var list = new ArrayList<String>();
+    list.add("ada");
+    var team = new Team("core", list);
+    list.add("bo");
+    IO.println(team.members());
+}
+```
+</Bad>
+<Good label="copy in the compact constructor">
+```java title="Main.java" run output="[ada]"
+record Team(String name,
+            List<String> members) {
+    Team {
+        members = List.copyOf(members);
+    }
+}
+
+void main() {
+    var list = new ArrayList<String>();
+    list.add("ada");
+    var team = new Team("core", list);
+    list.add("bo");
+    IO.println(team.members());
+}
+```
+</Good>
+</Compare>
+
+"change" an immutable object by returning a new one (`BigDecimal.add`, `LocalDate.plusDays`, `String.strip`). the cost is an allocation per step, which is usually nothing (see item 6). when it isn't, a mutable companion (like `StringBuilder` for `String`) does the heavy lifting. the full story, including why `String` is immutable, is in [immutability](/learn/oop/immutability).
+
+<Lens v={16}>records + `List.copyOf` / `Map.copyOf` (10) make the immutable choice the short one. `java.time` (8) replaced the mutable `Date` and `Calendar`. and [valhalla](/learn/future/valhalla)'s value classes push further: immutable objects without identity, so the JVM can flatten them.</Lens>
+
+## inheritance
+
+### item 18 · compose, don't extend
+
+extending a class you don't control ties your correctness to its implementation details. the classic failure: you override one method and assume the others route through it.
+
+<Figure caption={<>the subclass guards <code>add</code>, but <code>addAll</code> and <code>add(index, e)</code> copy straight into ArrayList&apos;s array. <C k="hot">what you assumed</C> isn&apos;t what happens, so <C k="dead">nulls</C> get in.</>}>
+<SelfUse />
+</Figure>
+
+```java title="Main.java" run output="[null, ada, bo, null]"
+import java.util.*;
+
+class NoNullList<E> extends ArrayList<E> {
+    @Override public boolean add(E e) {
+        return super.add(Objects.requireNonNull(e, "no nulls here"));
+    }
+}
+
+public class Main {
+    public static void main(String[] args) {
+        var names = new NoNullList<String>();
+        names.add("ada");
+        names.addAll(Arrays.asList("bo", null)); // doesn't go through add()
+        names.add(0, null);                      // neither does this
+        System.out.println(names);
+    }
+}
+```
+
+and it's fragile in both directions: if a future JDK made `addAll` call `add`, a subclass that counted adds would suddenly double count. composition doesn't care. wrap the list, expose only what you check, forward the rest:
+
+```java
+final class NoNullList<E> {
+    private final List<E> items = new ArrayList<>();
+
+    void add(E e) { items.add(Objects.requireNonNull(e, "no nulls here")); }
+    void addAll(Collection<? extends E> es) { es.forEach(this::add); }
+    E get(int i) { return items.get(i); }
+    int size() { return items.size(); }
+}
+```
+
+inheritance is fine inside one package you own, or for classes designed to be extended (next item). it's also only right for a true "is-a". more in [composition over inheritance](/learn/oop/composition-over-inheritance).
+
+### item 19 · design for subclassing, or forbid it
+
+a class meant to be extended must document which overridable methods it calls on itself, and must never call them from a constructor: the subclass's override runs before the subclass's own constructor has set anything.
+
+<Predict options={["rendering hi, twice", "rendering null, then rendering hi", "it throws a NullPointerException"]} answer={1}>
+```java
+class Widget {
+    Widget() { render(); }         // calls an overridable method
+    void render() { }
+}
+
+class Label extends Widget {
+    private final String text;
+    Label(String text) { this.text = text; }
+    @Override void render() { IO.println("rendering " + text); }
+}
+
+void main() {
+    new Label("hi").render();
+}
+```
+<Explain>
+`new Label("hi")` first runs `Widget()`, which calls `render()`, which dispatches to `Label.render()`. but `Label`'s constructor body hasn't run yet, so `text` is still `null`, even though it's `final`. then the explicit `render()` call prints `rendering hi`. the init order is in [constructors and init order](/learn/oop/constructors-and-init-order).
+</Explain>
+</Predict>
+
+if you didn't design for it, forbid it: make the class `final`, or give it only private constructors and static factories.
+
+<Lens v={17}>`sealed` (17) adds a middle ground: subclassing allowed, but only by the classes you list in `permits`. and [flexible constructor bodies](/learn/modern/flexible-constructors) (25) let a subclass validate arguments before `super(...)`, though calling overridable methods from a constructor is still a bug.</Lens>
+
+## interfaces
+
+### item 20 · prefer interfaces to abstract classes
+
+a class can implement many interfaces but extend only one class, so an interface can be retrofitted onto existing classes and used as a mixin (`Comparable`, `AutoCloseable`). pair the interface with a **skeletal implementation** (`AbstractList`, `AbstractMap`) and implementers write only the essentials:
+
+```java title="Main.java" run output="[0, 1, 4, 9, 16, 25]\ntrue 5 [1, 4]"
+static List<Integer> squares(int n) {
+    return new AbstractList<>() {
+        @Override public Integer get(int i) { return Objects.checkIndex(i, n) * i; }
+        @Override public int size() { return n; }
+    };
+}
+
+void main() {
+    var sq = squares(6);
+    IO.println(sq);   // toString, iteration, equals: all inherited
+    IO.println(sq.contains(16) + " " + sq.indexOf(25) + " " + sq.subList(1, 3));
+}
+```
+
+two methods written, a full read-only `List` back: `contains`, `indexOf`, `subList`, `iterator`, `equals`, `hashCode`, all derived from `get` and `size`.
+
+<Lens v={8}>default methods (8) let an interface carry implementation, and private interface methods (9) let defaults share helpers. an interface still can't have instance fields, so the skeletal class still has a job. see [abstract classes and interfaces](/learn/oop/abstract-classes-and-interfaces).</Lens>
+
+### item 21 · default methods can't save a bad interface
+
+adding a default method to a published interface injects code into every existing implementation, without the authors knowing. java 8's own `Collection.removeIf` default was correct in general, but wrong for synchronized wrapper classes written before it existed: they didn't override it, so it ran without taking their lock. design interfaces carefully up front, and test them with several implementations before release. after that, they're hard to change.
+
+### item 22 · interfaces are types, not bags of constants
+
+an interface should say "an object of this type can do X". an interface that only holds constants (so classes can `implement` it to skip the prefix) leaks those constants into the implementing class's API forever.
+
+<Compare>
+<Bad label="the constant interface">
+```java
+interface Physics {
+    double G = 6.674e-11;
+}
+class Orbit implements Physics { }
+```
+</Bad>
+<Good label="a utility class + static import">
+```java
+final class Physics {
+    private Physics() {}
+    static final double G = 6.674e-11;
+}
+// import static ...Physics.G;
+```
+</Good>
+</Compare>
+
+### item 23 · no tagged classes, use a hierarchy
+
+a "tagged class" has a `kind` field and a `switch` on it in every method, plus fields that only make sense for some kinds. it's verbose, error-prone (add a kind, miss a switch) and wastes memory. the fix is a type per kind.
+
+<Compare>
+<Bad label="one class, a tag, and switches">
+```java
+class Shape {
+    enum Kind { CIRCLE, RECT }
+    final Kind kind;
+    double r;      // circles only
+    double w, h;   // rects only
+
+    double area() {
+        switch (kind) {
+            case CIRCLE: return Math.PI * r * r;
+            case RECT: return w * h;
+            default: throw new AssertionError();
+        }
+    }
+}
+```
+</Bad>
+<Good label="sealed interface + records">
+```java title="Main.java" run output="3.141592653589793\n6.0\n10.0"
+sealed interface Shape
+        permits Circle, Rect, Tri {}
+record Circle(double r)
+        implements Shape {}
+record Rect(double w, double h)
+        implements Shape {}
+record Tri(double b, double h)
+        implements Shape {}
+
+static double area(Shape s) {
+    return switch (s) {
+        case Circle c ->
+            Math.PI * c.r() * c.r();
+        case Rect(var w, var h) -> w * h;
+        case Tri(var b, var h) ->
+            b * h / 2;
+    };
+}
+
+void main() {
+    IO.println(area(new Circle(1)));
+    IO.println(area(new Rect(2, 3)));
+    IO.println(area(new Tri(4, 5)));
+}
+```
+</Good>
+</Compare>
+
+no `default` branch in the good version, on purpose: the switch is **exhaustive** over a sealed type, so adding a fourth record turns every unhandled switch into a compile error instead of a runtime `AssertionError`.
+
+<Lens v={21}>the book (2018) recommended an abstract class with one subclass per kind and a polymorphic `area()` method. that's still fine when the operations belong to the types. when the *operations* keep growing and the kinds are fixed, sealed types + records + pattern `switch` (finalized across 17 to 21) are the better fit. that's [data-oriented programming](/learn/modern/data-oriented-programming).</Lens>
+
+## odds and ends
+
+### item 24 · nested classes: static unless you need the outer this
+
+there are four kinds, and only one quietly holds a reference to its enclosing object:
+
+<Figure caption={<>the four kinds of nested class. the <C k="dead">inner</C> one carries a hidden reference to the outer instance, if it uses it.</>}>
+<Tree>{`
+nested classes
+    static member class     // a regular class that lives in another's namespace. the default choice
+    inner class #dead        // non-static. each instance points at an outer instance
+    anonymous class          // declared and instantiated in one expression. mostly lambdas now
+    local class              // declared inside a method. rare
+`}</Tree>
+</Figure>
+
+that hidden reference costs memory and can keep a big outer object alive (an inner-class listener registered somewhere global is a textbook leak). if the nested class doesn't need the outer instance, declare it `static`.
+
+```java title="Outer.java" run output="Handler [this$0]\nQuiet []\nNested []"
+public class Outer {
+    int clicks;
+    class Handler { void run() { clicks++; } } // uses the outer instance
+    class Quiet { }                            // doesn't
+    static class Nested { }
+
+    public static void main(String[] args) {
+        for (var c : new Class<?>[] { Handler.class, Quiet.class, Nested.class }) {
+            var names = java.util.Arrays.stream(c.getDeclaredFields()).map(f -> f.getName()).toList();
+            System.out.println(c.getSimpleName() + " " + names);
+        }
+    }
+}
+```
+
+<Lens v={18}>since java 18, javac leaves out the hidden `this$0` field when an inner class never uses it (that's why `Quiet` has none). don't lean on it: a non-static class still can't be created without an outer instance, and one use of the outer state brings the reference back. nested records, enums and interfaces are always static. all four kinds in [nested and inner classes](/learn/oop/nested-classes).</Lens>
+
+### item 25 · one top-level class per source file
+
+java lets you put several top-level classes in one file, and if two files define the same top-level class, which one you get depends on the order you pass files to `javac`. one class per file, named after it, makes that impossible. if you want helpers next to their user, make them static nested classes.
+
+<Lens v={22}>the multi-file source launcher (`java Main.java`, 22) compiles the other files it needs from the same directory, which only works when every class is findable by its file name. one more reason for one class per file.</Lens>
+
+<Keylines>
+- start private. protected and public are promises you keep forever.
+- immutable objects are simple, shareable and thread-safe. records are only shallowly so: copy mutable components.
+- extending a class you don't own ties you to its internals. compose and forward.
+- design a class for inheritance (no overridable calls in constructors) or make it final or sealed.
+- interfaces for types, skeletal classes for convenience, never interfaces for constants.
+- a type tag plus switches wants to be a sealed hierarchy of records.
+</Keylines>

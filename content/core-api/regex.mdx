@@ -1,0 +1,136 @@
+import { Backtracker } from "@/components/figures/core-api/Backtracker";
+
+<InShort>
+compile a **Pattern** once, make a **Matcher** for each input, then `find()`, `matches()` and read the **groups**. a pattern is immutable and thread-safe, a matcher isn't.
+
+java's engine **backtracks**: at every choice it tries the greedy option first and backs up when that fails. usually that's fast. with the wrong pattern and the wrong input, it's exponential.
+</InShort>
+
+## the picture
+
+a hiker on a trail full of forks, carrying a bag of breadcrumbs. at every fork they drop a crumb and take the most promising path. dead end? walk back to the last crumb and try the other path. the hiker always finds the way out if there is one, but a trail with lots of forks that all look the same can keep them walking for a very long time.
+
+that's java's regex engine. every `+`, `*`, `?` and `|` is a fork.
+
+## `Pattern` and `Matcher`
+
+```java title="Main.java" run output="09/10 at index 4\n12/10 at index 21\n09.10.2026\nfalse true\n[1, 22, 333]"
+import java.util.regex.*;
+
+static final Pattern DATE = Pattern.compile("(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})");
+
+void main() {
+    Matcher m = DATE.matcher("due 2026-10-09, paid 2026-10-12");
+    while (m.find()) {                                       // every match, left to right
+        IO.println(m.group("day") + "/" + m.group("month") + " at index " + m.start());
+    }
+    IO.println(DATE.matcher("2026-10-09").replaceAll("${day}.${month}.${year}"));
+    IO.println(DATE.matcher("on 2026-10-09").matches() + " " + DATE.matcher("on 2026-10-09").find());
+    IO.println(Pattern.compile("\\d+").matcher("a1b22c333").results().map(MatchResult::group).toList());
+}
+```
+
+the three ways to ask:
+
+| method | asks |
+| --- | --- |
+| `matches()` | does the **whole** input match? |
+| `lookingAt()` | does the input **start** with a match? |
+| `find()` | is there a match **anywhere** after the last one? call it in a loop |
+
+groups are numbered by their opening parenthesis from 1 (`group(0)` is the whole match). named groups `(?<day>...)` are easier to read and survive someone adding a group in front. `(?:...)` groups without capturing.
+
+<Gotcha title="String.matches compiles the pattern every single time">
+`s.matches(regex)`, `s.split(regex)` and `s.replaceAll(regex, x)` are shortcuts that call `Pattern.compile(regex)` and then match. compiling is real work: parsing the pattern into a tree of nodes. measured on jdk 25, `s.matches("[a-z]+@[a-z]+\\.com")` took about 130 ns per call vs about 21 ns with the pattern compiled once into a `static final Pattern`. in a loop over a million lines, compile once. (`split` has a fast path for a single plain character, so `split(",")` is fine.)
+</Gotcha>
+
+## the cheat sheet
+
+| syntax | means |
+| --- | --- |
+| `.` | any char except a line break (add `(?s)` to include them) |
+| `\d` `\w` `\s` | digit, word char `[a-zA-Z_0-9]`, whitespace. capitals negate: `\D` |
+| `[abc]` `[^abc]` `[a-z]` | one of, none of, a range |
+| `^` `$` `\b` | start, end, word boundary. `(?m)` makes `^`/`$` work per line |
+| `*` `+` `?` `{2,5}` | 0+, 1+, 0 or 1, between 2 and 5. **greedy**: as many as possible |
+| `*?` `+?` `??` | **lazy**: as few as possible |
+| `*+` `++` `?+` | **possessive**: as many as possible, and never give any back |
+| `(…)` `(?:…)` `(?<name>…)` | capturing group, non-capturing, named |
+| `\1` `\k<name>` | backreference: the same text a group matched |
+| `(?=…)` `(?!…)` | lookahead: must (not) follow, without consuming |
+| `(?i)` | case-insensitive from here on |
+
+in a java string literal every backslash is doubled: the regex `\d+` is written `"\\d+"`. text blocks don't help (they process escapes too).
+
+## how backtracking actually works
+
+<Figure wide caption={<>pick a preset, then step (or play). the <C k="hot">amber</C> piece of the pattern is being tried at the <C k="hot">↑</C>; <C k="dead">red</C> is a failure, and the engine backs up to its last choice. try <strong>&lt;.+&gt;</strong> vs <strong>&lt;.+?&gt;</strong>, then <strong>(a+)+b</strong> vs <strong>a+b</strong> and drag the number of a's. you can type your own pattern too.</>}>
+<Backtracker />
+</Figure>
+
+greedy `.+` first eats everything to the end of the input, then gives characters back one at a time until `>` can match. so `<.+>` on `<a><b>` matches the whole thing, not `<a>`. lazy `.+?` does the opposite: it takes one char and only takes more when the rest of the pattern fails.
+
+<Predict options={["<a>", "<a><b>", "<b>"]} answer={1}>
+```java
+Matcher m = Pattern.compile("<.+>").matcher("<a><b>");
+m.find();
+IO.println(m.group());
+```
+<Explain>
+greedy: `.+` grabs `a><b>`, then `>` has nothing left to match, so the engine backtracks one character at a time. the first time `>` fits is at the very last character. if you wanted one tag, `<.+?>` or, better, `<[^>]+>` (which can't run past a `>` at all, so it never needs to backtrack).
+</Explain>
+</Predict>
+
+## when backtracking explodes
+
+look at `(a+)+b` on `aaaa…!`. there's no `b`, so it must fail. but before it can say no, it has to try every way of splitting the a's between the inner `a+` and the outer `+`: `(aaaa)`, `(aaa)(a)`, `(aa)(aa)`, `(a)(aaa)`... that's 2<sup>n-1</sup> ways for n a's. in the figure, 10 a's already take over 10,000 steps, and every extra `a` doubles it. `a+b` on the same input: 190.
+
+this is the textbook example of **catastrophic backtracking**, and here's a twist worth knowing: on modern JDKs this exact pattern is fine. `java.util.regex` (the comment is right there in jdk 25's `Pattern.java`) remembers the input positions where a greedy, unbounded group loop already failed, and doesn't try them again. but the shortcut switches off in plenty of real patterns: a bounded repeat `{1,99}`, a lazy loop, a backreference anywhere in the pattern, a loop nested inside another quantified group.
+
+<Figure caption={<>matching n a's and a <code>!</code> with <code>matches()</code>, temurin 25 on an M4 Pro. the textbook <C k="live">(a+)+b</C> is rescued by java's memo. change <code>+</code> to <code>{"{1,99}"}</code> and it's <C k="dead">exponential</C> again: four times slower for every two extra a's. the possessive and atomic versions are instant.</>}>
+<Bars
+  unit="ms"
+  log
+  data={[
+    { label: "(a+)+b, n=26", value: 0.01, tone: "live" },
+    { label: "(a++){1,99}b, n=26", value: 0.002, tone: "live" },
+    { label: "(a+){1,99}b, n=20", value: 8.7, tone: "dead" },
+    { label: "(a+){1,99}b, n=22", value: 32, tone: "dead" },
+    { label: "(a+){1,99}b, n=24", value: 126, tone: "dead" },
+    { label: "(a+){1,99}b, n=26", value: 505, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+keep quadrupling and 30 a's lands around 8 seconds, for one 31-character string. if the input comes from a user, that's a denial-of-service bug with a name: **ReDoS**. the fixes, best first:
+
+- **write patterns that can't match the same text two ways.** `(a+)+` means the same as `a+`. nested quantifiers over the same characters are the smell.
+- **possessive or atomic** where you know backing up can't help: `(a++)`, `(?>a+)`. they match like greedy ones but drop their breadcrumbs.
+- **bound the input.** check the length before matching untrusted text.
+- **don't use a regex** for things that need a parser (nested brackets, HTML, emails beyond "has an @ and a dot").
+
+<Deep title="there's no timeout on Matcher">
+`java.util.regex` has no time limit and doesn't check for interrupts. a runaway match ties up its thread until it finishes. the known workaround: the matcher reads the input through `CharSequence.charAt`, so you can wrap the input in a `CharSequence` whose `charAt` checks a deadline (or `Thread.interrupted()`) and throws. it costs a little on every character, which is why it's not the default.
+</Deep>
+
+## replacing and splitting
+
+in a replacement string, `$1` and `${name}` refer to groups, and `\` escapes. which means a replacement that happens to contain a `$` blows up: `"price: 5".replaceAll("\\d", "$9")` throws an `IndexOutOfBoundsException` ("No group 9"). wrap literal replacements in `Matcher.quoteReplacement(...)`, and literal patterns in `Pattern.quote(...)`. since java 9 you can also pass a function that builds each replacement from the match:
+
+```java
+Pattern.compile("\\d+").matcher("a1b22c333").replaceAll(r -> "<" + r.group().length() + ">")   // a<1>b<2>c<3>
+```
+
+(and as you saw in [the string api](/learn/core-api/string-api), `String.split` and `String.replaceAll` take regexes too, so `"a.b".split(".")` is an empty array.)
+
+<Interview q="what is catastrophic backtracking?">
+a backtracking regex engine (java's is one) tries alternatives depth-first and backs up on failure. a pattern that can match the same text in many different ways, like nested quantifiers `(a+)+` or overlapping alternatives, makes a failing match try all of them: exponential in the input length. fixes: unambiguous patterns, possessive quantifiers or atomic groups, bounding input length, or a non-backtracking engine. bonus: java's `Pattern` memoizes failed positions for greedy unbounded group loops, so the textbook example is fast on modern JDKs, but a bounded quantifier or a backreference turns that off.
+</Interview>
+
+<Keylines>
+- `Pattern` once (`static final`), `Matcher` per input. pattern is thread-safe, matcher isn't.
+- `matches` = whole input, `find` = anywhere, groups by number or by name.
+- greedy takes everything and gives back; lazy takes little and asks for more; possessive never gives back.
+- nested quantifiers over the same text can be exponential. java rescues some cases, not all.
+- `$` in a replacement means a group. quote what you mean literally.
+</Keylines>

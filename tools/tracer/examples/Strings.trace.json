@@ -1,0 +1,139 @@
+{
+  "file": "Strings.java",
+  "source": "public class Strings {\n    public static void main(String[] args) {\n        String a = \"hi\";\n        String b = \"hi\";\n        String c = new String(\"hi\");\n        System.out.println(a == b);\n        System.out.println(a == c);\n        System.out.println(a.equals(c));\n\n        String d = a + \" there\";\n        String e = c.intern();\n        System.out.println(d + \" \" + (a == e));\n    }\n}\n",
+  "steps": [
+    {"line": 3, "frames": [{"name": "main", "line": 3, "locals": {}}], "heap": {}, "stdout": ""},
+    {
+      "line": 4,
+      "frames": [{"name": "main", "line": 4, "locals": {"a": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "String", "value": "\"hi\""}},
+      "stdout": "",
+      "changed": ["a"]
+    },
+    {
+      "line": 5,
+      "frames": [{"name": "main", "line": 5, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "String", "value": "\"hi\""}},
+      "stdout": "",
+      "changed": ["b"]
+    },
+    {
+      "line": 6,
+      "frames": [
+        {
+          "name": "main",
+          "line": 6,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o1"}, "c": {"ref": "o2"}}
+        }
+      ],
+      "heap": {"o1": {"type": "String", "value": "\"hi\""}, "o2": {"type": "String", "value": "\"hi\""}},
+      "stdout": "",
+      "changed": ["c"]
+    },
+    {
+      "line": 7,
+      "frames": [
+        {
+          "name": "main",
+          "line": 7,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o1"}, "c": {"ref": "o2"}}
+        }
+      ],
+      "heap": {"o1": {"type": "String", "value": "\"hi\""}, "o2": {"type": "String", "value": "\"hi\""}},
+      "stdout": "true\n"
+    },
+    {
+      "line": 8,
+      "frames": [
+        {
+          "name": "main",
+          "line": 8,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o1"}, "c": {"ref": "o2"}}
+        }
+      ],
+      "heap": {"o1": {"type": "String", "value": "\"hi\""}, "o2": {"type": "String", "value": "\"hi\""}},
+      "stdout": "true\nfalse\n"
+    },
+    {
+      "line": 10,
+      "frames": [
+        {
+          "name": "main",
+          "line": 10,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o1"}, "c": {"ref": "o2"}}
+        }
+      ],
+      "heap": {"o1": {"type": "String", "value": "\"hi\""}, "o2": {"type": "String", "value": "\"hi\""}},
+      "stdout": "true\nfalse\ntrue\n"
+    },
+    {
+      "line": 11,
+      "frames": [
+        {
+          "name": "main",
+          "line": 11,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o1"}, "c": {"ref": "o2"}, "d": {"ref": "o3"}}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"hi\""},
+        "o2": {"type": "String", "value": "\"hi\""},
+        "o3": {"type": "String", "value": "\"hi there\""}
+      },
+      "stdout": "true\nfalse\ntrue\n",
+      "changed": ["d"]
+    },
+    {
+      "line": 12,
+      "frames": [
+        {
+          "name": "main",
+          "line": 12,
+          "locals": {
+            "a": {"ref": "o1"},
+            "b": {"ref": "o1"},
+            "c": {"ref": "o2"},
+            "d": {"ref": "o3"},
+            "e": {"ref": "o1"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"hi\""},
+        "o2": {"type": "String", "value": "\"hi\""},
+        "o3": {"type": "String", "value": "\"hi there\""}
+      },
+      "stdout": "true\nfalse\ntrue\n",
+      "changed": ["e"]
+    },
+    {
+      "line": 13,
+      "frames": [
+        {
+          "name": "main",
+          "line": 13,
+          "locals": {
+            "a": {"ref": "o1"},
+            "b": {"ref": "o1"},
+            "c": {"ref": "o2"},
+            "d": {"ref": "o3"},
+            "e": {"ref": "o1"}
+          }
+        }
+      ],
+      "heap": {
+        "o1": {"type": "String", "value": "\"hi\""},
+        "o2": {"type": "String", "value": "\"hi\""},
+        "o3": {"type": "String", "value": "\"hi there\""}
+      },
+      "stdout": "true\nfalse\ntrue\nhi there true\n"
+    },
+    {
+      "line": 13,
+      "frames": [],
+      "heap": {},
+      "stdout": "true\nfalse\ntrue\nhi there true\n",
+      "note": "main returned, program ends"
+    }
+  ]
+}

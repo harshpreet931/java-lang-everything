@@ -1,0 +1,174 @@
+import { ScopeLab } from "@/components/figures/modern/ScopeLab";
+import { SwitchMatcher } from "@/components/figures/modern/SwitchMatcher";
+
+<InShort>
+a **pattern** tests a value and pulls it apart in one go. `o instanceof String s` checks the type *and* hands you `s`, already cast, in exactly the places where the test is known to be true (**flow scoping**). final in java 16.
+
+in a `switch` <Since v={21} />, every case can be a pattern: `case Integer i when i > 0`. you get **guards** (`when`), **`case null`**, and two compile-time checks that catch real bugs: **dominance** (a case that can never match) and **exhaustiveness** (an input that matches nothing).
+</InShort>
+
+## the picture
+
+you know the instanceof dance? check the type, then cast to the type you just checked, then name it, three times saying the same thing:
+
+<Compare>
+<Bad label="test, cast, name: three steps, one idea">
+```java
+if (o instanceof String) {
+    String s = (String) o;
+    IO.println(s.strip().length());
+}
+```
+</Bad>
+<Good label="a pattern: test and bind at once">
+```java
+if (o instanceof String s) {
+    IO.println(s.strip().length());
+}
+```
+</Good>
+</Compare>
+
+the cast was never the point, it was noise you had to write because the compiler didn't connect the check to the next line. a pattern makes the connection.
+
+think of the sorting belt at a post office. the old way: a worker checks if a parcel is a letter, shouts "letter!", and a second worker picks it up and puts a "letter" sticker on it. the new way: one scanner that checks the shape and slaps the sticker on in the same motion. and the sticker only exists on parcels that passed.
+
+## instanceof patterns and flow scoping
+
+the variable in a pattern (`s`) isn't scoped to a block like a normal local. it exists wherever javac can prove the match succeeded, and nowhere else. that sounds abstract until you see the shapes:
+
+<Figure wide caption={<>pick a shape. <C k="live">green</C> lines are where <code>s</code> is in scope. a <C k="dead">red</C> line uses <code>s</code> where the match isn&apos;t guaranteed, and javac 25 rejects it. the &quot;<code>if (!...) return</code>&quot; shape is the one worth remembering.</>}>
+<ScopeLab />
+</Figure>
+
+```java title="Main.java" run output="5\n5\nhello"
+void main() {
+    Object o = "  hello  ";
+    if (o instanceof String) {
+        String s = (String) o;
+        IO.println(s.strip().length());
+    }
+    if (o instanceof String s) {
+        IO.println(s.strip().length());
+    }
+    if (o instanceof String s && !s.isBlank()) {
+        s = s.strip();                     // pattern variables aren't final
+        IO.println(s);
+    }
+}
+```
+
+<Gotcha title="a pattern variable can lose to a field with the same name">
+flow scoping means that in the branch where the match *failed*, the pattern variable doesn't exist, so the name falls through to whatever else is called `s`: a field, say. it compiles, and does something you didn't mean:
+
+```java title="F.java" run output="not a string, but s is: a field\nhello ada"
+class F {
+    String s = "a field";
+
+    void greet(Object o) {
+        if (!(o instanceof String s)) {
+            System.out.println("not a string, but s is: " + s);
+            return;
+        }
+        System.out.println("hello " + s);
+    }
+
+    public static void main(String[] args) {
+        new F().greet(42);
+        new F().greet("ada");
+    }
+}
+```
+
+inside the first block, `s` is the field. after it, `s` is the pattern variable. don't reuse field names for pattern variables.
+</Gotcha>
+
+## patterns in switch
+
+`instanceof` tests one pattern. a `switch` tests a list of them, top to bottom, and the first one that matches wins. each case can add a **guard** with `when`, a boolean that has to be true too:
+
+```java title="Main.java" run output="null\nnegative int -3\nint 42\nblank string\nstring of length 2\nint[] of 3\nsomething else: 3.14\nsomething else: [1]"
+static String describe(Object o) {
+    return switch (o) {
+        case null                      -> "null";
+        case Integer i when i < 0      -> "negative int " + i;
+        case Integer i                 -> "int " + i;
+        case String s when s.isBlank() -> "blank string";
+        case String s                  -> "string of length " + s.length();
+        case int[] a                   -> "int[] of " + a.length;
+        default                        -> "something else: " + o;
+    };
+}
+
+void main() {
+    Object[] inputs = { null, -3, 42, " ", "hi", new int[] {1, 2, 3}, 3.14, List.of(1) };
+    for (Object o : inputs) IO.println(describe(o));
+}
+```
+
+<Figure wide caption={<>pick an input and watch the cases get tried in order: <C k="dead">✗</C> fails its type test or its guard, <C k="live">green</C> is the first match, everything below it is skipped. then delete the <code>case null</code> line and pass <code>null</code>. outputs are real jdk 25.</>}>
+<SwitchMatcher />
+</Figure>
+
+(that's the mental model. what javac actually emits is a single `invokedynamic` to `SwitchBootstraps.typeSwitch`, which works out the matching case index in one call instead of a chain of `instanceof`s.)
+
+## dominance
+
+because the first match wins, order matters, and javac checks it. if a case can never be reached because an earlier one always matches first, the later case is **dominated**, and that's a compile error, not a warning:
+
+<Defs>
+<dt>supertype first</dt><dd>`case CharSequence cs` then `case String s`: every `String` is a `CharSequence`, so the second case is dead.</dd>
+<dt>unguarded first</dt><dd>`case Integer i` then `case Integer i when i > 0`: the guard can never get a look in.</dd>
+<dt>pattern before constant</dt><dd>`case Integer i` then `case 42` (switching on an `Integer`): 42 already matched.</dd>
+<dt>default first</dt><dd>`default` then `case String s`: with patterns in play, `default` has to come after them.</dd>
+</Defs>
+
+all four get the same message from javac 25:
+
+```text
+error: this case label is dominated by a preceding case label
+```
+
+the fix is always to go from specific to general: constants, then guarded patterns, then plain patterns, then the catch-all.
+
+<Predict options={["positive", "number", "compile error"]} answer={2}>
+```java
+Object o = 5;
+String r = switch (o) {
+    case Integer i when i > 0 -> "positive";
+    case Number n -> "number";
+    case Integer i -> "int";
+    default -> "other";
+};
+IO.println(r);
+```
+<Explain>
+it never runs. `case Integer i` comes after `case Number n`, and every `Integer` is a `Number`, so the third case can never be reached. javac 25: `error: this case label is dominated by a preceding case label`, pointing at `case Integer i`. the guarded `Integer` case above is fine, guards make a case more specific. delete the dead line and it prints `positive`.
+</Explain>
+</Predict>
+
+## null and exhaustiveness
+
+two things the old `switch` did that pattern switches keep, and one they add:
+
+- **`null` still throws**, unless you ask. a `switch` on `null` throws `NullPointerException` before testing any case, exactly like before java 21. to handle it, add `case null`, or fold it into the catch-all with `case null, default ->`.
+- **pattern switches must be exhaustive.** a switch expression always had to cover every input; now a switch *statement* that uses patterns does too. over `Object` that means a `default` (or a total pattern like `case Object x`). miss it and javac says the switch statement "does not cover all possible input values".
+- **sealed types make exhaustiveness useful.** over a sealed interface, a case per permitted subtype is enough, no `default`, and adding a subtype later turns every incomplete switch into a compile error. that's the whole story in [sealed types](/learn/modern/sealed-types), and it gets better with [record patterns](/learn/modern/record-patterns).
+
+<Quiz question="which case order compiles?" options={["Object o, then String s", "guarded String, String, default", "default, then String s", "Integer i, then guarded Integer"]} answer={1}>
+<Explain>
+specific to general: the guarded `String` case, then the plain one, then `default`. every other option puts something general (`Object`, `default`, an unguarded `Integer`) in front of something it swallows, and javac rejects the later case as dominated.
+</Explain>
+</Quiz>
+
+<Interview q="what did java 21 add to switch?">
+patterns as case labels: `case String s`, with the variable bound and cast in that branch. guards with `when` to add a condition, `case null` instead of the automatic `NullPointerException`, and record patterns to destructure. javac checks dominance (a case after a more general one is a compile error) and exhaustiveness (a pattern switch must cover every input, which with a sealed hierarchy means one case per subtype and no `default`). instanceof got patterns earlier, in java 16, with flow scoping: the variable exists exactly where the match is guaranteed, including after an `if (!(o instanceof T t)) return;`.
+</Interview>
+
+<Keylines>
+- a pattern tests and binds at once: `o instanceof String s`.
+- flow scoping: the variable exists exactly where the match is guaranteed, even after an early return.
+- in switch, cases are tried top to bottom, first match wins, `when` adds a condition.
+- a case that can never match is a compile error (dominance). go specific to general.
+- `null` throws unless there's a `case null`. pattern switches must be exhaustive.
+</Keylines>

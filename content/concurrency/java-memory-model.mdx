@@ -1,0 +1,237 @@
+import { ReorderingSandbox } from "@/components/figures/concurrency/ReorderingSandbox";
+import { HappensBefore } from "@/components/figures/concurrency/HappensBefore";
+import { Outcomes } from "@/components/figures/concurrency/Outcomes";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const sb = [
+  {
+    name: "int x, y",
+    rows: [
+      { id: "0, 0", samples: 252253080, expect: "ACCEPTABLE_INTERESTING", desc: "both reads before both writes" },
+      { id: "0, 1", samples: 95700561, expect: "ACCEPTABLE", desc: "T1 first" },
+      { id: "1, 0", samples: 106632070, expect: "ACCEPTABLE", desc: "T2 first" },
+      { id: "1, 1", samples: 923, expect: "ACCEPTABLE", desc: "interleaved" },
+    ],
+  },
+  {
+    name: "volatile int x, y",
+    rows: [
+      { id: "0, 0", samples: 0, expect: "FORBIDDEN", desc: "volatile rules it out" },
+      { id: "0, 1", samples: 86974422, expect: "ACCEPTABLE", desc: "T1 first" },
+      { id: "1, 0", samples: 77810299, expect: "ACCEPTABLE", desc: "T2 first" },
+      { id: "1, 1", samples: 9913, expect: "ACCEPTABLE", desc: "interleaved" },
+    ],
+  },
+];
+
+export const mp = [
+  {
+    name: "plain ready",
+    rows: [
+      { id: "0, 0", samples: 366170474, expect: "ACCEPTABLE", desc: "not ready yet" },
+      { id: "0, 42", samples: 214678, expect: "ACCEPTABLE", desc: "data early, fine" },
+      { id: "1, 0", samples: 55084, expect: "ACCEPTABLE_INTERESTING", desc: "ready, but data is 0" },
+      { id: "1, 42", samples: 276091358, expect: "ACCEPTABLE", desc: "ready, with data" },
+    ],
+  },
+  {
+    name: "volatile ready",
+    rows: [
+      { id: "0, 0", samples: 150516778, expect: "ACCEPTABLE", desc: "not ready yet" },
+      { id: "0, 42", samples: 116122, expect: "ACCEPTABLE", desc: "data early, fine" },
+      { id: "1, 0", samples: 0, expect: "FORBIDDEN", desc: "ready, but data is 0" },
+      { id: "1, 42", samples: 152627014, expect: "ACCEPTABLE", desc: "ready, with data" },
+    ],
+  },
+];
+
+export const publish = [
+  { mem: { p: "null", "p.x": "·", "p.y": "·" }, note: "T1 runs p = new Point(1, 2). T2 polls: if (p != null) use p.x and p.y. Point's fields are plain ints." },
+  { ops: ["allocate Point", null], mem: { "p.x": 0, "p.y": 0 }, note: "the object exists with every field zeroed, before any constructor code runs." },
+  { ops: [{ t: "p = the new Point", k: "hot" }, null], mem: { p: { v: "→ Point", k: "ref" } }, note: "the reference gets published first. the JIT is allowed to move this store up (and the CPU to let it land early): nothing in T1 alone can tell the difference." },
+  { ops: [null, "p != null → read p.x"], mem: { "p.x": { v: 0, k: "dead" } }, note: "T2 sees a non-null p and reads x. it reads 0. the object is visible, its contents aren't." },
+  { ops: ["x = 1", null], mem: { "p.x": 1 } },
+  { ops: ["y = 2", null], mem: { "p.y": 2 } },
+  { ops: [null, { t: "read p.y → 2", k: "dead" }], note: "T2 ends up with x = 0, y = 2: a Point nobody ever constructed. make x and y final, and the JLS forbids this: anyone who sees the reference sees 1 and 2." },
+];
+
+<InShort>
+without synchronization, one thread may see another's writes late, never, or **in a different order** than they were made. the **java memory model** (JLS §17.4) is the contract that says when a write is guaranteed visible: when it **happens-before** the read. locks, `volatile`, `start()` and `join()` create those edges. no edge, no guarantee.
+</InShort>
+
+## the picture
+
+you'd think memory is one big shared whiteboard, and every write lands on it the instant it happens, in program order. that's the model in your head, and it has a name: **sequential consistency**. no real machine works like that, because it would be painfully slow.
+
+instead, every core keeps its own scribbles: values in registers, writes queued in a **store buffer** waiting to reach the cache, lines sitting in its private cache. on top of that, the JIT freely reorders, merges and deletes memory accesses when the current thread can't tell the difference. "the current thread can't tell" is the key phrase. *other* threads can.
+
+the memory model is the deal between you and all that machinery: write your program with proper happens-before edges, and everything behaves as if there were one whiteboard. skip them, and you get whatever the hardware and the JIT felt like.
+
+## the litmus test
+
+the classic four-line program that breaks everyone's intuition:
+
+```java title="StoreBuffering.java"
+int x = 0, y = 0;
+
+// thread 1          // thread 2
+x = 1;               y = 1;
+int r1 = y;          int r2 = x;
+```
+
+<Predict options={["no, at least one write comes first", "yes, both can be 0"]} answer={1}>
+after both threads finish, can `r1 == 0 && r2 == 0`?
+<Explain>
+yes. under any interleaving one of the writes has to come first, so the other thread must read a 1. but real CPUs don't interleave whole instructions like that. each write can sit in its core's store buffer while that same core's read runs ahead to memory, so both reads can see the old 0s. the java memory model allows it for plain fields. the figure below lets you do it by hand.
+</Explain>
+</Predict>
+
+<Figure wide caption={<>start in <strong>what you imagine</strong>: try every order, you'll only ever get 0,1 1,0 or 1,1. then switch to <strong>store buffers</strong>, step both writes first, then both reads. the writes are stuck in the <C k="hot">buffers</C>, so both reads see memory's 0. finally try <strong>volatile</strong>.</>}>
+<ReorderingSandbox />
+</Figure>
+
+this isn't a theoretical curiosity. I ran exactly this test with [jcstress](/learn/concurrency/testing-concurrent-code) (the OpenJDK tool built for testing the memory model) on jdk 25, on an arm mac:
+
+<Figure wide caption={<>real results, 454 million runs of the plain version and 165 million of the volatile one. with plain ints, the "impossible" <C k="hot">0, 0</C> was the single most common outcome. with volatile it never happened once, which is the <C k="dead">forbidden</C> line holding.</>}>
+<Outcomes tests={sb} />
+</Figure>
+
+that's not a broken CPU. ARM and x86 both have store buffers, and both allow this particular reordering (a store followed by a load of a *different* address). ARM allows a lot more than x86 does. the memory model has to work on all of them, so it promises very little for plain fields and lets you ask for more where you need it.
+
+## happens-before
+
+the JMM doesn't talk about caches or store buffers at all. it defines one relation between actions, **happens-before**, and one promise:
+
+> if a write happens-before a read of the same variable (and no other write sneaks in), the read sees that write.
+
+<Defs>
+<dt>program order</dt>
+<dd>within one thread, each action happens-before the next one. so a single thread always sees its own writes, in order.</dd>
+<dt>monitor</dt>
+<dd>an unlock of a monitor happens-before every later lock of that same monitor.</dd>
+<dt>volatile</dt>
+<dd>a write to a volatile field happens-before every later read of that field.</dd>
+<dt>thread start</dt>
+<dd>`t.start()` happens-before every action in `t`.</dd>
+<dt>thread end</dt>
+<dd>every action in `t` happens-before another thread's `t.join()` returning (or `t.isAlive()` returning false).</dd>
+<dt>transitivity</dt>
+<dd>if a happens-before b, and b happens-before c, then a happens-before c. this is where all the power is.</dd>
+</Defs>
+
+(there are a few more: interrupting a thread happens-before it noticing the interrupt, and the default zero of every field happens-before every thread's first action. the full list is JLS §17.4.4 and §17.4.5.)
+
+<Figure wide caption={<>click through the rules. <span className="text-mute">grey</span> arrows are program order. the <C k="hot">amber</C> arrow is the cross-thread edge the rule adds. when a chain of arrows connects <code>data = 42</code> to <code>r = data</code>, it turns <C k="live">green</C> and the read is guaranteed. on <C k="dead">no edge</C>, there's no chain, so there's no guarantee.</>}>
+<HappensBefore />
+</Figure>
+
+notice that the volatile edge protects `data`, which isn't volatile at all. T1's write of `data` happens-before its volatile write (program order), which happens-before T2's volatile read (volatile rule), which happens-before T2's read of `data` (program order). transitivity does the rest. this is called **piggybacking**, and it's how almost every concurrent class in the JDK publishes its state: one volatile or one lock, guarding a pile of plain fields.
+
+the jcstress version of that exact message-passing pattern, again on jdk 25:
+
+<Figure caption={<>T2 reads <code>ready</code> then <code>data</code>. with a plain flag, T2 saw <code>ready == true</code> but <code>data == 0</code> 55,084 times. rare, but it's the kind of rare that becomes a weekly incident at scale. making only the flag volatile took that to zero.</>}>
+<Outcomes tests={mp} head="ready, data" />
+</Figure>
+
+<Note title="data races, defined">
+two accesses to the same variable conflict if at least one is a write. a **data race** is two conflicting accesses not ordered by happens-before. the big theorem (JLS §17.4.5): if a program has no data races in any sequentially consistent execution, then every execution of it appears sequentially consistent. so if you get your edges right, you never have to think about store buffers again. that's the deal.
+</Note>
+
+## volatile: visibility, not atomicity
+
+a volatile field gives you two things: every read sees the latest write (in the happens-before sense), and plain reads and writes can't be moved across it in the dangerous directions. it's the cheapest synchronization java has.
+
+here's the stop flag from [effective java item 78](/learn/effective-java/concurrency), without volatile:
+
+```java title="StopThread.java"
+public class StopThread {
+    private static boolean stopRequested;
+
+    public static void main(String[] args) throws InterruptedException {
+        Thread background = new Thread(() -> {
+            long i = 0;
+            while (!stopRequested) i++;
+            System.out.println("stopped after " + i);
+        });
+        background.start();
+        Thread.sleep(1000);
+        stopRequested = true;
+        System.out.println("main: set stopRequested = true");
+    }
+}
+```
+
+on jdk 25 on my machine, three runs out of three printed `main: set stopRequested = true` and then hung forever, the background thread spinning on a core. with `-Xint` (interpreter only, no JIT) it stopped right away, after about 225 million iterations. so it's not that the write never reaches memory. it's that C2 compiled the loop, saw no happens-before edge that could ever change `stopRequested` inside it, and read the field *once*:
+
+```java
+// what the JIT is allowed to turn the loop into
+if (!stopRequested) {
+    while (true) i++;
+}
+```
+
+completely legal under the JMM. whether it actually hangs depends on the JIT, the timing and the platform, which is exactly the problem: it might pass every test and hang in prod. one keyword fixes it, and now it behaves the same every time:
+
+```java title="Main.java" run output="stopped\ndone"
+static volatile boolean stopRequested;
+
+void main() throws InterruptedException {
+    Thread background = new Thread(() -> {
+        long i = 0;
+        while (!stopRequested) i++;
+        IO.println("stopped");
+    });
+    background.start();
+    Thread.sleep(1000);
+    stopRequested = true;
+    background.join();
+    IO.println("done");
+}
+```
+
+<Gotcha title="volatile is not a lock">
+`volatile int count; count++;` is still read, add, write. two threads can both read 41 and both write 42, exactly like the [race conditions](/learn/concurrency/race-conditions) chapter. volatile is for one writer and many readers (flags, published references, state that's replaced, never modified). for read-modify-write, use [atomics](/learn/concurrency/atomics-and-cas) or a lock.
+</Gotcha>
+
+<Deep title="what the JIT actually emits for volatile">
+on x86, ordinary loads and stores are already strongly ordered except for the store-then-load case from the litmus test, so a volatile read is a plain load, and a volatile write is followed by a fence (a `lock`-prefixed instruction) that drains the store buffer. on ARM (aarch64), HotSpot uses the load-acquire and store-release instructions, `ldar` and `stlr`, which the hardware guarantees not to reorder with each other. same java semantics, different machine code. you never write any of it: you write `volatile`, the JIT picks the barriers.
+</Deep>
+
+## final fields and safe publication
+
+there's one more way to be surprised: seeing an object before it's finished. `p = new Point(1, 2)` is several steps (allocate, write `x`, write `y`, store the reference), and without happens-before, another thread can observe them in a different order.
+
+<Figure wide caption={<>a racy publication. T2 sees the <C k="ref">reference</C> before the field writes, and reads a <C k="dead">half-built object</C>. nothing here throws. it just quietly reads the wrong numbers.</>}>
+<Lanes threads={["T1", "T2"]} cells={["p", "p.x", "p.y"]} steps={publish} />
+</Figure>
+
+`final` fields come with a special guarantee (JLS §17.5): when a constructor finishes, its final fields are frozen, and any thread that gets a reference to the object *after* that sees the final fields' constructed values, **even if the reference was passed through a data race**. that's what makes immutable objects like `String` safe to share without any locking. the one way to break it: let `this` escape from the constructor (register a listener, start a thread, store `this` somewhere) before it finishes.
+
+for everything that isn't final, you need to **publish safely**, which just means: hand over the reference through a happens-before edge.
+
+| safe publication | why it works |
+| --- | --- |
+| initialize in a `static` initializer | class initialization is done under a lock by the JVM |
+| store into a `volatile` field or an `AtomicReference` | volatile write → read edge |
+| store into a `final` field of a properly constructed object | the final-field freeze |
+| store into a field guarded by a lock | unlock → lock edge |
+| put it in a concurrent collection (`ConcurrentHashMap`, a `BlockingQueue`) | they're built on volatiles, locks and CAS |
+
+the most famous unsafe publication is double-checked locking without `volatile`, which can hand out a half-constructed singleton. it gets its own chapter: [singletons and double-checked locking](/learn/deep-dives/singleton-and-dcl).
+
+<Deep title="long and double can tear">
+JLS §17.7: a write to a non-volatile `long` or `double` may be split into two 32-bit writes, so a racing reader could see the high half of one value and the low half of another. on a 64-bit HotSpot this doesn't happen in practice, but the spec allows it. `volatile long` and `volatile double` are always atomic. one more reason not to share plain fields.
+</Deep>
+
+<Interview q="what does volatile guarantee, and what doesn't it?">
+a write to a volatile field happens-before every subsequent read of it, so readers always see the latest value, and anything the writer did before the write is visible to a reader after the read. it also stops the JIT and CPU from reordering accesses across it in ways that break that. it does not make compound actions like `count++` or check-then-act atomic. use it for flags and for publishing immutable state, and use locks or atomics for read-modify-write.
+</Interview>
+
+<Keylines>
+- your intuition is sequential consistency. no CPU and no JIT actually gives you that for free.
+- a write is only guaranteed visible to a read if it happens-before it.
+- edges come from locks (unlock → lock), volatile (write → read), start, join, and transitivity.
+- no data races means the whole program behaves sequentially consistent. that's the deal.
+- volatile gives visibility and ordering, never atomicity.
+- final fields are safe even through a race. everything else needs safe publication.
+</Keylines>

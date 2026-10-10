@@ -1,0 +1,163 @@
+import { ForAnatomy } from "@/components/figures/basics/ForAnatomy";
+import { LabeledLoops } from "@/components/figures/basics/LabeledLoops";
+
+export const collatz = {
+  file: "Main.java",
+  source: `void main() {
+    int n = 6;
+    int steps = 0;
+    while (n != 1) {
+        if (n % 2 == 0) {
+            n = n / 2;
+        } else {
+            n = 3 * n + 1;
+        }
+        steps++;
+    }
+    IO.println(n + " after " + steps + " steps");
+}`,
+  steps: [
+    {"line": 2, "frames": [{"name": "main", "locals": {}}], "heap": {}, "note": "main starts."},
+    {"line": 3, "frames": [{"name": "main", "locals": {"n": 6}}], "heap": {}, "note": "n starts at 6. nobody knows in advance how many rounds this will take: that's what while is for."},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 6, "steps": 0}}], "heap": {}, "note": "the check: n != 1 is true, so in we go."},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 6, "steps": 0}}], "heap": {}, "note": "6 % 2 == 0, so 6 is even."},
+    {"line": 6, "frames": [{"name": "main", "locals": {"n": 6, "steps": 0}}], "heap": {}, "note": "even: halve it."},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 3, "steps": 0}}], "heap": {}, "note": "n is 3. count the step."},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 3, "steps": 1}}], "heap": {}, "note": "back to the check at the top, every time. 3 != 1, keep going."},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 3, "steps": 1}}], "heap": {}},
+    {"line": 8, "frames": [{"name": "main", "locals": {"n": 3, "steps": 1}}], "heap": {}, "note": "3 is odd, so n = 3n + 1."},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 10, "steps": 1}}], "heap": {}, "note": "n jumped up to 10. it can go up before it comes down."},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 10, "steps": 2}}], "heap": {}},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 10, "steps": 2}}], "heap": {}},
+    {"line": 6, "frames": [{"name": "main", "locals": {"n": 10, "steps": 2}}], "heap": {}},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 5, "steps": 2}}], "heap": {}},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 5, "steps": 3}}], "heap": {}},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 5, "steps": 3}}], "heap": {}},
+    {"line": 8, "frames": [{"name": "main", "locals": {"n": 5, "steps": 3}}], "heap": {}},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 16, "steps": 3}}], "heap": {}, "note": "16. from here it's halving all the way down: 8, 4, 2, 1."},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 16, "steps": 4}}], "heap": {}},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 16, "steps": 4}}], "heap": {}},
+    {"line": 6, "frames": [{"name": "main", "locals": {"n": 16, "steps": 4}}], "heap": {}},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 8, "steps": 4}}], "heap": {}},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 8, "steps": 5}}], "heap": {}},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 8, "steps": 5}}], "heap": {}},
+    {"line": 6, "frames": [{"name": "main", "locals": {"n": 8, "steps": 5}}], "heap": {}},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 4, "steps": 5}}], "heap": {}},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 4, "steps": 6}}], "heap": {}},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 4, "steps": 6}}], "heap": {}},
+    {"line": 6, "frames": [{"name": "main", "locals": {"n": 4, "steps": 6}}], "heap": {}},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 2, "steps": 6}}], "heap": {}},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 2, "steps": 7}}], "heap": {}},
+    {"line": 5, "frames": [{"name": "main", "locals": {"n": 2, "steps": 7}}], "heap": {}},
+    {"line": 6, "frames": [{"name": "main", "locals": {"n": 2, "steps": 7}}], "heap": {}},
+    {"line": 10, "frames": [{"name": "main", "locals": {"n": 1, "steps": 7}}], "heap": {}},
+    {"line": 4, "frames": [{"name": "main", "locals": {"n": 1, "steps": 8}}], "heap": {}, "note": "n is 1. the check is false, so the body is skipped and the loop is over."},
+    {"line": 12, "frames": [{"name": "main", "locals": {"n": 1, "steps": 8}}], "heap": {}, "note": "the first line after the loop."},
+    {"line": 13, "frames": [{"name": "main", "locals": {"n": 1, "steps": 8}}], "heap": {}, "stdout": "1 after 8 steps\n", "note": "8 steps. the body ran 8 times, the check ran 9."},
+  ],
+};
+
+<InShort>
+code runs top to bottom until something says otherwise. **`if`** picks a branch, **loops** (`while`, `do`, `for`, for-each) repeat, and **`break`** / **`continue`** jump out of or ahead in a loop. java also has **labeled** breaks, for jumping out of nested loops in one go.
+</InShort>
+
+## the picture
+
+think of a program as a recipe. by default you do step 1, then step 2, then step 3. control flow is the "if the dough is sticky, add flour" and the "stir until smooth" bits: the steps that decide which step comes next.
+
+every one of these statements is built on a **condition**: an expression that's a `boolean`. not a number, not "something truthy". exactly `true` or `false`.
+
+```java
+int x = 5;
+if (x = 5) IO.println("five"); // [!code error]
+```
+
+`error: incompatible types: int cannot be converted to boolean`. in C that line compiles and is a classic bug (it assigns). java refuses, because `if` only accepts booleans. you meant `x == 5`.
+
+## if, else if, else
+
+```java title="Main.java" run output="B"
+void main() {
+    int score = 72;
+    if (score >= 90) {
+        IO.println("A");
+    } else if (score >= 70) {
+        IO.println("B");
+    } else {
+        IO.println("C");
+    }
+}
+```
+
+conditions are checked top to bottom, and the **first** true one wins. everything after it is skipped, even if it would also be true. so order matters: put `score >= 70` first and nobody ever gets an A.
+
+braces are optional for a single statement. use them anyway: the day someone adds a second line under an unbraced `if`, it silently runs every time.
+
+## the for loop, in slow motion
+
+a `for` loop packs four things into one line, and they do **not** run left to right:
+
+<Figure wide caption={<>step through. the <C k="hot">amber</C> part is running right now; the check turns <C k="live">green</C> when it lets the body run and <C k="dead">red</C> when it ends the loop. notice the update runs <em>after</em> the body, and the check runs one more time than the body.</>}>
+<ForAnatomy />
+</Figure>
+
+`for (init; check; update)`: init once, then check → body → update, over and over, until the check is false. use it when you're counting. the variable declared in init (`i`) only exists inside the loop.
+
+## while and do-while
+
+`while` is the loop for "until something happens", when you can't know the count up front:
+
+<Figure wide caption={<>a real recording of this loop running (the collatz sequence from 6). step through, or press play. watch the check on line 4 run before every round, including the last one that fails.</>}>
+<MemoryStepper trace={collatz} />
+</Figure>
+
+`do { ... } while (check);` is the same loop with the check moved to the bottom, so the body always runs **at least once**. it's rare, mostly for "ask until the input is valid".
+
+```java title="Main.java" run output="do 10"
+void main() {
+    int n = 10;
+    while (n < 5) { IO.println("while " + n); n++; }
+    do { IO.println("do " + n); n++; } while (n < 5);
+}
+```
+
+the `while` checks first, sees `10 < 5` is false, and never runs. the `do` runs once, *then* checks.
+
+for going through every element of an array or a collection, there's the **for-each** loop: `for (int x : xs) { ... }`. no index, no off-by-one. it's the one you'll use most once you meet [arrays](/learn/basics/arrays).
+
+## break, continue, and labels
+
+`break` leaves the loop it's in. `continue` skips the rest of the current round and goes to the next one (in a `for`, that means the update runs next). in nested loops, both only affect the **innermost** loop, unless you give a loop a **label** and name it.
+
+<Figure wide caption={<>same nested loops, one jump at <code>i == 1 &amp;&amp; j == 2</code>. pick the jump and compare the grid and the real output. the label <code>outer:</code> names the outer loop so a jump from the inner loop can target it.</>}>
+<LabeledLoops />
+</Figure>
+
+labeled breaks are rare, and that's fine. when you need to stop searching a 2d grid the moment you find something, `break outer` is clearer than a `found` flag checked in two places. (pulling the loops into a method and using `return` is often clearer still.)
+
+<Predict options={["hi, three times", "hi, once", "nothing, it's an infinite loop", "compile error"]} answer={1}>
+```java
+for (int i = 0; i < 3; i++); {
+    IO.println("hi");
+}
+```
+<Explain>
+"hi", once. see the `;` right after the `for (...)`? that semicolon is the loop's body: an empty statement, run 3 times. the `{ ... }` block after it is just a block that runs once when the loop is done. javac doesn't warn. this one has eaten many afternoons.
+</Explain>
+</Predict>
+
+<Gotcha title="off by one">
+`for (int i = 1; i < n; i++)` runs n - 1 times. `for (int i = 0; i <= n; i++)` runs n + 1 times. the [debugging](/learn/start/debugging) chapter has a whole bug made of exactly this. the habit that prevents most of them: count from 0, use `<` with the length, and prefer for-each when you don't need the index.
+</Gotcha>
+
+<Interview q="what's the difference between break and continue? and what's a labeled break?">
+`break` exits the innermost loop (or switch) immediately. `continue` skips to the next iteration of the innermost loop: in a `for`, the update runs and then the check. a labeled break (`break outer;`) exits the loop with that label, even from inside nested loops, and a labeled continue jumps to the next iteration of the labelled loop. java has no `goto` (it's reserved, so you can't even use it as a name); labels are the only way to jump further than one level.
+</Interview>
+
+<Keylines>
+- conditions must be real `boolean`s. `if (x = 5)` doesn't compile in java.
+- `if / else if / else`: the first true branch wins, the rest are skipped.
+- `for` runs init once, then check → body → update until the check is false.
+- `while` checks first, `do-while` runs once then checks.
+- `break` and `continue` affect the innermost loop. label a loop to target it from inside.
+</Keylines>

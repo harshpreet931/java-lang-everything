@@ -1,0 +1,220 @@
+import { TcpTimeline } from "@/components/figures/io/TcpTimeline";
+import { SelectorLoop } from "@/components/figures/io/SelectorLoop";
+
+<InShort>
+a **socket** is one end of a TCP connection, and from java it's just a pair of streams: bytes in, bytes out. a `ServerSocket` waits for connections and hands you a new `Socket` for each one.
+
+the hard part is *many* connections. the classic answer was one thread per connection. the NIO answer is a **`Selector`**: one thread asks the OS which of thousands of sockets are ready, and only touches those. since java 21, **virtual threads** made the simple version scale again.
+</InShort>
+
+## the picture
+
+you know how a phone call needs both people to pick up before anyone talks, while a text just gets sent and maybe read? that's TCP and UDP. TCP sets up a connection first (a handshake), then guarantees everything arrives, in order, or tells you it couldn't. UDP sends single messages into the void, no promises.
+
+a TCP connection is a phone line between two programs, each identified by an IP address and a port (the extension number). the server picks a well-known extension and waits. the client dials it.
+
+<Figure wide caption={<>step through one connection's whole life. the left and right columns are the java calls; the middle is what goes over the wire. <C k="ref">blue</C> packets are caused by your code, grey ones the two kernels send on their own. the state under each name is what <code>netstat</code> would show.</>}>
+<TcpTimeline />
+</Figure>
+
+here's that conversation for real, server and client in one program over `localhost`. port 0 asks the OS for any free port, so it can't collide with anything:
+
+```java title="Main.java" run output="hello → HELLO\ntcp → TCP"
+import java.io.*;
+import java.net.*;
+
+void main() throws Exception {
+    try (var server = new ServerSocket(0)) {             // port 0: any free port
+        int port = server.getLocalPort();
+
+        Thread.ofVirtual().start(() -> {                 // the server side
+            try (Socket s = server.accept();
+                 var in = new BufferedReader(new InputStreamReader(s.getInputStream()));
+                 var out = new PrintWriter(s.getOutputStream(), true)) {
+                String line;
+                while ((line = in.readLine()) != null) out.println(line.toUpperCase());
+            } catch (IOException e) { throw new UncheckedIOException(e); }
+        });
+
+        try (var s = new Socket("localhost", port);       // the client side
+             var in = new BufferedReader(new InputStreamReader(s.getInputStream()));
+             var out = new PrintWriter(s.getOutputStream(), true)) {
+            for (String msg : new String[] { "hello", "tcp" }) {
+                out.println(msg);
+                IO.println(msg + " → " + in.readLine());
+            }
+        }
+    }
+}
+```
+
+see the onion from [i/o streams](/learn/io/io-streams)? `getInputStream()` is a raw byte stream; we wrapped it in a reader exactly like a file. `PrintWriter(out, true)` turns on autoflush, so `println` actually sends. forget that and both sides wait forever, each for the other to talk first.
+
+## TCP is a stream, not messages
+
+the most common networking bug: assuming one `write` on one side is one `read` on the other. TCP only promises the *bytes* arrive in order. how they're chopped into reads is up to the network, the kernel and timing.
+
+```java title="Main.java" run output="10 bytes in one read: helloworld"
+import java.net.*;
+
+void main() throws Exception {
+    try (var server = new ServerSocket(0);
+         var client = new Socket("localhost", server.getLocalPort());
+         var conn = server.accept()) {
+
+        client.getOutputStream().write("hello".getBytes());   // two separate writes
+        client.getOutputStream().write("world".getBytes());
+        Thread.sleep(100);                                     // let both arrive
+
+        byte[] buf = new byte[100];
+        int n = conn.getInputStream().read(buf);               // one read
+        IO.println(n + " bytes in one read: " + new String(buf, 0, n));
+    }
+}
+```
+
+two writes, one read. on a slow link it could just as easily be three reads of 3, 4 and 3 bytes. that's why every protocol has **framing**: a delimiter (HTTP/1's `\r\n`, the newline that `readLine()` looks for), or a length prefix (`DataOutputStream.writeInt(len)` then the bytes), so the reader knows where one message ends.
+
+<Quiz question="a client sends three 100-byte messages with three write() calls. the server calls read(buf) with a 1000-byte buffer. how many bytes can that first read return?" options={["exactly 100", "exactly 300", "anything from 1 to 300"]} answer={2}>
+<Explain>
+read returns as soon as *some* bytes are available, up to the buffer size. depending on timing it might get part of the first message, exactly one, or all three glued together. it never returns 0 on a blocking socket (it waits instead), and -1 means the other side closed.
+</Explain>
+</Quiz>
+
+## one thread per connection
+
+the blocking API makes the server loop easy to write: accept, hand the socket to a thread, repeat. each thread reads, blocks until bytes arrive, handles them, writes back.
+
+```java title="Server.java"
+try (var server = new ServerSocket(8080)) {
+    while (true) {
+        Socket s = server.accept();
+        Thread.ofPlatform().start(() -> handle(s));   // one thread per client
+    }
+}
+```
+
+the problem is what those threads do all day: wait. a chat server with 10,000 connected users has 10,000 threads, almost all parked in `read()`, each holding its own stack (a megabyte or more reserved by default). the OS scheduler and the memory give out long before the CPU does.
+
+## selectors: one thread, many sockets
+
+NIO's answer (java 1.4, 2002) flips it around. sockets become non-blocking `SocketChannel`s, all registered with one `Selector`. one thread calls `select()`, the OS (epoll on linux, kqueue on macOS) wakes it with exactly the set of channels that are ready, the thread handles those, and goes back to `select()`.
+
+<Figure wide caption={<>the same 6 rounds of traffic, two ways to serve it. switch models and step. with threads, every quiet connection still costs a <C k="dead">parked thread</C>; with a selector, one <C k="meta">thread</C> only ever touches the <C k="hot">ready</C> connections.</>}>
+<SelectorLoop />
+</Figure>
+
+```java title="Main.java" run output="echo: client 2\necho: client 1\necho: client 0"
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
+
+void main() throws Exception {
+    Selector selector = Selector.open();
+    ServerSocketChannel server = ServerSocketChannel.open();
+    server.bind(new InetSocketAddress("localhost", 0));
+    server.configureBlocking(false);
+    server.register(selector, SelectionKey.OP_ACCEPT);
+
+    Thread.ofPlatform().daemon().start(() -> {           // the whole server: one thread
+        try {
+            while (true) {
+                selector.select();                       // sleep until some channel is ready
+                var it = selector.selectedKeys().iterator();
+                while (it.hasNext()) {
+                    SelectionKey key = it.next();
+                    it.remove();
+                    if (key.isAcceptable()) {
+                        SocketChannel c = server.accept();
+                        c.configureBlocking(false);
+                        c.register(selector, SelectionKey.OP_READ, ByteBuffer.allocate(256));
+                    } else if (key.isReadable()) {
+                        var c = (SocketChannel) key.channel();
+                        var buf = (ByteBuffer) key.attachment();
+                        if (c.read(buf) == -1) { c.close(); continue; }
+                        buf.flip();
+                        c.write(buf);                    // echo it back
+                        buf.clear();
+                    }
+                }
+            }
+        } catch (Exception e) { throw new RuntimeException(e); }
+    });
+
+    var clients = new SocketChannel[3];
+    for (int i = 0; i < 3; i++) clients[i] = SocketChannel.open(server.getLocalAddress());
+
+    for (int i = 2; i >= 0; i--) {                       // any order: nobody is blocked on a client
+        clients[i].write(ByteBuffer.wrap(("client " + i).getBytes()));
+        var reply = ByteBuffer.allocate(256);
+        clients[i].read(reply);
+        IO.println("echo: " + new String(reply.array(), 0, reply.position()));
+    }
+    for (var c : clients) c.close();
+}
+```
+
+three connections, one server thread, served in whatever order they talk. the `ByteBuffer` attached to each key is that connection's state (that's the flip/clear loop from [buffers and channels](/learn/io/buffers-and-channels)). the catch is visible right there in the code: every bit of per-connection progress lives in your own state objects, because no thread's call stack remembers "where was i with client 7". that's why people use Netty (built on exactly this loop) instead of writing it by hand.
+
+<Gotcha title="the selected-keys set isn't cleared for you">
+`selector.selectedKeys()` keeps a key in the set until *you* remove it. forget `it.remove()` and next time around the key is still "selected", so you try to accept or read a channel that isn't ready: `accept()` returns `null`, `read()` returns 0, and the loop spins. every hand-written selector loop has that `it.remove()` line for this reason.
+</Gotcha>
+
+## and then virtual threads happened
+
+since java 21 ([virtual threads](/learn/concurrency/virtual-threads)) the thread-per-connection code from above scales too, with one change: `Thread.ofVirtual()`. a blocked virtual thread isn't parked on an OS thread. under the hood, `read()` on a socket registers with the JDK's own poller (a selector, again) and unmounts the virtual thread until bytes arrive. you write blocking code, the JDK runs a selector for you.
+
+| model | threads at 10,000 connections | code style |
+| --- | --- | --- |
+| platform thread per connection | 10,000 OS threads | simple, blocking |
+| selector loop (NIO, Netty) | a handful | callbacks and state machines |
+| virtual thread per connection | 10,000 virtual, a few OS carriers | simple, blocking |
+
+this only works because the old `Socket` API was rewritten on top of NIO in java 13 ([JEP 353](https://openjdk.org/jeps/353)), with `DatagramSocket` following in 15 ([JEP 373](https://openjdk.org/jeps/373)). the old implementation dated from 1996 and couldn't cooperate with virtual threads at all.
+
+## UDP: datagrams
+
+UDP is the text message. no connection, no handshake, no ordering, no retries. each `send` is one datagram, and each `receive` gets exactly one datagram, whole, so message boundaries survive (the opposite of TCP). it can be lost, duplicated or arrive out of order, and nobody tells you.
+
+```java title="Main.java" run output="ping (4 bytes, one datagram)"
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+
+void main() throws Exception {
+    try (var receiver = new DatagramSocket(0, InetAddress.getLoopbackAddress());
+         var sender = new DatagramSocket()) {
+        byte[] msg = "ping".getBytes(StandardCharsets.UTF_8);
+        sender.send(new DatagramPacket(msg, msg.length, receiver.getLocalSocketAddress()));
+
+        var buf = new byte[1500];
+        var packet = new DatagramPacket(buf, buf.length);
+        receiver.setSoTimeout(2000);                  // never wait forever on UDP
+        receiver.receive(packet);
+        IO.println(new String(buf, 0, packet.getLength(), StandardCharsets.UTF_8)
+            + " (" + packet.getLength() + " bytes, one datagram)");
+    }
+}
+```
+
+DNS, video calls, games and QUIC (the transport under HTTP/3) use UDP, because for them a late packet is worse than a lost one, or because they build their own reliability on top.
+
+<Gotcha title="blocking calls without a timeout block forever">
+`read()`, `accept()` and `receive()` wait as long as it takes. a peer that vanishes without closing (unplugged cable, crashed VM, a firewall dropping the connection) leaves your thread stuck for good. set `socket.setSoTimeout(ms)` so reads throw `SocketTimeoutException`, and connect with `socket.connect(addr, timeoutMs)` instead of the constructor, which can hang for the OS's default (often over a minute).
+</Gotcha>
+
+<Deep title="what select() is actually doing">
+`Selector` is a thin wrapper over the OS's readiness API. on jdk 25 on a mac, `SelectorProvider.provider()` is `sun.nio.ch.KQueueSelectorProvider`; on linux it's `EPollSelectorProvider`. registering a channel adds its file descriptor to a kernel-side interest set. `select()` makes one syscall that sleeps until any of them has data (or buffer space, or a pending connection), and comes back with the list. the cost of `select()` scales with the number of *ready* channels, not the number registered, which is the whole trick: 10,000 idle connections cost the kernel some bookkeeping and cost you nothing per round. the same machinery, a `Poller`, is what lets a blocked virtual thread give up its carrier.
+</Deep>
+
+<Interview q="how would you build a server that handles 10,000 concurrent connections in java?">
+the old answer was NIO: non-blocking `SocketChannel`s on a `Selector`, so a few threads serve every connection by reacting only to ready sockets (or a framework built on that, like Netty). the modern answer, since java 21, is often just one virtual thread per connection with plain blocking `Socket` code, because a blocked virtual thread doesn't hold an OS thread; the JDK parks it and uses a selector-style poller internally. bonus point: either way, TCP is a byte stream, so you need framing (delimiters or length prefixes), and you set timeouts on every blocking call.
+</Interview>
+
+<Keylines>
+- a socket is a pair of byte streams. `ServerSocket.accept()` hands you one per client.
+- TCP: connected, ordered, reliable, a stream with no message boundaries. UDP: single datagrams, no promises.
+- one write is not one read. frame your messages.
+- a `Selector` lets one thread serve thousands of sockets by only touching the ready ones.
+- virtual threads (21) make blocking thread-per-connection code scale; the JDK runs the selector for you.
+- every blocking call needs a timeout.
+</Keylines>

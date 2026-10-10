@@ -1,0 +1,17 @@
+[
+  { "term": "sequenced collection", "short": "a collection with a defined first and last element: getFirst, getLast, reversed. java 21.", "chapter": "the-big-picture", "aka": ["SequencedCollection", "SequencedMap", "JEP 431"] },
+  { "term": "amortized O(1)", "short": "constant on average over many calls, even though an occasional call (like a resize) costs O(n).", "chapter": "arraylist", "aka": ["amortized"] },
+  { "term": "circular buffer", "short": "an array used as a ring: head and tail indexes wrap around, so nothing ever shifts. ArrayDeque.", "chapter": "linkedlist-and-arraydeque", "aka": ["ring buffer"] },
+  { "term": "bucket", "short": "one slot of a hash table's array. keys whose hashes map to the same index share it.", "chapter": "hashmap", "aka": ["bin"] },
+  { "term": "hash collision", "short": "two different keys landing in the same bucket. guaranteed to happen; the table chains them.", "chapter": "hashmap", "aka": ["collision"] },
+  { "term": "access order", "short": "a LinkedHashMap mode where every get moves the entry to the end, so the head is least recently used.", "chapter": "linkedhashmap-and-lru" },
+  { "term": "LRU cache", "short": "a cache that evicts the least recently used entry. a LinkedHashMap in access order plus removeEldestEntry.", "chapter": "linkedhashmap-and-lru", "aka": ["least recently used"] },
+  { "term": "red-black tree", "short": "a self-balancing binary search tree. recolors and rotates on insert so its height stays O(log n). TreeMap.", "chapter": "treemap", "aka": ["rb tree"] },
+  { "term": "NavigableMap", "short": "a sorted map you can search around: floorKey, ceilingKey, headMap, tailMap, subMap.", "chapter": "treemap", "aka": ["NavigableSet", "floorKey", "ceilingKey"] },
+  { "term": "EnumSet", "short": "a set of enum constants stored as bits in a long, one bit per ordinal.", "chapter": "sets", "aka": ["bit vector", "EnumMap"] },
+  { "term": "binary heap", "short": "a tree where every parent beats its children, stored level by level in an array. PriorityQueue.", "chapter": "priorityqueue", "aka": ["heap", "sift up", "sift down"] },
+  { "term": "unmodifiable view", "short": "a read-only wrapper around a collection. blocks writes through itself, but shows changes to the original.", "chapter": "immutable-collections", "aka": ["Collections.unmodifiableList"] },
+  { "term": "modCount", "short": "a counter every structural change bumps. iterators compare it to detect changes behind their back.", "chapter": "iterators-and-fail-fast", "aka": ["ConcurrentModificationException", "CME"] },
+  { "term": "stable sort", "short": "a sort that keeps equal elements in their original order. java's object sort is stable.", "chapter": "sorting-and-comparators", "aka": ["stability"] },
+  { "term": "TimSort", "short": "the stable merge sort java uses for objects. finds runs that are already sorted and merges them.", "chapter": "sorting-and-comparators" }
+]

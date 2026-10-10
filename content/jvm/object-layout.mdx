@@ -1,0 +1,170 @@
+import { MarkWord } from "@/components/figures/jvm/MarkWord";
+import { LayoutBuilder } from "@/components/figures/jvm/LayoutBuilder";
+import { MeasuredBars } from "@/components/figures/jvm/MeasuredBars";
+
+<InShort>
+every object starts with a **header**: a 64-bit **mark word** (identity hash, GC age, lock bits) and a compressed **class pointer**. then come the fields, packed largest first with small ones filling the gaps, and the whole thing is rounded up to a multiple of 8 bytes.
+
+on jdk 25 that header is 12 bytes. with **compact object headers** (a product feature since 25, opt-in, on by default in 27) the class pointer moves into the mark word and the header is 8.
+</InShort>
+
+## the picture
+
+you know how a `new Object()` with no fields still costs memory? it's not nothing: on a default jdk 25 it's 16 bytes, all of it header and padding.
+
+think of a parcel in a warehouse. before you get to what's inside, there's a label: who it's for and which shelf it belongs on (the class pointer), plus a few stickers the warehouse adds as it goes: a tracking number (the hash), how many inventory sweeps it survived (GC age), and whether someone has it checked out right now (the lock bits). the contents are packed with the heavy items first and the small things stuffed into the gaps, and the box comes in standard sizes, so there's usually some air at the end.
+
+## the mark word, for real
+
+these are the actual 64 bits at the start of one `new Object()`, read with `Unsafe.getLong(o, 0)` on jdk 25 (aarch64), in four moments of its life.
+
+<Figure wide caption={<>switch the moment and the header mode, hover a field. bits that changed since the previous moment are underlined in <C k="hot">hot</C>. same object, same JVM: the hash really is at bit 11, the age really went 0 → 1 → 3 → 4 across young GCs, and taking a lock really just flips the last two bits.</>}>
+<MarkWord />
+</Figure>
+
+a few things the real bits show that diagrams usually don't:
+
+- **the hash is lazy.** a fresh object has no hash at all. `System.identityHashCode` (or an un-overridden `hashCode()`) computes one the first time it's asked, writes it into the header, and from then on it never changes. the GC moves objects around, so the hash can't be the address: it has to be stored.
+- **the age is 4 bits.** that's why `-XX:MaxTenuringThreshold` tops out at 15: an object can only count to 15 young collections before it has to be promoted.
+- **locking barely touches the header.** on jdk 25 the default is lightweight locking: the lock bits go `01` → `00` and the owner is tracked on the thread's own lock stack, not in the object. more in [how locks work inside](/learn/jvm/locking-internals).
+
+in default mode the header continues with 32 more bits: the compressed class pointer, an offset into the compressed class space where the class's metadata lives. with compact headers those 22 bits of class pointer live at the top of the mark word instead, and the header ends after 8 bytes.
+
+## fields: packed, then padded
+
+after the header come the instance fields. HotSpot (since java 15) lays them out like this:
+
+1. primitives first, biggest first: `long`/`double`, then `int`/`float`, then `short`/`char`, then `byte`/`boolean`.
+2. references last.
+3. every field goes into the *first* free gap that fits and is aligned to its own size, so small fields slide into holes left by alignment.
+4. the total is rounded up to a multiple of 8 (`ObjectAlignmentInBytes`).
+
+your declaration order mostly doesn't matter. here's a builder that applies those rules. the presets and all four modes match what `jcmd <pid> VM.classes -verbose` printed on jdk 25 (it lists the offset of every field, which makes it a JOL you already have):
+
+<Figure wide caption={<>pick a mode, start from a preset, add fields. <C k="meta">header</C> bytes, primitives, <C k="ref">references</C>, and hatched gaps. watch <code>count</code> in Mixed: declared fourth, placed first, at byte 12, because it's the only field that fits the hole between the 12-byte header and the first 8-aligned slot.</>}>
+<LayoutBuilder />
+</Figure>
+
+```text title="jcmd <pid> VM.classes -verbose (Mixed, default mode)"
+L$Mixed {0x00007ffc01040630}
+ - instance size:     6
+ ...
+ - ---- non-static fields (8 words):
+ - 'count' 'I' @12
+ - 'id' 'J' @16
+ - 'd' 'D' @24
+ - 's' 'S' @32
+ - 'c' 'C' @34
+ - 'flag' 'Z' @36
+ - 'b' 'B' @37
+ - 'ref' 'Ljava/lang/Object;' @40
+```
+
+`instance size: 6` is in 8-byte words: 48 bytes. 44 bytes of header and fields, 4 bytes of padding.
+
+## what things actually cost
+
+the JVM will also just tell you how much it allocated. this measures it with `ThreadMXBean.getCurrentThreadAllocatedBytes` around 100,000 allocations of each:
+
+```java title="Main.java" run output="16 bytes  new Object()\n24 bytes  Long.valueOf(1000 + i)\n24 bytes  new Point(i, i)\n32 bytes  new int[3]"
+import java.lang.management.ManagementFactory;
+import java.util.function.IntFunction;
+
+record Point(int x, int y) {}
+
+static final com.sun.management.ThreadMXBean MX =
+    (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+
+static void measure(String what, IntFunction<Object> make) {
+    Object[] keep = new Object[100_000];
+    long before = MX.getCurrentThreadAllocatedBytes();
+    for (int i = 0; i < keep.length; i++) keep[i] = make.apply(i);
+    long after = MX.getCurrentThreadAllocatedBytes();
+    IO.println((after - before) / keep.length + " bytes  " + what);
+}
+
+void main() {
+    measure("new Object()", i -> new Object());
+    measure("Long.valueOf(1000 + i)", i -> Long.valueOf(1000L + i));
+    measure("new Point(i, i)", i -> new Point(i, i));
+    measure("new int[3]", i -> new int[3]);
+}
+```
+
+run the same program with `-XX:+UseCompactObjectHeaders` and every line shrinks by exactly 8 bytes:
+
+<Figure caption="bytes per object on jdk 25, measured: default header (12 bytes) vs compact (8 bytes). the 4 bytes saved in the header often take 4 bytes of padding with them.">
+<MeasuredBars unit="B" data={[
+  { label: "new Object() · default", value: 16 },
+  { label: "new Object() · compact", value: 8, tone: "live" },
+  { label: "Long · default", value: 24 },
+  { label: "Long · compact", value: 16, tone: "live" },
+  { label: "Point(int, int) · default", value: 24 },
+  { label: "Point(int, int) · compact", value: 16, tone: "live" },
+  { label: "int[3] · default", value: 32 },
+  { label: "int[3] · compact", value: 24, tone: "live" },
+]} />
+</Figure>
+
+a `Long` holds 8 bytes of data and costs 24. that ratio is why an `ArrayList<Long>` of a million elements is about 24 MB of `Long` objects plus 4 MB of references, while a `long[]` of a million is 8 MB, and why [Valhalla](/learn/future/valhalla) exists.
+
+### arrays
+
+an array's header has one extra field: the length, a 4-byte `int` right after the class pointer. so the elements of an `int[]` start at byte 16 by default, and at byte 12 with compact headers (`long[]` elements still start at 16, because they need 8-byte alignment). read with `Unsafe.arrayBaseOffset` on jdk 25:
+
+| array | default | compact headers | no compressed class pointers |
+| --- | --- | --- | --- |
+| `int[]`, `byte[]`, `Object[]` data starts at | 16 | 12 | 20 |
+| `long[]` data starts at | 16 | 16 | 24 |
+| size of `int[3]` | 32 | 24 | 32 |
+
+## compressed pointers, and the 32 GB cliff
+
+a reference is 64 bits of address, but HotSpot stores it in 32 bits when it can: **compressed oops**. objects are 8-byte aligned, so the low 3 bits of every address are zero; store the address shifted right by 3 and 32 bits can reach 2³² × 8 = 32 GB of heap. the class pointer gets the same trick (compressed class pointers), which is why the default header is 8 + 4 = 12 bytes.
+
+<Gotcha title="a 33 GB heap holds less than a 31 GB one">
+compressed oops only work while the heap fits in about 32 GB. set `-Xmx` past that and the JVM silently switches to full 64-bit references: every reference field and every `Object[]` slot doubles from 4 to 8 bytes (try `-XX:-UseCompressedOops` in the builder). a reference-heavy heap can grow by a third or more, so going from 31 GB to 33 GB can leave you with *less* usable space than before. if you need a big heap, jump well past 32 GB, or stay just under it. check with `java -Xmx40g -XX:+PrintFlagsFinal -version | grep UseCompressedOops`.
+</Gotcha>
+
+## compact object headers
+
+the 12-byte header wastes space in two ways: 22 bits at the top of the mark word are unused, and the 4-byte class pointer often drags 4 bytes of padding along with it. Project Lilliput's fix is to put a 22-bit class pointer into those unused bits and drop the second word entirely.
+
+<Flow stages={[
+  { label: "JEP 450", sub: "java 24, experimental", note: "compact object headers arrive behind -XX:+UnlockExperimentalVMOptions -XX:+UseCompactObjectHeaders. requires lightweight locking (no legacy stack locking)." },
+  { label: "JEP 519", sub: "java 25, product", note: "same feature, now a product option: -XX:+UseCompactObjectHeaders, no unlock flag. off by default. Oracle reported 22% less heap and 8% less CPU on SPECjbb2015 in one setting, and 15% fewer collections with G1 and Parallel." },
+  { label: "JEP 534", sub: "java 27, default", note: "compact headers become the default layout. the old 96-bit header is still available with -XX:-UseCompactObjectHeaders, and is planned to be deprecated later." },
+]} />
+
+on jdk 25 you have to ask for it. it costs nothing to try: add `-XX:+UseCompactObjectHeaders` to a test run and compare heap usage after a GC. the main limit is the 22-bit class pointer: about 4 million classes, which only matters if something generates classes like there's no tomorrow.
+
+<Predict options={["16 and 8", "24 and 16", "24 and 24", "32 and 24"]} answer={2}>
+```java
+class Node {
+    long value;
+    Node next;
+}
+```
+how big is a `Node` on a default jdk 25, and with `-XX:+UseCompactObjectHeaders`?
+<Explain>
+24 and 24. compact headers don't help this one. default: the 12-byte header leaves a 4-byte hole before the first 8-aligned slot, `value` goes to 16, and `next` (a 4-byte compressed reference) drops into the hole at 12. no waste at all. compact: header 8, `value` at 8, `next` at 16, which ends at 20 and rounds up to 24. the 4 bytes saved in the header just turn into 4 bytes of padding at the end. `jcmd <pid> VM.classes -verbose` agrees: `instance size: 3` words in both modes. savings depend on the field mix, which is why the JEP talks about averages.
+</Explain>
+</Predict>
+
+<Deep title="what happens to the hash when a lock inflates">
+the mark word can't hold everything at once. when a lock is contended (or someone calls `wait()`), HotSpot inflates it into a full `ObjectMonitor`. in the default mode the mark word then becomes a pointer to that monitor with lock bits `10`, and the hash and age that used to live there move into the monitor (the "displaced header") until it's deflated again.
+
+compact headers can't allow that: the class pointer lives in the mark word now, and the JVM needs it on every virtual call. so on jdk 25, `-XX:+UseCompactObjectHeaders` also switches on `UseObjectMonitorTable` (a diagnostic flag; `-XX:+PrintFlagsFinal` shows it flip to true): monitors are kept in a side table keyed by the object, and the header is never overwritten. it's also why compact headers require lightweight locking.
+</Deep>
+
+<Interview q="how much memory does new Object() take?">
+16 bytes on a typical 64-bit JVM today: a 12-byte header (an 8-byte mark word and a 4-byte compressed class pointer) rounded up to 8-byte alignment. with compact object headers (`-XX:+UseCompactObjectHeaders` on java 25, the default from 27) it's 8. the answer that impresses is the follow-up: it depends on flags (compressed oops are off above ~32 GB of heap, which makes every reference 8 bytes), field order doesn't matter much because HotSpot packs fields by size, and you can check any class yourself with `jcmd <pid> VM.classes -verbose` or JOL.
+</Interview>
+
+<Keylines>
+- header + fields + padding to 8. the header is 12 bytes today, 8 with compact headers.
+- the mark word holds the identity hash (lazily), the GC age (4 bits), and the lock bits.
+- fields are packed biggest first, and small ones fill alignment holes. declaration order barely matters.
+- references are 4 bytes until the heap passes ~32 GB. then they're 8, and everything grows.
+- compact headers: experimental in 24, product in 25, default in 27.
+</Keylines>

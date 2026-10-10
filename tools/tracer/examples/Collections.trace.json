@@ -1,0 +1,180 @@
+{
+  "file": "Collections.java",
+  "source": "import java.util.ArrayList;\nimport java.util.HashMap;\nimport java.util.List;\nimport java.util.Map;\n\npublic class Collections {\n    public static void main(String[] args) {\n        List<String> names = new ArrayList<>();\n        names.add(\"ada\");\n        names.add(\"linus\");\n        names.add(\"grace\");\n        names.remove(\"linus\");\n\n        Map<String, Integer> ages = new HashMap<>();\n        ages.put(\"ada\", 36);\n        ages.put(\"grace\", 85);\n        int age = ages.get(\"ada\");\n        ages.put(\"ada\", age + 1);\n\n        System.out.println(names + \" \" + ages);\n    }\n}\n",
+  "steps": [
+    {"line": 8, "frames": [{"name": "main", "line": 8, "locals": {}}], "heap": {}, "stdout": ""},
+    {
+      "line": 9,
+      "frames": [{"name": "main", "line": 9, "locals": {"names": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "ArrayList<String>", "items": [], "summary": true, "state": "new"}},
+      "stdout": "",
+      "changed": ["names"]
+    },
+    {
+      "line": 10,
+      "frames": [{"name": "main", "line": 10, "locals": {"names": {"ref": "o1"}}}],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}], "summary": true},
+        "o2": {"type": "String", "value": "\"ada\""}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 11,
+      "frames": [{"name": "main", "line": 11, "locals": {"names": {"ref": "o1"}}}],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o3"}], "summary": true},
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o3": {"type": "String", "value": "\"linus\""}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 12,
+      "frames": [{"name": "main", "line": 12, "locals": {"names": {"ref": "o1"}}}],
+      "heap": {
+        "o1": {
+          "type": "ArrayList<String>",
+          "items": [{"ref": "o2"}, {"ref": "o3"}, {"ref": "o4"}],
+          "summary": true
+        },
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o3": {"type": "String", "value": "\"linus\""},
+        "o4": {"type": "String", "value": "\"grace\""}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 14,
+      "frames": [{"name": "main", "line": 14, "locals": {"names": {"ref": "o1"}}}],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 15,
+      "frames": [{"name": "main", "line": 15, "locals": {"names": {"ref": "o1"}, "ages": {"ref": "o5"}}}],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o5": {"type": "HashMap<String, Integer>", "entries": [], "summary": true, "state": "new"},
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""}
+      },
+      "stdout": "",
+      "changed": ["ages"]
+    },
+    {
+      "line": 16,
+      "frames": [{"name": "main", "line": 16, "locals": {"names": {"ref": "o1"}, "ages": {"ref": "o5"}}}],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o5": {
+          "type": "HashMap<String, Integer>",
+          "entries": [[{"ref": "o2"}, {"ref": "o6"}]],
+          "summary": true
+        },
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""},
+        "o6": {"type": "Integer", "value": "36"}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 17,
+      "frames": [{"name": "main", "line": 17, "locals": {"names": {"ref": "o1"}, "ages": {"ref": "o5"}}}],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o5": {
+          "type": "HashMap<String, Integer>",
+          "entries": [[{"ref": "o4"}, {"ref": "o7"}], [{"ref": "o2"}, {"ref": "o6"}]],
+          "summary": true
+        },
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""},
+        "o7": {"type": "Integer", "value": "85"},
+        "o6": {"type": "Integer", "value": "36"}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 18,
+      "frames": [
+        {
+          "name": "main",
+          "line": 18,
+          "locals": {"names": {"ref": "o1"}, "ages": {"ref": "o5"}, "age": 36}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o5": {
+          "type": "HashMap<String, Integer>",
+          "entries": [[{"ref": "o4"}, {"ref": "o7"}], [{"ref": "o2"}, {"ref": "o6"}]],
+          "summary": true
+        },
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""},
+        "o7": {"type": "Integer", "value": "85"},
+        "o6": {"type": "Integer", "value": "36"}
+      },
+      "stdout": "",
+      "changed": ["age"]
+    },
+    {
+      "line": 20,
+      "frames": [
+        {
+          "name": "main",
+          "line": 20,
+          "locals": {"names": {"ref": "o1"}, "ages": {"ref": "o5"}, "age": 36}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o5": {
+          "type": "HashMap<String, Integer>",
+          "entries": [[{"ref": "o4"}, {"ref": "o7"}], [{"ref": "o2"}, {"ref": "o8"}]],
+          "summary": true
+        },
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""},
+        "o7": {"type": "Integer", "value": "85"},
+        "o8": {"type": "Integer", "value": "37"}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 21,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"names": {"ref": "o1"}, "ages": {"ref": "o5"}, "age": 36}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "ArrayList<String>", "items": [{"ref": "o2"}, {"ref": "o4"}], "summary": true},
+        "o5": {
+          "type": "HashMap<String, Integer>",
+          "entries": [[{"ref": "o4"}, {"ref": "o7"}], [{"ref": "o2"}, {"ref": "o8"}]],
+          "summary": true
+        },
+        "o2": {"type": "String", "value": "\"ada\""},
+        "o4": {"type": "String", "value": "\"grace\""},
+        "o7": {"type": "Integer", "value": "85"},
+        "o8": {"type": "Integer", "value": "37"}
+      },
+      "stdout": "[ada, grace] {grace=85, ada=37}\n"
+    },
+    {
+      "line": 21,
+      "frames": [],
+      "heap": {},
+      "stdout": "[ada, grace] {grace=85, ada=37}\n",
+      "note": "main returned, program ends"
+    }
+  ]
+}

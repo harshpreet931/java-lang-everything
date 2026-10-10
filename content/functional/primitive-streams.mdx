@@ -1,0 +1,119 @@
+import { StreamKinds } from "@/components/figures/functional/StreamKinds";
+
+<InShort>
+a `Stream<Integer>` is a stream of **objects**: every number is boxed into its own `Integer` on the heap. `IntStream`, `LongStream` and `DoubleStream` carry **raw primitives** instead, and they add the number-y terminal operations you actually want: `sum`, `average`, `max`, `summaryStatistics`.
+
+convert with `mapToInt` / `mapToLong` / `mapToDouble`, and go back with `boxed()` or `mapToObj`.
+</InShort>
+
+## the picture
+
+you know how `List<Integer>` can't hold an `int`, so java quietly wraps each one in an `Integer`? a `Stream<Integer>` has the same problem, and in a stream it happens once per element, sometimes twice (once going in, once for every intermediate result).
+
+think of shipping marbles. you can put every marble in its own little gift box with a label (boxing), or pour them straight into a tube (primitives). the gift boxes cost cardboard and somebody has to throw them away afterwards. that somebody is the [garbage collector](/learn/gc/gc-fundamentals).
+
+<Figure caption={<>three ints, two ways. a list of <code>Integer</code> is an array of <C k="ref">references</C> to separate objects (each 16 bytes on a 64-bit JVM, plus the 4-byte reference). an <code>int[]</code> is just the numbers, back to back.</>}>
+<Memory
+  frames={[{ name: "main", locals: { boxed: { ref: "a" }, raw: { ref: "b" } } }]}
+  heap={{
+    a: { type: "Integer[]", items: [{ ref: "i1" }, { ref: "i2" }, { ref: "i3" }] },
+    i1: { type: "Integer", value: "1000" },
+    i2: { type: "Integer", value: "1001" },
+    i3: { type: "Integer", value: "1002" },
+    b: { type: "int[]", items: [1000, 1001, 1002] },
+  }}
+/>
+</Figure>
+
+## what boxing actually costs
+
+summing a million ints, four ways. measured on jdk 25 on an arm mac: bytes allocated by the summing thread for one call, after warm-up.
+
+<Figure caption={<>bytes allocated per call, log scale. <code>boxed().reduce</code> boxes every element <em>and</em> every partial sum: a million <code>Integer</code>s each way, 16 bytes apiece. <code>mapToInt</code> on the same boxed list unboxes on the fly and allocates next to nothing.</>}>
+<Bars
+  log
+  unit="bytes"
+  data={[
+    { label: "IntStream.range(0, n).sum()", value: 144, tone: "live" },
+    { label: "list.stream().mapToInt(Integer::intValue).sum()", value: 232, tone: "live" },
+    { label: "list.stream().reduce(0, Integer::sum)", value: 15999880, tone: "dead" },
+    { label: "IntStream.range(0, n).boxed().reduce(0, Integer::sum)", value: 31997904, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+time follows the garbage. in the same run (best of 100 calls, timed with `System.nanoTime`, so treat it as rough, not a [JMH](/learn/performance/jmh) result) the primitive sum took about 1.0 ms and the boxed one about 3.8 ms. the allocation numbers are the solid part: they don't move between runs.
+
+## the four kinds, and how to get between them
+
+<Figure caption={<>click a stream kind. the <C k="hot">arrows</C> are the methods that leave it. widening between primitives is free (<code>asLongStream</code>), anything that could lose information needs a function you write (<code>mapToInt(f)</code>), and the only way back to objects is <code>boxed()</code> or <code>mapToObj</code>.</>}>
+<StreamKinds />
+</Figure>
+
+```java title="Main.java" run output="[0, 1, 2, 3, 4]\n15\nIntSummaryStatistics{count=6, sum=108, min=4, average=18.000000, max=42}\nOptionalDouble[9.0]\nOptionalDouble.empty\n14\n[#0, #1, #2]\n[1, 3, 9, 27, 81]"
+import java.util.*;
+import java.util.stream.*;
+
+void main() {
+    IO.println(IntStream.range(0, 5).boxed().toList());     // end exclusive
+    IO.println(IntStream.rangeClosed(1, 5).sum());           // end inclusive
+    IO.println(IntStream.of(4, 8, 15, 16, 23, 42).summaryStatistics());
+    IO.println(IntStream.of(4, 8, 15).average());            // OptionalDouble
+    IO.println(IntStream.empty().average());                 // nothing to average
+
+    List<String> words = List.of("fig", "kiwi", "avocado");
+    IO.println(words.stream().mapToInt(String::length).sum());       // objects → ints
+    IO.println(IntStream.range(0, 3).mapToObj(i -> "#" + i).toList()); // ints → objects
+    IO.println(IntStream.iterate(1, i -> i <= 100, i -> i * 3).boxed().toList());
+}
+```
+
+`summaryStatistics()` is the underrated one: count, sum, min, average and max in a single pass. and `IntStream.range(0, n)` is the stream version of `for (int i = 0; i < n; i++)`.
+
+<Predict options={["hi", "104105", "[h, i]"]} answer={1}>
+```java
+"hi".chars().forEach(System.out::print);
+```
+<Explain>
+`chars()` returns an `IntStream`, not a stream of `Character`. each element is the char's code as an `int` ('h' is 104, 'i' is 105), and `print(int)` prints a number. to get characters back: `.mapToObj(c -> (char) c)`, which gives `[h, i]` as a list.
+</Explain>
+</Predict>
+
+## gotchas
+
+<Gotcha title="IntStream.sum() overflows silently">
+`sum()` on an `IntStream` returns an `int`, and adds with plain `int` arithmetic. no exception, no warning:
+
+```java title="Main.java" run output="705082704\n5000050000"
+import java.util.stream.*;
+
+void main() {
+    IO.println(IntStream.rangeClosed(1, 100_000).sum());                  // wrapped around
+    IO.println(IntStream.rangeClosed(1, 100_000).asLongStream().sum());   // right
+}
+```
+
+the real answer, 5,000,050,000, doesn't fit in 31 bits. widen first with `asLongStream()` (or `mapToLong`). more on why in [casting and overflow](/learn/basics/casting-and-overflow).
+</Gotcha>
+
+<Gotcha title="primitive streams have their own collect">
+`IntStream.range(0, 3).collect(Collectors.toList())` doesn't compile: `method collect in interface IntStream cannot be applied to given types`. a primitive stream's `collect` takes a supplier, an `ObjIntConsumer` and a combiner, because a normal `Collector` expects objects. call `.boxed()` first, or use `toArray()` to get an `int[]`.
+</Gotcha>
+
+<Quiz question="which of these allocates one Integer per element?" options={["IntStream.range(0, n).sum()", "list.stream().mapToInt(Integer::intValue).sum()", "IntStream.range(0, n).boxed().toList()", "Arrays.stream(intArray).max()"]} answer={2}>
+<Explain>
+`boxed()` turns every `int` into an `Integer`, and the list keeps them all. the others stay primitive the whole way: `range` and `Arrays.stream(int[])` produce raw ints, and `mapToInt` unboxes objects that already existed. (careful with `boxed().count()` as a benchmark: `count()` can skip the pipeline on a sized stream, see [stream operations](/learn/functional/stream-operations).)
+</Explain>
+</Quiz>
+
+<Deep title="why not just Stream<int>?">
+because java generics only work with reference types: `Stream<int>` isn't legal, so the JDK had to write `IntStream` and friends by hand, three times over, plus the 30-odd primitive functional interfaces in `java.util.function` (see [functional interfaces](/learn/functional/functional-interfaces)). it stopped at `int`, `long` and `double`, which is why there's no `CharStream` or `FloatStream`. project valhalla aims to fix the root problem by letting generics work over primitive-like value types. see [valhalla](/learn/future/valhalla).
+</Deep>
+
+<Keylines>
+- `Stream<Integer>` boxes every element. `IntStream` doesn't.
+- `mapToInt` / `mapToLong` / `mapToDouble` to get primitive, `boxed()` / `mapToObj` to get back.
+- primitive streams add `sum`, `average`, `max`, `summaryStatistics`, and `range`.
+- `IntStream.sum()` can overflow. widen with `asLongStream()` when the total might be big.
+- `"text".chars()` is an `IntStream` of codes, not characters.
+</Keylines>

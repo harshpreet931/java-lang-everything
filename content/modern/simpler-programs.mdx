@@ -1,0 +1,153 @@
+import { Morph } from "@/components/figures/generics/Morph";
+import { MainPicker } from "@/components/figures/modern/MainPicker";
+import { compactSteps } from "@/components/figures/modern/steps";
+
+<InShort>
+since java 25, `void main() { IO.println("hi"); }` in a file is a complete program. no class, no `static`, no `String[] args`, no `System.out`. it's a **compact source file** (JEP 512): fields and methods with no class around them, wrapped by the compiler in an implicit **final class**. its `main` can be an **instance method**, every compact file gets **`import module java.base`** for free (JEP 511), and the new `java.lang.IO` class does console input and output.
+
+it's the same language, with the ceremony made optional. nothing is a toy mode.
+</InShort>
+
+## the picture
+
+you know how the first java program anyone sees is `public static void main(String[] args)`, and the teacher says "ignore all that for now"? that's five concepts (access modifiers, classes, static, arrays, command-line arguments) standing between a beginner and printing one line. java 25 lets you add them when you need them instead of before you start.
+
+think of a note to yourself versus a formal letter. the formal letter has a letterhead, an address block, a date, "dear sir or madam". the note just says "buy milk". both are written in the same language, and a note can always grow into a letter. a compact source file is the note: when the program grows, you add a class declaration and nothing else has to change.
+
+<Figure wide caption={<>step through what javac and the launcher do with a compact source file, ending at the classic version of the same program. <C k="hot">amber</C> lines are what that step adds or changes. the class shape matches <code>javap -p</code> on the real class file from javac 25.</>}>
+<Morph file="Hello.java" steps={compactSteps} />
+</Figure>
+
+```java title="Hello.java" run output="hi, [ada, bob]"
+String greeting = "hi";
+
+void main() {
+    IO.println(greeting + ", " + List.of("ada", "bob"));
+}
+```
+
+`java Hello.java` compiles it in memory and runs it, no `javac` step (that's the source launcher, java 11; since java 22 it also finds other `.java` files your program uses). everything on this site that says `run` is either a file like this one or a classic class.
+
+## which main runs
+
+the launcher used to accept one shape only: `public`, `static`, `void`, named `main`, taking a `String[]`. now it accepts four, and picks with two rules. first, a `main` that takes `String[]` beats one that takes nothing, static or not. second, if the chosen one is an instance method, the class needs a non-private no-argument constructor: the launcher makes an object and calls `main` on it.
+
+<Figure caption={<>turn methods on and off and see which one <code>java</code> picks, or why javac won&apos;t even get that far. all 15 combinations were compiled and launched on jdk 25.</>}>
+<MainPicker />
+</Figure>
+
+instance `main` works in any class, not just compact files. that's what removes the classic beginner trap of fields that "have to be static because main is static":
+
+```java title="Main.java" run output="instance main in an ordinary class, count = 1"
+class Main {
+    int count = 0;
+
+    void main() {
+        count++;
+        IO.println("instance main in an ordinary class, count = " + count);
+    }
+}
+```
+
+<Predict options={["static main()", "instance main(String[])", "compile error: two mains"]} answer={1}>
+```java
+class Main {
+    static void main() { IO.println("static main()"); }
+    void main(String[] args) { IO.println("instance main(String[])"); }
+}
+```
+<Explain>
+different signatures, so both are legal, and the launcher's first rule applies: a `main` that takes `String[]` wins over one that doesn't, regardless of `static`. it constructs a `Main` and calls the instance method. checked on jdk 25: `instance main(String[])`. a compile error only happens when a static and an instance `main` have the *same* parameters.
+</Explain>
+</Predict>
+
+## import module
+
+`import module M;` imports every public top-level type in every package that module `M` exports. compact source files get `import module java.base;` implicitly, but you can write it in any file, modular or not:
+
+```java
+import module java.base;                 // 58 packages: java.util, java.io, java.nio.file, java.time...
+
+class Report {
+    List<String> lines = new ArrayList<>();
+    Map<String, Path> files = new HashMap<>();
+    Duration timeout = Duration.ofSeconds(5);
+}
+```
+
+the catch is names that exist in two packages. `java.sql` has a `Date`, and so does `java.util`:
+
+```java
+import module java.base;
+import module java.sql;
+
+class Amb {
+    Date d;                              // [!code error]
+}
+```
+
+```text
+error: reference to Date is ambiguous
+  both class java.sql.Date in java.sql and class java.util.Date in java.util match
+```
+
+a single-type import settles it: add `import java.util.Date;`. the precedence is the obvious one, most specific wins: single-type imports beat package (`.*`) imports, which beat module imports.
+
+| import | brings in | wins over |
+| --- | --- | --- |
+| `import java.util.Date;` | one type | everything below |
+| `import java.util.*;` | one package | module imports |
+| `import module java.base;` | every package the module exports | nothing |
+
+## IO: the console, finally simple
+
+`java.lang.IO` is five static methods: `print(Object)`, `println(Object)`, `println()`, `readln()` and `readln(String prompt)`. it's in `java.lang`, so it's always there, in every file. (in the last preview its methods were auto-imported into compact files, so you could write bare `println`. the final version dropped that: you write `IO.println`.)
+
+```java
+void main() {
+    String name = IO.readln("name? ");
+    int n = Integer.parseInt(IO.readln("how many? "));
+    for (int i = 0; i < n; i++) IO.println("hi " + name);
+}
+```
+
+```bash
+$ java Ask.java
+name? ada
+how many? 2
+hi ada
+hi ada
+```
+
+no `Scanner`, no `BufferedReader` wrapped around `System.in`, no `throws IOException`. `IO` writes to `System.out` and reads from `System.in`, so it plays nicely with redirection and pipes.
+
+<Gotcha title="readln returns null at the end of input">
+pipe in a file with fewer lines than the program asks for (or press ctrl+D), and `IO.readln` returns `null`. the program above then dies with a `NumberFormatException` ("Cannot parse null string"). if input can end early, check for `null` before using the line.
+</Gotcha>
+
+<Gotcha title="you can't name the implicit class">
+the implicit class has a name (javac uses the file name), but the language doesn't let you write it: in `Ref.java`, calling `Ref.twice(2)` is `error: cannot find symbol`, and there's no `new Ref()`. a compact file also can't have a `package` declaration:
+
+```text
+error: compact source file should not have package declaration
+```
+
+it's a launchable program, not a reusable class. the moment something else needs to use it, write the class declaration: one line at the top, one brace at the bottom.
+</Gotcha>
+
+<Deep title="four previews, three names">
+this took a while to get right. JEP 445 previewed "unnamed classes and instance main methods" in java 21. JEP 463 (22) renamed them "implicitly declared classes" and simplified the launch rules. JEP 477 (23) added the `IO` class with auto-imported methods and the implicit `import module java.base`, and JEP 495 (24) renamed them "simple source files". JEP 512 finalized it all in java 25 as "compact source files", moving `IO` into `java.lang` and dropping the auto-imported methods. module imports went through JEP 476 (23) and 494 (24) before JEP 511 made them final, also in 25. the whole journey is on the [release timeline](/learn/modern/release-timeline).
+</Deep>
+
+<Interview q="what changed about main in java 25?">
+`main` no longer has to be `public static void main(String[] args)`. it can be non-public, it can drop the `String[]` parameter, and it can be an instance method, in which case the launcher instantiates the class with its no-argument constructor first. if several exist, a `main` taking `String[]` wins over a no-argument one. on top of that, a file can be a compact source file, just fields and methods, which javac wraps in an implicit final class that also gets `import module java.base`. bonus: `java.lang.IO` gives simple `println` and `readln`. all final in java 25 via JEP 512 and JEP 511.
+</Interview>
+
+<Keylines>
+- `void main() { IO.println("hi"); }` is a whole java 25 program.
+- a compact source file is wrapped in an implicit final class you can't refer to by name.
+- `main` can be an instance method. one that takes `String[]` beats one that doesn't.
+- `import module java.base;` is implicit in compact files and allowed in any file.
+- ambiguous names from module imports are fixed with a single-type import.
+- `IO.println` and `IO.readln` replace `System.out` and `Scanner` for simple console programs.
+</Keylines>

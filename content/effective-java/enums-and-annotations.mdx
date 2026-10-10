@@ -1,0 +1,219 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { EnumSetBits } from "@/components/figures/effective-java/EnumSetBits";
+
+<InShort>
+a java **enum** is a full class with a fixed set of instances: it can have fields, methods and per-constant behavior, and the compiler checks every use. items 34 to 41: use enums instead of int constants, never lean on `ordinal()`, use **EnumSet** and **EnumMap** (they're as fast as bit tricks), and use **annotations** instead of naming conventions.
+</InShort>
+
+<Figure caption={<>items 34 to 41. switch expressions and sealed types changed how two of them read.</>}>
+<ItemMap
+  items={[
+    { n: 34, t: "enums, not int constants", lens: "switch expressions" },
+    { n: 35, t: "never derive data from ordinal" },
+    { n: 36, t: "EnumSet, not bit flags" },
+    { n: 37, t: "EnumMap, not ordinal-indexed arrays" },
+    { n: 38, t: "extensible enums go through an interface", lens: "sealed interfaces" },
+    { n: 39, t: "annotations, not naming patterns" },
+    { n: 40, t: "put @Override on every override" },
+    { n: 41, t: "marker interfaces define types" },
+  ]}
+/>
+</Figure>
+
+## enums
+
+### item 34 · enums, not int constants
+
+`static final int SMALL = 0` is just an int. the compiler can't stop you passing `SMALL` where a color was expected, it prints as `0`, and recompiling is required when the value changes (it's inlined into callers). an enum is a type, prints its name, iterates with `values()`, and can carry data and behavior:
+
+```java title="Main.java" run output="FREE 0\nTEAM 80\nENTERPRISE 500\n1"
+enum Tier {
+    FREE(0), TEAM(8), ENTERPRISE(21);
+
+    private final int perSeat;
+    Tier(int perSeat) { this.perSeat = perSeat; }
+
+    int monthly(int seats) {
+        return switch (this) {           // exhaustive: add a tier, this stops compiling
+            case FREE -> 0;
+            case TEAM -> perSeat * seats;
+            case ENTERPRISE -> Math.max(500, perSeat * seats);
+        };
+    }
+}
+
+void main() {
+    for (Tier t : Tier.values()) IO.println(t + " " + t.monthly(10));
+    IO.println(Tier.valueOf("TEAM").ordinal());
+}
+```
+
+the book's alternative to switching on `this` is a constant-specific method body (each constant gets its own `{ ... }` with its own `monthly`), which is still the right tool when each constant's behavior is big. and when several constants share a behavior, give them a nested "strategy" enum instead of repeating code. enums are also the cheapest correct singleton (item 3). the language side is in [enums](/learn/oop/enums).
+
+<Lens v={14}>switch expressions (14) made switching on enums safe: an arrow-form `switch` that returns a value must be exhaustive, so a new constant is a compile error, not a silent fall through. before 14, a switch on `this` was a trap the book warned about.</Lens>
+
+### item 35 · never derive data from ordinal
+
+`ordinal()` is the position in the declaration. it changes when someone reorders or inserts a constant, which nobody thinks of as a breaking change.
+
+<Predict question="HIGH used to print 2. what does it print now?" options={["1", "2", "3"]} answer={2}>
+```java
+enum Priority { LOW, MEDIUM, HIGH }   // MEDIUM was added last week
+
+static int level(Priority p) { return p.ordinal() + 1; }
+
+void main() {
+    IO.println(level(Priority.HIGH));
+}
+```
+<Explain>
+`HIGH` used to be second (ordinal 1, level 2). inserting `MEDIUM` in the middle moved it to ordinal 2, so `level` is now 3 for every stored "level 2" that meant HIGH. store the number in a field instead: `HIGH(3)`, with a constructor. `ordinal()` exists for `EnumSet` and `EnumMap`, not for you.
+</Explain>
+</Predict>
+
+## enum collections
+
+### item 36 · EnumSet, not bit flags
+
+the C habit: `BOLD = 1, ITALIC = 2, UNDERLINE = 4`, then `style = BOLD | ITALIC`. it's compact and fast, and it's an `int` with no idea what it means. `EnumSet` gives you the same bits with types and names on top.
+
+<Figure caption={<>toggle the styles. both rows are the same bits (a <code>RegularEnumSet</code> is one <code>long</code> for enums of up to 64 constants). the <C k="hot">amber</C> bit is the one you just flipped.</>}>
+<EnumSetBits />
+</Figure>
+
+```java title="Main.java" run output="[BOLD, ITALIC, STRIKE] false\n[UNDERLINE]\nRegularEnumSet"
+enum Style { BOLD, ITALIC, UNDERLINE, STRIKE }
+
+void main() {
+    var s = EnumSet.of(Style.BOLD, Style.ITALIC);
+    s.add(Style.STRIKE);
+    IO.println(s + " " + s.contains(Style.UNDERLINE));
+    IO.println(EnumSet.complementOf(s));       // every style not in s
+    IO.println(s.getClass().getSimpleName());  // one long underneath
+}
+```
+
+the one gap: there's no immutable `EnumSet`. wrap it with `Collections.unmodifiableSet`, or copy it with `Set.copyOf` (which gives up the bit vector).
+
+### item 37 · EnumMap, not ordinal-indexed arrays
+
+indexing an array by `ordinal()` works until the array and the enum disagree, and the array can't tell you which index meant what. `EnumMap` is an array indexed by ordinal internally, with all of that checked for you:
+
+```java title="Main.java" run output="{TODO=[docs], DOING=[api], DONE=[tests, ci]}\nEnumMap"
+enum Stage { TODO, DOING, DONE }
+record Task(String name, Stage stage) {}
+
+void main() {
+    var tasks = List.of(new Task("tests", Stage.DONE), new Task("docs", Stage.TODO),
+                        new Task("api", Stage.DOING), new Task("ci", Stage.DONE));
+    Map<Stage, List<String>> board = tasks.stream().collect(Collectors.groupingBy(
+        Task::stage, () -> new EnumMap<>(Stage.class),   // keys come out in declaration order
+        Collectors.mapping(Task::name, Collectors.toList())));
+    IO.println(board);
+    IO.println(board.getClass().getSimpleName());
+}
+```
+
+for "a value per pair of constants" (a transition table, say), nest them: `Map<From, Map<To, Transition>>`, built from a list of transitions so adding a constant can't misalign anything.
+
+### item 38 · extensible enums go through an interface
+
+enums can't be extended, and usually that's right. when an API needs "the built-in operations plus whatever users add", define an interface, have your enum implement it, and accept the interface:
+
+```java
+interface Unit { double toMeters(double v); }
+
+enum Metric implements Unit {
+    MM { public double toMeters(double v) { return v / 1000; } },
+    KM { public double toMeters(double v) { return v * 1000; } };
+}
+
+record Furlong() implements Unit {              // added by a user, no enum needed
+    public double toMeters(double v) { return v * 201.168; }
+}
+```
+
+<Lens v={17}>if *you* own every implementation, a `sealed` interface that `permits Metric, Imperial` closes the set again while keeping several enums behind one type, and switches over it stay exhaustive.</Lens>
+
+## annotations
+
+### item 39 · annotations, not naming patterns
+
+old test frameworks found tests by name: a method starting with `test` was a test. misspell it (`tsetPrice`) and it silently never runs. an annotation is checked by the compiler, can carry parameters, and is found by reflection. here's a tiny test runner in about 30 lines:
+
+```java title="Main.java" run output="FAIL bulkDiscount: no discount\npass freeIsFree"
+import java.lang.annotation.*;
+import java.lang.reflect.*;
+
+@Retention(RetentionPolicy.RUNTIME)   // keep it in the class file, visible to reflection
+@Target(ElementType.METHOD)           // only allowed on methods
+@interface Check {}
+
+class Pricing {
+    static int price(int seats) { return seats * 9; }
+}
+
+class PriceChecks {
+    @Check static void freeIsFree() { if (Pricing.price(0) != 0) throw new AssertionError("free costs money"); }
+    @Check static void bulkDiscount() { if (Pricing.price(100) >= 900) throw new AssertionError("no discount"); }
+    static void helper() { throw new IllegalStateException("not a check, never runs"); }
+}
+
+void main() throws Exception {
+    Method[] ms = PriceChecks.class.getDeclaredMethods();
+    Arrays.sort(ms, Comparator.comparing(Method::getName));
+    for (Method m : ms) {
+        if (!m.isAnnotationPresent(Check.class)) continue;
+        try {
+            m.invoke(null);
+            IO.println("pass " + m.getName());
+        } catch (InvocationTargetException e) {
+            IO.println("FAIL " + m.getName() + ": " + e.getCause().getMessage());
+        }
+    }
+}
+```
+
+that's JUnit's core idea in miniature. more on retention, targets and repeatable annotations in [annotations](/learn/meta/annotations).
+
+### item 40 · put @Override on every override
+
+without it, a typo or a wrong parameter type turns your "override" into an overload, and nothing tells you:
+
+<Predict options={["1", "2"]} answer={1}>
+```java
+class Tag {
+    final String name;
+    Tag(String name) { this.name = name; }
+
+    public boolean equals(Tag other) { return name.equals(other.name); }
+    @Override public int hashCode() { return name.hashCode(); }
+}
+
+void main() {
+    var tags = new HashSet<Tag>();
+    tags.add(new Tag("java"));
+    tags.add(new Tag("java"));
+    IO.println(tags.size());
+}
+```
+<Explain>
+`equals(Tag)` doesn't override `equals(Object)`, it overloads it. `HashSet` calls `equals(Object)`, which is still identity, so the two tags are different and the size is 2. put `@Override` on it and javac refuses to compile: "method does not override or implement a method from a supertype". that's the whole point of the annotation.
+</Explain>
+</Predict>
+
+the one place you can skip it: implementing an abstract method in a concrete class, where the compiler already complains if you get it wrong. using it there too is harmless.
+
+### item 41 · marker interfaces define types
+
+a marker interface has no methods (`Serializable`, `Cloneable`, `RandomAccess`). a marker annotation does the same job for tools. the difference: an interface is a **type**, so the compiler can check it in signatures (a method taking `Serializable` rejects non-serializable arguments at compile time). use an interface when you'd ever want to write a method that only accepts marked objects; use an annotation when you're marking methods or fields, or when a framework already speaks annotations.
+
+<Keylines>
+- an enum is a class with fixed instances: fields, methods, per-constant behavior, type safety.
+- `ordinal()` is a position, not data. store numbers in fields.
+- EnumSet is a bit vector with types. EnumMap is an ordinal-indexed array with types.
+- to let users add "enum constants", have the enum implement an interface.
+- annotations beat naming conventions: checked, typed, found by reflection.
+- `@Override` on every override turns a silent overload into a compile error.
+</Keylines>

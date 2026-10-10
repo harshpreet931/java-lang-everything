@@ -1,0 +1,247 @@
+import { AqsQueue } from "@/components/figures/concurrency/AqsQueue";
+import { RwLock } from "@/components/figures/concurrency/RwLock";
+import { Conditions } from "@/components/figures/concurrency/Conditions";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const optimistic = [
+  { mem: { version: 256, x: 3, y: 4 }, note: "a StampedLock is, underneath, mostly a version number. the point is at (3, 4)." },
+  { ops: ["tryOptimisticRead() → 256", null], note: "the reader takes no lock at all. it just remembers the current stamp, 256." },
+  { ops: ["cx = x → 3", null], note: "and starts copying fields into locals." },
+  { ops: [null, { t: "writeLock()", k: "meta" }], mem: { version: "locked" }, note: "a writer arrives. it doesn't have to wait for the reader, because the reader never took anything." },
+  { ops: [null, "x = 6, y = 8"], mem: { x: 6, y: 8 } },
+  { ops: [null, { t: "unlockWrite() → 512", k: "meta" }], mem: { version: 512 }, note: "unlocking bumps the version: 256 → 512." },
+  { ops: [{ t: "cy = y → 8", k: "dead" }, null], note: "the reader copies y. it now holds (3, 8): half before the write, half after. a point that never existed." },
+  { ops: [{ t: "validate(256) → false", k: "hot" }, null], note: "before using the copies, validate. the version moved, so the copies are garbage and get thrown away." },
+  { ops: [{ t: "readLock(), re-read → 6, 8", k: "meta" }, null], note: "fall back to a real read lock and copy again, consistently this time." },
+  { ops: [{ t: "distance = 10.0", k: "live" }, null], note: "most of the time validate() returns true and the reader never touched a lock. that's the whole trick." },
+];
+
+<InShort>
+`java.util.concurrent.locks` gives you locks as objects. **`ReentrantLock`** does what `synchronized` does, plus try-with-timeout, interruptible waiting, fairness and multiple **`Condition`**s. **`ReadWriteLock`** lets many readers in at once. **`StampedLock`** lets readers skip locking entirely and check afterwards. nearly all of them are built on one class: **AbstractQueuedSynchronizer (AQS)**, an int plus a queue of parked threads.
+</InShort>
+
+## the picture
+
+`synchronized` is the door with a built-in lock: simple, automatic, can't forget to unlock it, can't do anything clever. `ReentrantLock` is the same door with a keypad. you have to remember to lock it on your way out (there's no block to do it for you), but you get options: "try the door and walk away if it's locked", "wait at most 100 ms", "stop waiting if someone calls me", "first come, first served".
+
+the rule that comes with the keypad: **unlock in `finally`**, every time.
+
+```java title="Counter.java"
+private final ReentrantLock lock = new ReentrantLock();
+private int count;
+
+void increment() {
+    lock.lock();
+    try {
+        count++;
+    } finally {
+        lock.unlock();   // runs even if the body throws
+    }
+}
+```
+
+forget the `finally`, throw once, and that lock is held forever by a thread that's moved on with its life. every other thread that touches it parks for good.
+
+## what you get over synchronized
+
+| | `synchronized` | `ReentrantLock` |
+| --- | --- | --- |
+| mutual exclusion + visibility | yes | yes (same memory semantics) |
+| reentrant | yes | yes (`getHoldCount()` tells you) |
+| unlock | automatic at the end of the block | manual, in `finally` |
+| try without blocking | no | `tryLock()` |
+| give up after a timeout | no | `tryLock(100, MILLISECONDS)` |
+| stop waiting when interrupted | no | `lockInterruptibly()` |
+| fair ordering | no | `new ReentrantLock(true)` |
+| several wait queues | no (one wait set) | `newCondition()`, as many as you like |
+| shows up in thread dumps as | BLOCKED, `waiting to lock <0x...>` | WAITING (parking), `parking to wait for <0x...>` |
+
+two of those, for real. the lock is held by main the whole time:
+
+```java title="Main.java" run output="got the lock? false\ngave up waiting: interrupted"
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+
+void main() throws InterruptedException {
+    ReentrantLock lock = new ReentrantLock();
+    lock.lock();                                         // main holds it and never lets go
+    Thread impatient = Thread.ofPlatform().start(() -> {
+        try {
+            boolean got = lock.tryLock(100, TimeUnit.MILLISECONDS);
+            IO.println("got the lock? " + got);          // false, after 100 ms
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    });
+    impatient.join();
+
+    Thread stuck = Thread.ofPlatform().start(() -> {
+        try {
+            lock.lockInterruptibly();                    // waits... until interrupted
+        } catch (InterruptedException e) {
+            IO.println("gave up waiting: interrupted");
+        }
+    });
+    Thread.sleep(100);
+    stuck.interrupt();
+    stuck.join();
+    lock.unlock();
+}
+```
+
+a thread stuck entering a `synchronized` block ignores interrupts completely. that difference is what lets you build [deadlock](/learn/concurrency/deadlocks-and-liveness) escape hatches and cancellable work with explicit locks.
+
+## the queue underneath: AQS
+
+`ReentrantLock`, `ReentrantReadWriteLock`, `Semaphore`, `CountDownLatch` and even the worker threads inside `ThreadPoolExecutor` all extend one class, `AbstractQueuedSynchronizer`. it holds:
+
+- **state**, a single `volatile int`. what it means is up to the subclass: hold count for a lock, permits for a semaphore, the remaining count for a latch.
+- **a wait queue**, a linked list of nodes for threads that couldn't get in, based on the CLH lock (Craig, Landin and Hagersten). enqueueing is one CAS on `tail`.
+- **park / unpark** (`LockSupport`) to put queued threads to sleep and wake them, with no `synchronized` anywhere.
+
+acquiring is "CAS the state, and if that fails, join the queue and park". releasing is "update the state, and unpark the first one in line". here's a `ReentrantLock`, opened up:
+
+<Figure wide caption={<>lock with T1, then lock with T2 and T3: they <C k="ref">link</C> into the queue and park. unlock T1 and T2 is woken, but before it runs, have T4 call <strong>lock()</strong>: in a non-fair lock T4 barges straight past the queue. switch to <code>new ReentrantLock(true)</code> and try the same thing.</>}>
+<AqsQueue />
+</Figure>
+
+that barge is not a bug. it's why the default lock is non-fair: the thread that's already running can take a free lock immediately, while waking a parked thread takes microseconds. letting the runner in keeps throughput up. a fair lock hands the lock over in queue order every time, which means a context switch on almost every handoff. it's much slower under contention, and it still doesn't guarantee fair *scheduling*: the OS decides who actually runs.
+
+<Note title="tryLock() ignores fairness">
+`tryLock()` with no arguments barges even on a fair lock: if the lock is free at that moment, you get it, queue or not. `tryLock(0, SECONDS)` respects fairness. small detail, real surprise.
+</Note>
+
+## many readers, one writer
+
+lots of shared state is read constantly and written rarely (config, caches, routing tables). a plain lock makes readers wait for each other for no reason. a `ReadWriteLock` has two locks that cooperate: any number of threads can hold the **read lock** together, but the **write lock** is exclusive, against readers and other writers.
+
+<Figure wide caption={<>take read locks with R1 and R2: they share. now ask for the write lock: W queues until every reader leaves. then try R3: even though readers are inside, it queues <em>behind</em> W, otherwise a stream of readers could starve the writer forever.</>}>
+<RwLock />
+</Figure>
+
+```java title="Config.java"
+private final ReadWriteLock rw = new ReentrantReadWriteLock();
+private Map<String, String> settings = new HashMap<>();
+
+String get(String key) {
+    rw.readLock().lock();
+    try { return settings.get(key); }
+    finally { rw.readLock().unlock(); }
+}
+
+void put(String key, String value) {
+    rw.writeLock().lock();
+    try { settings.put(key, value); }
+    finally { rw.writeLock().unlock(); }
+}
+```
+
+the read lock isn't free (every acquire still CASes a shared count, which bounces a cache line between cores), so it only pays off when reads are long or very frequent compared to writes. for a map, a [ConcurrentHashMap](/learn/concurrency/concurrent-collections) usually beats both. and for "read often, replace rarely", a `volatile` reference to an immutable map beats everything.
+
+<Gotcha title="you can't upgrade">
+a thread holding the read lock that calls `writeLock().lock()` deadlocks with itself: the write lock waits for all readers to leave, including you. release the read lock first, or use `StampedLock`, which has `tryConvertToWriteLock`. downgrading (write → read) is allowed: take the read lock, then release the write lock.
+</Gotcha>
+
+## StampedLock: read first, check later
+
+`StampedLock` (java 8) adds an **optimistic read**: don't lock at all, copy the fields you need, then ask "did any writer get in while I was reading?". if not, you're done, having written nothing to shared memory. if yes, retry with a real read lock.
+
+<Figure wide caption={<>the stamp is a version number. the reader copies <code>x</code>, a writer sneaks in, the reader copies <code>y</code>, and ends up holding a <C k="dead">point that never existed</C>. <code>validate</code> catches it, and the reader falls back to a real <C k="meta">read lock</C>. the stamps are real: 256, then 512 after one write, on jdk 25.</>}>
+<Lanes threads={["reader", "writer"]} cells={["version", "x", "y"]} steps={optimistic} />
+</Figure>
+
+```java title="Main.java" run output="5.0"
+import java.util.concurrent.locks.StampedLock;
+
+class Point {
+    private final StampedLock lock = new StampedLock();
+    private double x, y;
+
+    void move(double dx, double dy) {
+        long stamp = lock.writeLock();
+        try {
+            x += dx;
+            y += dy;
+        } finally {
+            lock.unlockWrite(stamp);
+        }
+    }
+
+    double distanceFromOrigin() {
+        long stamp = lock.tryOptimisticRead();   // no lock taken, just a version number
+        double cx = x, cy = y;                   // copy the fields
+        if (!lock.validate(stamp)) {             // did a writer sneak in?
+            stamp = lock.readLock();             // yes: fall back to a real read lock
+            try {
+                cx = x;
+                cy = y;
+            } finally {
+                lock.unlockRead(stamp);
+            }
+        }
+        return Math.sqrt(cx * cx + cy * cy);
+    }
+}
+
+void main() {
+    Point p = new Point();
+    p.move(3, 4);
+    IO.println(p.distanceFromOrigin());
+}
+```
+
+<Gotcha title="StampedLock is not reentrant">
+lock it twice from the same thread and you deadlock yourself. it also has no `Condition`s. and in the optimistic section you might read inconsistent values, so only copy fields into locals there; never follow a reference or loop on what you read until `validate` says it's fine.
+</Gotcha>
+
+## conditions: wait sets with names
+
+a monitor has exactly one wait set, which is why the [bounded buffer](/learn/concurrency/wait-and-notify) needed `notifyAll`. a `Lock` can create as many `Condition` objects as you need, each its own queue: `await()` is `wait()`, `signal()` is `notify()`, `signalAll()` is `notifyAll()`.
+
+<Figure caption={<>the same four threads, waiting. on the left, one mixed wait set. on the right, producers and consumers wait on separate conditions, so a <code>signal()</code> can't wake the wrong kind. this is exactly how <code>ArrayBlockingQueue</code> is built.</>}>
+<Conditions />
+</Figure>
+
+```java title="BoundedBuffer.java"
+private final ReentrantLock lock = new ReentrantLock();
+private final Condition notFull = lock.newCondition();
+private final Condition notEmpty = lock.newCondition();
+
+void put(T item) throws InterruptedException {
+    lock.lock();
+    try {
+        while (items.size() == capacity) notFull.await();
+        items.addLast(item);
+        notEmpty.signal();          // wake one consumer, never a producer
+    } finally {
+        lock.unlock();
+    }
+}
+```
+
+the same rules as `wait()` apply: you must hold the lock, and `await()` belongs in a `while` loop.
+
+## which one
+
+- start with `synchronized`. it's simpler, it can't leak a lock, and it's not slower anymore.
+- reach for `ReentrantLock` when you need `tryLock`, a timeout, interruptibility, fairness or several conditions.
+- `ReadWriteLock` when reads are long and dominate. measure first.
+- `StampedLock` for tiny, hot, read-mostly data (coordinates, counters, small value pairs), and only if you're careful.
+- before any of them: can the state be immutable, confined to one thread, or inside a concurrent collection?
+
+<Deep title="virtual threads and locks">
+before java 24, a virtual thread blocking inside `synchronized` pinned its carrier thread, so "replace synchronized with ReentrantLock" was standard advice for virtual-thread code. since java 24 ([JEP 491](https://openjdk.org/jeps/491)), synchronized no longer pins, so that advice is mostly obsolete. the details are in [virtual threads](/learn/concurrency/virtual-threads).
+</Deep>
+
+<Interview q="why is ReentrantLock non-fair by default?">
+throughput. when a lock is released, the thread that's already running on a CPU can grab it immediately with one CAS, while waking the first queued thread takes a context switch. letting a running thread barge in keeps the CPU busy. a fair lock always hands off to the head of the queue, so almost every handoff pays for a wake-up. fairness also doesn't fix starvation at the scheduler level, so it's rarely worth the cost.
+</Interview>
+
+<Keylines>
+- `ReentrantLock` = synchronized plus tryLock, timeouts, interruptibility, fairness and conditions.
+- always `lock()` before `try`, and `unlock()` in `finally`.
+- AQS is one volatile int plus a queue of parked threads. most of `java.util.concurrent` sits on it.
+- non-fair lets a running thread barge in. that's a feature: it's faster.
+- read-write locks share between readers. a writer waiting in line blocks new readers.
+- `StampedLock`'s optimistic read takes no lock at all, then checks the version.
+</Keylines>

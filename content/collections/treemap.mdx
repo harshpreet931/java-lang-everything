@@ -1,0 +1,118 @@
+import { RedBlackLab } from "@/components/figures/collections/RedBlackLab";
+import { NavigableLine } from "@/components/figures/collections/NavigableLine";
+
+<InShort>
+a `TreeMap` keeps its keys **sorted**, in a **red-black tree**: a binary search tree that recolors and rotates itself on every insert so it never gets lopsided. `get`, `put` and `remove` are **O(log n)**.
+
+because it's sorted, it answers questions a `HashMap` can't: the nearest key below x, the nearest above, everything between a and b.
+</InShort>
+
+## the picture
+
+you know how a `HashMap` is fast but has no idea which key is "next"? sometimes order is the whole point: leaderboards, time series, price levels, "which shift covers 14:30?".
+
+a binary search tree is the classic answer: smaller keys to the left, bigger to the right, so finding a key is a walk from the root, halving the candidates at each step. the catch is that it only halves *if the tree is bushy*. insert keys in sorted order into a plain BST and every node hangs off the right of the last one. you've built a linked list with extra steps, and lookups are O(n).
+
+a red-black tree is a BST with a tidiness rule. every node carries one extra bit, its colour, and four rules hold after every insert:
+
+1. every node is red or black.
+2. the root is black.
+3. a red node never has a red child.
+4. every path from a node down to an empty spot passes the same number of black nodes.
+
+rules 3 and 4 together mean the longest path can be at most twice the shortest. so the height stays under 2·log₂(n + 1), whatever order the keys arrive in. when an insert breaks a rule, the tree fixes it locally with recolors and rotations.
+
+<Figure wide caption={<>press step (or <kbd>←</kbd> <kbd>→</kbd>) and watch each insert: walk down, hang a new red node, then fix. a <strong>recolor</strong> pushes the problem up the tree, a <strong>rotation</strong> fixes it on the spot. load <strong>1 to 12, in order</strong> and compare the height with the plain BST's. red nodes are drawn tan, because red means a bug everywhere else on this site.</>}>
+<RedBlackLab />
+</Figure>
+
+that's the exact algorithm from `TreeMap.fixAfterInsertion` in jdk 25. i checked the trees it builds against the real `TreeMap` (read through reflection): same shape, same colours, for every sequence in the figure.
+
+three moves, that's all there is:
+
+- **recolor** when the new node's parent and uncle are both red: parent and uncle go black, grandparent goes red, and the check continues from the grandparent (it may now have a red parent).
+- **one rotation** when the uncle is black and the three nodes form a straight line: the parent moves up, the grandparent moves down.
+- **two rotations** when they form a zig-zag: the first straightens it, the second is the straight-line case.
+
+a rotation is a constant-time pointer swap, and an insert does at most two of them. recolors can climb the tree, but that's O(log n) at worst. that's why `put` is O(log n) with a small constant.
+
+## what sorted buys you
+
+`TreeMap` implements `NavigableMap`, which is `SortedMap` plus "search around" methods:
+
+<Figure caption={<>drag <C k="hot">x</C>. <code>floorKey</code> and <code>ceilingKey</code> <C k="ref">point at</C> the nearest key on either side, or at x itself when x is a key (try 40). <code>lowerKey</code> and <code>higherKey</code> are the strict versions. pick a view to see which keys a <C k="live">headMap, tailMap or subMap</C> contains.</>}>
+<NavigableLine />
+</Figure>
+
+```java title="Main.java" run output="[10, 20, 30, 40, 50, 60, 70]\n40 50 30 50\n{10=v10, 20=v20, 30=v30} [70]\n[20, 30, 40] 10 70=v70\nnull 70"
+void main() {
+    TreeMap<Integer, String> m = new TreeMap<>();
+    for (int k : List.of(50, 20, 70, 10, 40, 60, 30)) m.put(k, "v" + k);
+    IO.println(m.keySet());
+    IO.println(m.floorKey(45) + " " + m.ceilingKey(45) + " " + m.lowerKey(40) + " " + m.higherKey(40));
+    IO.println(m.headMap(40) + " " + m.tailMap(60, false).keySet());
+    IO.println(m.subMap(20, 50).keySet() + " " + m.firstKey() + " " + m.lastEntry());
+    IO.println(m.floorKey(5) + " " + m.descendingMap().firstKey());
+}
+```
+
+the defaults trip people up: `headMap(to)` excludes `to`, `tailMap(from)` includes `from`, `subMap(from, to)` is from-inclusive, to-exclusive (like `String.substring`). every one of them has an overload with explicit `boolean` flags, and the views are **live**: put into the map and a matching key shows up in the view.
+
+a real use: grade boundaries, or any "which bracket does this fall into" table.
+
+<Predict options={["B A null", "A A D", "B B D", "C A null"]} answer={0}>
+```java
+var grades = new TreeMap<Integer, String>(Map.of(90, "A", 80, "B", 70, "C", 60, "D"));
+IO.println(grades.floorEntry(85).getValue() + " " + grades.floorEntry(90).getValue() + " " + grades.floorEntry(59));
+```
+<Explain>
+`floorEntry(85)` is the greatest key ≤ 85, which is 80 → `B`. `floorEntry(90)` lands exactly on 90 → `A` (floor is inclusive). nothing is ≤ 59, so it's `null`. one `TreeMap` replaces a whole if/else ladder, and stays O(log n) however many brackets you add.
+</Explain>
+</Predict>
+
+## the comparator is the law
+
+a `TreeMap` never calls `equals` or `hashCode`. it calls `compareTo` (or your `Comparator`) and that's it. two keys that compare as 0 are, as far as the map is concerned, the same key.
+
+<Gotcha title="a comparator that merges keys">
+```java title="Main.java" run output="{Duke=3} 1 3"
+void main() {
+    var m = new TreeMap<String, Integer>(String.CASE_INSENSITIVE_ORDER);
+    m.put("Duke", 1);
+    m.put("duke", 2);
+    m.put("DUKE", 3);
+    IO.println(m + " " + m.size() + " " + m.get("dUkE"));
+}
+```
+three "different" strings, one entry. the first key spelling sticks, the value gets replaced. that's sometimes exactly what you want (a case-insensitive lookup table) and sometimes a silent data loss bug, like a `Comparator.comparing(Person::age)` that keeps one person per age. the comparator should be **consistent with equals** unless you mean it.
+</Gotcha>
+
+two more ways it bites:
+
+- **keys must be comparable.** a key type that isn't `Comparable` (and no `Comparator` given) throws `ClassCastException` on the very first `put`, even into an empty map.
+- **no `null` keys** with natural ordering: `put(null, v)` throws `NullPointerException`, because there's nothing to compare it with. (`null` values are fine.)
+
+## `TreeMap` or `HashMap`?
+
+| | `HashMap` | `TreeMap` |
+| --- | --- | --- |
+| `get` / `put` / `remove` | O(1) average | O(log n) |
+| iteration order | none you can rely on | sorted by key |
+| floor / ceiling / ranges | no | yes |
+| key requirements | `equals` + `hashCode` | `compareTo` or a `Comparator` |
+| `null` key | one allowed | no (with natural ordering) |
+| memory per entry | ~32 bytes + the table | ~40 bytes (key, value, left, right, parent, colour) |
+
+in my rough measurements (100,000 `Integer` keys, jdk 25, the same setup as the [deque numbers](/learn/collections/linkedlist-and-arraydeque)), `TreeMap.get` took about 150 ns against about 33 ns for `HashMap.get`. a balanced tree of 100,000 nodes means 17 to 20 levels of pointer chasing, a hash table is one or two hops. so: `HashMap` by default, `TreeMap` when you need the order or the navigation. and if several threads need a sorted map, there's `ConcurrentSkipListMap` (more in [concurrent collections](/learn/concurrency/concurrent-collections)).
+
+<Interview q="how does TreeMap stay O(log n)?">
+it's a red-black tree. every node is red or black, the root is black, no red node has a red child, and every root-to-leaf path has the same number of black nodes. those rules cap the height at about 2·log₂(n). a new node goes in as a red leaf, and if that creates two reds in a row, the tree fixes it bottom-up: recolor when the uncle is red (which can move the problem up), or one or two rotations when the uncle is black (which ends it). so an insert is a log n walk down plus at most two rotations.
+</Interview>
+
+<Keylines>
+- `TreeMap` = a red-black tree. sorted keys, O(log n) everything.
+- recolor when the uncle is red, rotate when it's black. at most two rotations per insert.
+- floor, ceiling, lower, higher, headMap, tailMap, subMap: the reasons to pick it.
+- the comparator defines equality. compare-equal keys collapse into one.
+- need speed and no order? `HashMap`. need order? `TreeMap`.
+</Keylines>

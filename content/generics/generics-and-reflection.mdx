@@ -1,0 +1,130 @@
+import { WhatSurvives } from "@/components/figures/generics/WhatSurvives";
+
+<InShort>
+erasure strips type arguments from **objects** and from the bytecode that runs. it does not strip them from **declarations**: class headers, fields, method signatures and `extends` clauses keep their full generic types in a `Signature` attribute, and reflection reads them back with `getGenericType()` and `getGenericSuperclass()`.
+
+that loophole is how Jackson knows you asked for a `List<User>`: a **super type token**. and when your own code needs a type at run time, it takes a **`Class<T>`** argument and asks it.
+</InShort>
+
+## the picture
+
+you know how everyone says "generics are erased, there's no type info at run time", and then a JSON library somehow turns text into a `List<User>` with real `User` objects in it? both are true. what's erased depends on *where* the type was written.
+
+think of a building. the furniture (objects) has no labels on it, you can't look at a chair and know which room it was ordered for. but the building's blueprints (the class files) are kept on file, and they say "room 3: twelve chairs, oak". reflection is reading the blueprints. you can learn what a field was *declared* to hold, never what one particular object *was made* with.
+
+<Figure wide caption={<>click a row. <C k="live">survives</C> means the generic type is in the class file and reflection can read it, <C k="dead">erased</C> means it&apos;s gone at run time. every call and output is real, from jdk 25.</>}>
+<WhatSurvives />
+</Figure>
+
+the rule of thumb: if the type is part of a **declaration** that the class file has to describe anyway (a class, a field, a method, a superclass), its generic form is kept. if it only lives inside method bodies (a local variable, a `new ArrayList<>()`, a cast), it's gone.
+
+## where it's kept: the Signature attribute
+
+every class file entry has a **descriptor**, the erased type the JVM links against. javac adds a second, optional attribute next to it, `Signature`, with the full generic type spelled in a compact syntax. the JVM ignores it completely; javac reads it (that's how you can call generic methods from a compiled jar) and so does reflection:
+
+```bash
+$ javap -v -p Repo.class
+class Repo<T extends java.lang.Comparable<T>> extends java.lang.Object
+  java.util.Map<java.lang.String, java.util.List<T>> index;
+    descriptor: Ljava/util/Map;
+    Signature: #12   // Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TT;>;>;
+Signature: #15       // <T::Ljava/lang/Comparable<TT;>;>Ljava/lang/Object;
+```
+
+(trimmed to the interesting lines.) `TT;` is "the type variable `T`", and `T::Ljava/lang/Comparable<TT;>;` is "`T` with an interface bound of `Comparable<T>`". the full grammar is in chapter 4 of the JVM spec, and you'll never need it, but it's nice to see that the information is just sitting there. more on the file itself in [the class file format](/learn/jvm/class-file-format).
+
+<Predict options={["String", "E", "T", "java.lang.Object"]} answer={1}>
+```java
+List<String> names = new ArrayList<>();
+IO.println(names.getClass().getTypeParameters()[0]);
+```
+<Explain>
+`getClass()` is `ArrayList`, and `ArrayList` is declared `ArrayList<E>`, so you get its type *parameter*, `E` (checked on jdk 25). the type *argument* this object was created with, `String`, was never recorded anywhere. the declaration survives, the instantiation doesn't.
+</Explain>
+</Predict>
+
+## super type tokens
+
+so a superclass's type arguments survive, and the object's don't. what if you could turn "the object's type" into "a superclass's type"? that's the trick, named by Neal Gafter in 2006: make an **anonymous subclass** at the call site. the `{}` at the end is doing all the work.
+
+```java title="Main.java" run output="java.util.Map<java.lang.String, java.util.List<java.lang.Integer>>\nMain$2\nclass java.lang.String\njava.util.List<T>"
+import java.lang.reflect.*;
+import java.util.*;
+
+abstract class TypeRef<T> {
+    final Type type;
+
+    protected TypeRef() {
+        var parent = (ParameterizedType) getClass().getGenericSuperclass();
+        type = parent.getActualTypeArguments()[0];
+    }
+}
+
+public class Main {
+    static <T> TypeRef<List<T>> listOf() { return new TypeRef<List<T>>() {}; }
+
+    public static void main(String[] args) {
+        var ref = new TypeRef<Map<String, List<Integer>>>() {};
+        System.out.println(ref.type);
+        System.out.println(ref.getClass().getName());
+        System.out.println(new TypeRef<String>() {}.type);
+        System.out.println(Main.<String>listOf().type);
+    }
+}
+```
+
+<Figure caption={<>how <code>new TypeRef&lt;Map&lt;String, List&lt;Integer&gt;&gt;&gt;() {"{}"}</code> remembers its type. hover a stage. the key step is the second one: javac writes the type argument into a class file, where it can&apos;t be erased.</>}>
+<Flow stages={[
+  { label: "{ }", sub: "anonymous subclass", note: "new TypeRef<...>() {} doesn't create a TypeRef. it declares and instantiates a brand new class, Main$2, that extends TypeRef<Map<String, List<Integer>>>." },
+  { label: "Main$2.class", sub: "Signature attribute", note: "because the type argument is now part of a class declaration (the extends clause), javac records it: LTypeRef<Ljava/util/Map<Ljava/lang/String;Ljava/util/List<Ljava/lang/Integer;>;>;>;" },
+  { label: "getGenericSuperclass()", sub: "in TypeRef's constructor", note: "getClass() is the runtime class, Main$2. asking for its generic superclass reads that Signature back." },
+  { label: "ParameterizedType", sub: "TypeRef<...>", note: "a raw type (TypeRef) plus its actual type arguments, as java.lang.reflect.Type objects you can walk recursively." },
+  { label: "Map<String, List<Integer>>", sub: "captured", note: "getActualTypeArguments()[0]. a JSON library walks this tree to know it must build a HashMap whose values are lists of Integers." },
+]} />
+</Figure>
+
+this is exactly `new TypeReference<List<User>>() {}` in Jackson, `new TypeToken<List<User>>() {}.getType()` in Gson, and `TypeLiteral` in Guice. now look at the last line of that output: a token created *inside* a generic method captures `List<T>`, not `List<String>`. the anonymous class was compiled once, inside `listOf`, where all javac knew was `T`. a super type token only works where the full type is written out in the source.
+
+## `Class<T>` tokens
+
+the simpler tool, when you don't need nested type arguments: a `Class` object, which really does exist at run time, and is itself generic. `String.class` has type `Class<String>`, so a method that takes a `Class<T>` gets both a compile-time `T` and a run-time object to check it with:
+
+```java title="Main.java" run output="[ada, bob] [42, 7] [42, 3.5, 7]"
+static <T> List<T> onlyOf(Class<T> type, List<?> mixed) {
+    List<T> out = new ArrayList<>();
+    for (Object o : mixed)
+        if (type.isInstance(o)) out.add(type.cast(o));   // a checked cast: no warning
+    return out;
+}
+
+void main() {
+    List<?> mixed = List.of("ada", 42, "bob", 3.5, 7);
+    List<String> names = onlyOf(String.class, mixed);
+    List<Integer> ints = onlyOf(Integer.class, mixed);
+    List<Number> nums = onlyOf(Number.class, mixed);
+    IO.println(names + " " + ints + " " + nums);
+}
+```
+
+`type.cast(o)` is the run-time check that `(T) o` can never be (that one's an unchecked cast, erased to nothing). the JDK uses the same pattern everywhere a type is needed at run time: `EnumSet.noneOf(Class<E>)`, `getAnnotation(Class<A>)`, `ServiceLoader.load(Class<S>)`, `Array.newInstance(Class<?>, int)` for a real `T[]`. a map from `Class<T>` to values is the typesafe heterogeneous container of [effective java item 33](/learn/effective-java/generics).
+
+<Gotcha title="a Class can't say List<String>">
+there's one `Class` object per class, so `List.class` is all you get: `List<String>.class` doesn't even parse (`error: <identifier> expected`). a `Class<T>` token works for `String`, `User`, `int[]`, but the moment the type you need has its own type arguments, you need a `Type` (from a super type token) instead. that's why Jackson's `readValue` has both a `Class<T>` overload and a `TypeReference<T>` one.
+</Gotcha>
+
+<Deep title="the four kinds of Type">
+`java.lang.reflect.Type` has one plain implementation and four interfaces, and walking a generic type means switching over them: `Class` (a plain class like `String`), `ParameterizedType` (`Map<String, List<T>>`: a raw type plus arguments), `TypeVariable` (`T`, with its bounds), `WildcardType` (`? extends T`, with upper and lower bounds), and `GenericArrayType` (`T[]` or `List<String>[]`). since java 21 that's a natural fit for a [pattern matching switch](/learn/modern/pattern-matching), though the interfaces aren't sealed, so you still need a `default`.
+</Deep>
+
+<Interview q="if generics are erased, how does Jackson deserialize into a List<User>?">
+erasure removes type arguments from objects and bytecode, but generic types in declarations are kept in the class file's `Signature` attributes, and reflection exposes them. Jackson's `TypeReference` is a super type token: you write `new TypeReference<List<User>>() {}`, which creates an anonymous subclass whose superclass is `TypeReference<List<User>>`. that type argument is now part of a class declaration, so it's recorded, and `getClass().getGenericSuperclass()` reads it back as a `ParameterizedType`. bonus point: it only works where the type is spelled out concretely; inside a generic method it captures `T`.
+</Interview>
+
+<Keylines>
+- erasure removes type arguments from objects and bytecode, not from declarations.
+- fields, method signatures, class headers and `extends` clauses keep their generic types.
+- `getGenericType()`, `getGenericSuperclass()`, `toGenericString()` read them back.
+- super type token: an anonymous subclass turns a type argument into a declaration.
+- `Class<T>` tokens give generic code a real type to check against at run time.
+- a `Class` can't express `List<String>`. for that you need a `Type`.
+</Keylines>

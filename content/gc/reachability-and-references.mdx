@@ -1,0 +1,167 @@
+import { RootsMark } from "@/components/figures/gc/RootsMark";
+import { RefStrength } from "@/components/figures/gc/RefStrength";
+
+<InShort>
+an object is alive if there's a chain of references to it from a **GC root**: a local variable in some thread's stack, a static field, a JNI handle. everything else is garbage, even objects that point at each other.
+
+**soft**, **weak** and **phantom** references let you point at an object without keeping it alive.
+</InShort>
+
+## the picture
+
+you know how people say "the GC frees objects nobody uses"? that's not quite it. the GC has no idea what you "use". it only knows what you can **reach**.
+
+think of a fairground full of balloons. kids hold strings (the roots), balloons are tied to other balloons (fields pointing at objects). at closing time, staff don't hunt for abandoned balloons. they start at every kid's hand, follow every string, and tag every balloon they get to. anything untagged floats away, including two balloons that are tied to each other with nobody holding either.
+
+<Figure wide caption={<>step through a mark. the three <C k="ref">roots</C> are a local in main's frame (<code>order</code>), a local in a worker thread's frame (<code>req</code>), and a static field (<code>CACHE</code>). watch H and I: they point at each other and still end up <C k="dead">garbage</C>. and K points <em>at</em> a live object, which does nothing for K.</>}>
+<RootsMark />
+</Figure>
+
+see the direction? reachability flows **from** roots, along references. pointing at something alive doesn't make you alive (that's K). being pointed at by something dead doesn't either (that's I, kept company by H).
+
+## what counts as a root
+
+in HotSpot, marking starts from all of these:
+
+<Defs>
+<dt>thread stacks</dt>
+<dd>every local variable and operand in every frame of every live thread. the big one.</dd>
+<dt>static fields</dt>
+<dd>reachable through their class, which is reachable through its class loader. the app class loader never goes away, so neither do your statics.</dd>
+<dt>live threads</dt>
+<dd>a started, not-yet-finished `Thread` is a root itself. so is everything its `Runnable` holds.</dd>
+<dt>JNI references</dt>
+<dd>objects native code is holding on to, through local or global JNI handles.</dd>
+<dt>held monitors</dt>
+<dd>an object some thread is `synchronized` on right now.</dd>
+<dt>JVM internals</dt>
+<dd>the system class loader, preallocated exceptions like the `OutOfMemoryError` it needs to throw when there's no memory left, and friends.</dd>
+</Defs>
+
+<Predict options={["0", "1", "2"]} answer={2} question="after the last line, how many of these Nodes can the GC reclaim?">
+```java
+class Node { Node next; }
+
+Node a = new Node();
+Node b = new Node();
+a.next = b;
+b.next = a;
+a = null;
+b = null;
+```
+<Explain>
+both. each one is pointed at by the other, but no root reaches either, so marking never touches them. a tracing collector doesn't count references at all. it only asks "can i get here from a root?"
+</Explain>
+</Predict>
+
+<Deep title="why not just count references?">
+reference counting (what CPython and Swift do) keeps a counter in every object and frees it when the counter hits zero. two problems. cycles: in the predict above, each Node's count is stuck at 1 forever, so you need a separate cycle detector. and cost: every pointer assignment now has to bump two counters, atomically if threads share the object. java's collectors trace instead. the cost of a trace is proportional to what's **alive**, and assigning a reference stays a plain store (plus a small GC barrier, more on that in [how GC works](/learn/gc/gc-fundamentals)).
+</Deep>
+
+## references that don't keep things alive
+
+sometimes you want to point at an object **without** keeping it alive: a cache entry that should vanish under memory pressure, metadata attached to an object you don't own, a native resource that should be freed once its owner is gone. `java.lang.ref` gives you three weaker kinds of reference. the GC treats each one differently.
+
+<Figure wide caption={<>each Image is reachable only through the reference in its row. run a GC with plenty of memory, then switch to tight and run it again. the <C k="meta">queue</C> is a <code>ReferenceQueue</code>: the GC puts a reference there after clearing it, so your code can find out.</>}>
+<RefStrength />
+</Figure>
+
+| reference | `get()` returns | cleared when | use it for |
+| --- | --- | --- | --- |
+| strong (a normal field or local) | the object | never, while reachable | everything |
+| `SoftReference` | the object, until cleared | memory is getting tight. all of them before an `OutOfMemoryError` | memory-sensitive caches (with care) |
+| `WeakReference` | the object, until cleared | the next GC that finds it only weakly reachable | metadata keyed by objects you don't own, listeners |
+| `PhantomReference` | always `null` | after the object is unreachable, then it's queued | cleanup after death: `Cleaner` is built on it |
+
+here's the classic weak one in action. `WeakHashMap` holds its keys weakly, so an entry disappears once nothing else holds the key:
+
+```java title="Main.java" run
+import java.util.*;
+
+void main() throws Exception {
+    Map<Object, String> labels = new WeakHashMap<>();
+    Object user = new Object();
+    labels.put(user, "ada");
+    IO.println("before gc: " + labels.size());
+
+    user = null;          // the only strong reference is gone
+    System.gc();          // a hint, not an order
+    Thread.sleep(100);    // give the reference handler thread a moment
+
+    IO.println("after gc:  " + labels.size());
+}
+```
+
+on my machine (jdk 25, every collector i tried) it prints `before gc: 1` then `after gc:  0`. but notice what it took. `System.gc()` is only a request: `-XX:+DisableExplicitGC` turns it into a no-op, and the spec lets the JVM ignore it. and the sleep is real: without it, G1 printed `after gc:  1` every time. the GC had already cleared the weak reference, but `WeakHashMap` only drops the entry when it polls its `ReferenceQueue`, and a JVM thread called the reference handler hadn't queued it yet. weak means "eventually", not "now".
+
+<Gotcha title="the WeakHashMap that never shrinks">
+if the **value** holds a strong reference to its own key (say, `map.put(user, new Session(user))`), the entry can never be cleared: the map holds the value strongly, the value holds the key strongly. it's a leak that looks exactly like a cache. the keys of a `WeakHashMap` must not be reachable from its values.
+</Gotcha>
+
+<Note title="soft references make bad caches">
+it's tempting: "a cache that empties itself when memory runs low!" in practice the JVM clears soft references in bulk when memory gets tight (roughly: a soft referent survives about one second per free megabyte since it was last used, `-XX:SoftRefLRUPolicyMSPerMB=1000`), so your cache drops everything at the worst moment and refills under load, which causes more GC. a cache with an explicit size limit (a `LinkedHashMap` with `removeEldestEntry`, see [LRU caches](/learn/collections/linkedhashmap-and-lru)) behaves much better.
+</Note>
+
+## cleaning up after an object
+
+`finalize()` was java's original "run this when the object dies" hook. it's deprecated for removal since java 18 (JEP 421), and you can already switch it off with `--finalization=disabled`. it was bad in every way: it ran on an unknown thread at an unknown time (or never), an object with a finalizer needed at least two GCs to be reclaimed, and `finalize()` could store `this` somewhere and bring the object back to life.
+
+the replacement is `java.lang.ref.Cleaner` (java 9), built on phantom references. you register an object and a cleanup action. when the object becomes phantom reachable, a cleaner thread runs the action. and you should still close things explicitly: the cleaner is the safety net, not the plan.
+
+```java title="Main.java" run
+import java.lang.ref.Cleaner;
+
+static final Cleaner CLEANER = Cleaner.create();
+
+// the cleanup state. it must NOT point back at the Buffer, or the Buffer never dies.
+record Release(int id) implements Runnable {
+    public void run() { IO.println("released native memory of buffer " + id); }
+}
+
+static class Buffer implements AutoCloseable {
+    private final Cleaner.Cleanable cleanable;
+    Buffer(int id) { cleanable = CLEANER.register(this, new Release(id)); }
+    public void close() { cleanable.clean(); }   // runs the action at most once
+}
+
+void main() throws Exception {
+    try (var a = new Buffer(1)) {
+        IO.println("using buffer 1");
+    }
+    new Buffer(2);            // forgot to close it
+    System.gc();
+    Thread.sleep(100);
+    IO.println("done");
+}
+```
+
+what i got:
+
+```text nolines
+using buffer 1
+released native memory of buffer 1
+released native memory of buffer 2
+done
+```
+
+buffer 1 was released by `close()`, right when the `try` ended. buffer 2 was released by the cleaner, after a GC noticed nobody could reach it. same action, and `clean()` guarantees it runs at most once either way.
+
+<Gotcha title="a lambda that captures this">
+the classic cleaner bug is `CLEANER.register(this, () -> free(this.address))`. the lambda captures `this`, the cleaner holds the lambda strongly, so the object is always reachable and the action never runs. keep the cleanup state in a separate object (a record or a static nested class) that knows the address but not the owner.
+</Gotcha>
+
+<Deep title="an object can die while its method is still running">
+reachability is about what the program **will** use, not what's in scope. once the JIT sees a local is never read again, that stack slot stops being a root, even in the middle of the method. so an object can become unreachable (and its cleaner can run) while one of its own methods is still executing. if that method is still using a native resource the cleaner frees, that's a use-after-free. `Reference.reachabilityFence(obj)` (java 9) at the end of the method says "keep this alive until here".
+</Deep>
+
+<Interview q="what's the difference between a soft and a weak reference?">
+both let the GC collect the referent once no strong references are left. a weak reference is cleared at the next GC that finds the object only weakly reachable. a soft reference is cleared only when the JVM decides it needs the memory, and the JVM promises to clear all of them before throwing `OutOfMemoryError`. weak is for "attach data to an object without keeping it alive" (like `WeakHashMap`). soft was meant for memory-sensitive caches, though a size-bounded cache is usually the better tool. bonus: a phantom reference's `get()` always returns `null`. it only exists to tell you, through a `ReferenceQueue`, that the object is gone.
+</Interview>
+
+<Keylines>
+- alive means reachable from a root: stack locals, statics, live threads, JNI handles.
+- cycles don't matter. tracing never counts references, so unreachable cycles are just garbage.
+- soft: cleared when memory is tight. weak: cleared at the next GC. phantom: only tells you it's gone.
+- `System.gc()` is a hint, and weak references clear "eventually", not instantly.
+- `finalize()` is deprecated for removal. use try-with-resources, and `Cleaner` as the safety net.
+</Keylines>

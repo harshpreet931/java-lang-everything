@@ -1,0 +1,248 @@
+import { ExprLab } from "@/components/figures/modern/ExprLab";
+
+<InShort>
+**data-oriented programming** is a style, not a feature: model your data as plain immutable **records**, group the alternatives under a **sealed** interface, and write behaviour as functions that **switch** over the cases with record patterns. records give you "this *and* that", sealed types give you "this *or* that". together they're **algebraic data types**, the thing functional languages have had for decades.
+
+the compiler then checks every function handles every case. java 21 is where all the pieces landed.
+</InShort>
+
+## the picture
+
+you know how classic OOP says behaviour should live with its data, so a `Shape` has an `area()` method and each subclass overrides it? that works great when the set of operations is fixed and the set of types grows. but a lot of code is the other way around: the shapes of the data are fixed (a JSON value, a payment result, an AST, a network message), and what keeps growing is the list of things you do with them.
+
+think of a restaurant. OOP is every dish knowing how to cook itself, plate itself and price itself. data-oriented is the kitchen: dishes are just tickets with fields on them, and each station (grill, pastry, billing) looks at the ticket and does its own thing. adding a new station is easy. adding a new dish means every station has to learn it, and with sealed types the compiler walks around the kitchen and tells each station what it's missing.
+
+here's the classic example, an arithmetic expression, as data:
+
+<Figure caption={<>a sealed interface and four records. <code>Num</code> holds a number, <code>Add</code> and <code>Mul</code> hold two smaller expressions, <code>Neg</code> holds one. recursive data, no behaviour at all.</>}>
+<Tree>{`
+Expr // sealed interface Expr permits Num, Add, Mul, Neg
+    Num // record Num(int value)
+    Add // record Add(Expr left, Expr right)
+    Mul // record Mul(Expr left, Expr right)
+    Neg // record Neg(Expr expr)
+`}</Tree>
+</Figure>
+
+## an expression evaluator
+
+the behaviour lives in functions. each one is a switch with one case per record, and each case takes its record apart with a [record pattern](/learn/modern/record-patterns):
+
+```java title="Main.java" run output="(2 + 3 * 4) = 14\n-(1 + 2) * 4 = -12\nAdd[left=Num[value=2], right=Mul[left=Num[value=3], right=Num[value=4]]]"
+sealed interface Expr permits Num, Add, Mul, Neg {}
+record Num(int value) implements Expr {}
+record Add(Expr left, Expr right) implements Expr {}
+record Mul(Expr left, Expr right) implements Expr {}
+record Neg(Expr expr) implements Expr {}
+
+static int eval(Expr e) {
+    return switch (e) {
+        case Num(var v)        -> v;
+        case Add(var l, var r) -> eval(l) + eval(r);
+        case Mul(var l, var r) -> eval(l) * eval(r);
+        case Neg(var x)        -> -eval(x);
+    };
+}
+
+static String show(Expr e) {
+    return switch (e) {
+        case Num(var v)        -> String.valueOf(v);
+        case Add(var l, var r) -> "(" + show(l) + " + " + show(r) + ")";
+        case Mul(var l, var r) -> show(l) + " * " + show(r);
+        case Neg(var x)        -> "-" + show(x);
+    };
+}
+
+void main() {
+    Expr e = new Add(new Num(2), new Mul(new Num(3), new Num(4)));
+    IO.println(show(e) + " = " + eval(e));
+    Expr f = new Mul(new Neg(new Add(new Num(1), new Num(2))), new Num(4));
+    IO.println(show(f) + " = " + eval(f));
+    IO.println(e);
+}
+```
+
+no `default` anywhere, and no casts. the data is a tree, and `eval` is a walk over the tree. build one and watch:
+
+<Figure wide caption={<>pick a starting expression, or click a node and wrap it in a new <code>Add</code>, <code>Mul</code> or <code>Neg</code>. then step through <code>eval</code>: the <C k="hot">amber</C> node is the current call, its case lights up in the code, and each finished node shows its <C k="live">value</C>. the call stack is real: one frame per node being evaluated.</>}>
+<ExprLab />
+</Figure>
+
+see how the stack grows down the left side of the tree first? java evaluates the left operand of `+` before the right one, always, so `eval(l)` finishes before `eval(r)` starts.
+
+## adding things: the expression problem
+
+there are two ways a program like this grows, and the two styles make opposite ones easy:
+
+<Compare>
+<Bad label="methods in each class: a new operation edits every class">
+```java
+interface Expr { int eval(); String show(); }
+
+record Num(int value) implements Expr {
+    public int eval() { return value; }
+    public String show() { return "" + value; }
+}
+record Add(Expr l, Expr r) implements Expr {
+    public int eval() { return l.eval() + r.eval(); }
+    public String show() { return l.show() + "+" + r.show(); }
+}
+// want simplify()? edit Num, Add, Mul, Neg...
+```
+</Bad>
+<Good label="functions over sealed data: a new operation is one method">
+```java
+static Expr simplify(Expr e) {
+    return switch (e) {
+        // one new function, in one place.
+        // Num, Add, Mul, Neg don't change.
+        ...
+    };
+}
+```
+</Good>
+</Compare>
+
+| | add an operation (`simplify`, `toJson`) | add a case (`Sub`, `Pow`) |
+| --- | --- | --- |
+| methods in each class (OOP) | edit every class | one new class, nothing else changes |
+| switch over a sealed type | one new function, nothing else changes | every switch fails to compile until it handles it |
+
+that second cell sounds bad and is actually great. add `record Sub(...)` to the `permits` list and javac 25 flags `eval`, `show` and every other function that needs to know:
+
+```text
+error: the switch expression does not cover all possible input values
+```
+ the compiler hands you the complete to-do list. (this is why a `default` in these switches is a mistake: it would swallow `Sub` silently.)
+
+neither style wins everywhere. if outsiders need to add new types (plugins, a UI widget library), you want open classes and virtual methods. if the set of cases is yours and stable, and the operations keep coming, sealed data and switches are the better fit. java now does both, which is the point.
+
+## nested patterns earn their keep
+
+`eval` only ever looked one level deep. rewriting rules look deeper, and that's where nested record patterns and guards shine:
+
+```java title="Main.java" run output="Add[left=Mul[left=Neg[expr=Neg[expr=Num[value=7]]], right=Num[value=1]], right=Num[value=0]]\nNum[value=7]\nNum[value=0]"
+sealed interface Expr permits Num, Add, Mul, Neg {}
+record Num(int value) implements Expr {}
+record Add(Expr left, Expr right) implements Expr {}
+record Mul(Expr left, Expr right) implements Expr {}
+record Neg(Expr expr) implements Expr {}
+
+static Expr simplify(Expr e) {
+    return switch (e) {
+        case Add(var l, Num(var z)) when z == 0     -> simplify(l);   // x + 0  →  x
+        case Mul(var l, Num(var one)) when one == 1 -> simplify(l);   // x * 1  →  x
+        case Mul(var _, Num(var z)) when z == 0     -> new Num(0);    // x * 0  →  0
+        case Neg(Neg(var x))                        -> simplify(x);   // --x    →  x
+        case Add(var l, var r) -> new Add(simplify(l), simplify(r));
+        case Mul(var l, var r) -> new Mul(simplify(l), simplify(r));
+        case Neg(var x)        -> new Neg(simplify(x));
+        case Num n             -> n;
+    };
+}
+
+void main() {
+    Expr e = new Add(new Mul(new Neg(new Neg(new Num(7))), new Num(1)), new Num(0));
+    IO.println(e);
+    IO.println(simplify(e));
+    IO.println(simplify(new Mul(new Add(new Num(2), new Num(3)), new Num(0))));
+}
+```
+
+each rule reads like the algebra it implements. try writing `Neg(Neg(var x))` as a chain of `instanceof` checks and casts, and you'll see why people get excited about this.
+
+<Predict options={["it compiles", "compile error: a case is dominated", "compile error: the switch isn't exhaustive"]} answer={1}>
+```java
+// the same simplify, with the first Add rule moved below the general one:
+case Add(var l, var r) -> new Add(simplify(l), simplify(r));
+case Add(var l, Num(var z)) when z == 0 -> simplify(l);
+// ... the rest unchanged
+```
+<Explain>
+`case Add(var l, var r)` matches every `Add`, so the guarded rule after it can never run, and javac 25 rejects it: `error: this case label is dominated by a preceding case label`. it's still exhaustive (that was never the problem). rules go specific before general, same as in [pattern matching](/learn/modern/pattern-matching): the order of cases is part of what the code means.
+</Explain>
+</Predict>
+
+## the rules of thumb
+
+Brian Goetz, who leads the language work, summed the style up in a 2022 article. paraphrased, it comes down to four habits:
+
+<Defs>
+<dt>model the data, all of it, and only it</dt><dd>each record holds exactly what that case needs. no fields that are "only set when status is X".</dd>
+<dt>data is immutable</dt><dd>records are shallowly immutable already. copy mutable components on the way in (see [records](/learn/modern/records)).</dd>
+<dt>validate at the boundary</dt><dd>check invariants in the compact constructor, once. after that, every instance in the program is valid, so nobody re-checks.</dd>
+<dt>make illegal states unrepresentable</dt><dd>if a combination of fields makes no sense, pick types where it can't be written down.</dd>
+</Defs>
+
+the last one is the big one. compare:
+
+<Compare>
+<Bad label="one class, a status, and fields that are 'sometimes' set">
+```java
+class PaymentResult {
+    Status status;        // PAID, DECLINED, PENDING
+    String receiptId;     // only if PAID
+    String declineReason; // only if DECLINED
+    Integer retryIn;      // only if PENDING
+}
+// nothing stops PAID with a declineReason
+```
+</Bad>
+<Good label="one record per case: wrong combinations can't be built">
+```java
+sealed interface PaymentResult
+    permits Paid, Declined, Pending {}
+record Paid(String receiptId)
+    implements PaymentResult {}
+record Declined(String reason)
+    implements PaymentResult {}
+record Pending(int retryInSeconds)
+    implements PaymentResult {}
+```
+</Good>
+</Compare>
+
+```java title="Main.java" run output="paid, receipt r-1042\ndeclined: card expired\npending, retry in 30s\nException in thread \"main\" java.lang.IllegalArgumentException: a decline needs a reason"
+sealed interface PaymentResult permits Paid, Declined, Pending {}
+record Paid(String receiptId) implements PaymentResult {}
+record Declined(String reason) implements PaymentResult {
+    Declined {
+        if (reason.isBlank()) throw new IllegalArgumentException("a decline needs a reason");
+    }
+}
+record Pending(int retryInSeconds) implements PaymentResult {}
+
+static String message(PaymentResult r) {
+    return switch (r) {
+        case Paid(var id)         -> "paid, receipt " + id;
+        case Declined(var reason) -> "declined: " + reason;
+        case Pending(var s)       -> "pending, retry in " + s + "s";
+    };
+}
+
+void main() {
+    List<PaymentResult> results = List.of(new Paid("r-1042"), new Declined("card expired"), new Pending(30));
+    for (var r : results) IO.println(message(r));
+    new Declined(" ");
+}
+```
+
+<Deep title="why 'algebraic'">
+count the possible values. a `record Flags(boolean a, boolean b)` has 2 × 2 = 4: it's a **product** type. a `sealed interface Light permits On, Off` where both are empty records has 1 + 1 = 2: a **sum** type. records multiply, sealed interfaces add, and you build real models by nesting the two. "make illegal states unrepresentable" is literally arithmetic: shrink the count of values your types allow until it matches the count of states that make sense. the `PaymentResult` class above allows millions of nonsense combinations; the sealed version allows exactly the three shapes the domain has.
+</Deep>
+
+<Gotcha title="don't add a default 'just in case'">
+a `default ->` in a switch over your own sealed type compiles and can never run today. tomorrow it silently catches the case someone just added, and you lose the one check that makes this style safe. the only good reason for `default` is a type you don't control, like the non-sealed `java.lang.reflect.Type`. and remember the boundary: a class compiled against the old hierarchy throws `MatchException` when it meets a new subtype at run time (more in [sealed types](/learn/modern/sealed-types)).
+</Gotcha>
+
+<Interview q="what is data-oriented programming in java?">
+modelling data as immutable records, using sealed interfaces to say which alternatives exist, and writing operations as exhaustive pattern-matching switches instead of methods on each class. records are product types, sealed interfaces are sum types, so together they're algebraic data types. the payoff: adding an operation is one new function, and adding a case makes every incomplete switch fail to compile. it complements OOP rather than replacing it: use it where the shapes of the data are stable and the operations grow, keep encapsulated classes and polymorphism where types are open or have invariants to protect. it needs records (16), sealed types (17) and pattern matching for switch with record patterns (21).
+</Interview>
+
+<Keylines>
+- records for "this and that", sealed interfaces for "this or that". together: algebraic data types.
+- behaviour lives in functions that switch over the cases, with record patterns.
+- a new operation is one new function. a new case breaks every switch that doesn't handle it, on purpose.
+- validate in compact constructors, and make illegal states impossible to build.
+- no `default` in switches over your own sealed types.
+</Keylines>

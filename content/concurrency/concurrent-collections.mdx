@@ -1,0 +1,251 @@
+import { ChmBins } from "@/components/figures/concurrency/ChmBins";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const cow = {
+  file: "Main.java",
+  source: `void main() {
+    var list = new CopyOnWriteArrayList<>(List.of("a", "b", "c"));
+    var it = list.iterator();
+    list.add("d");
+    while (it.hasNext()) IO.print(it.next());
+    IO.println(" " + list);
+}`,
+  steps: [
+    { line: 2, frames: [{ name: "main", locals: {} }], heap: {}, note: "a CopyOnWriteArrayList is a wrapper around one array that's never modified in place." },
+    {
+      line: 3,
+      frames: [{ name: "main", locals: { list: { ref: "L" } } }],
+      heap: { L: { type: "CopyOnWriteArrayList", fields: { array: { ref: "A1" } } }, A1: { type: "Object[]", items: ['"a"', '"b"', '"c"'] } },
+      note: "the list holds a volatile reference to its current array.",
+    },
+    {
+      line: 4,
+      frames: [{ name: "main", locals: { list: { ref: "L" }, it: { ref: "I" } } }],
+      heap: {
+        L: { type: "CopyOnWriteArrayList", fields: { array: { ref: "A1" } } },
+        A1: { type: "Object[]", items: ['"a"', '"b"', '"c"'] },
+        I: { type: "COWIterator", fields: { snapshot: { ref: "A1" }, cursor: 0 } },
+      },
+      note: "iterator() just grabs a reference to the current array. that's the snapshot. no copying, no locking.",
+    },
+    {
+      line: 5,
+      frames: [{ name: "main", locals: { list: { ref: "L" }, it: { ref: "I" } } }],
+      heap: {
+        L: { type: "CopyOnWriteArrayList", fields: { array: { ref: "A2" } } },
+        A1: { type: "Object[]", items: ['"a"', '"b"', '"c"'], tag: "the snapshot" },
+        A2: { type: "Object[]", items: ['"a"', '"b"', '"c"', '"d"'], state: "new" },
+        I: { type: "COWIterator", fields: { snapshot: { ref: "A1" }, cursor: 0 } },
+      },
+      note: "add() copies the whole array into a new one with room for d, then swaps the list's reference to it. the old array is untouched, and the iterator still points at it.",
+    },
+    {
+      line: 6,
+      frames: [{ name: "main", locals: { list: { ref: "L" }, it: { ref: "I" } } }],
+      heap: {
+        L: { type: "CopyOnWriteArrayList", fields: { array: { ref: "A2" } } },
+        A1: { type: "Object[]", items: ['"a"', '"b"', '"c"'], tag: "the snapshot" },
+        A2: { type: "Object[]", items: ['"a"', '"b"', '"c"', '"d"'] },
+        I: { type: "COWIterator", fields: { snapshot: { ref: "A1" }, cursor: 3 } },
+      },
+      stdout: "abc",
+      note: "the iterator walks its own snapshot: a, b, c. no d, and no ConcurrentModificationException, ever.",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { list: { ref: "L" }, it: { ref: "I" } } }],
+      heap: {
+        L: { type: "CopyOnWriteArrayList", fields: { array: { ref: "A2" } } },
+        A1: { type: "Object[]", items: ['"a"', '"b"', '"c"'], tag: "the snapshot" },
+        A2: { type: "Object[]", items: ['"a"', '"b"', '"c"', '"d"'] },
+        I: { type: "COWIterator", fields: { snapshot: { ref: "A1" }, cursor: 3 } },
+      },
+      stdout: "abc [a, b, c, d]\n",
+      note: "the list itself has d. once nothing references the old array, it's garbage like anything else.",
+    },
+  ],
+};
+
+export const bq = [
+  { mem: { queue: "[ ]" }, note: "an ArrayBlockingQueue with capacity 2, one producer, one consumer." },
+  { ops: ["put(1)", null], mem: { queue: "[1]" } },
+  { ops: ["put(2)", null], mem: { queue: "[1, 2]" }, note: "full." },
+  { ops: [{ t: "put(3): full, parks", k: "hot" }, null], note: "put blocks while the queue is full. the producer parks: no spinning, no exception, no lost item." },
+  { ops: [{ t: "WAITING", wait: true }, "take() → 1"], mem: { queue: "[2]" }, note: "the consumer takes an item, which signals the notFull condition..." },
+  { ops: [{ t: "put(3) returns", k: "live" }, null], mem: { queue: "[2, 3]" }, note: "...and the producer wakes up and finishes its put." },
+  { ops: [null, "take() → 2"], mem: { queue: "[3]" } },
+  { ops: [null, "take() → 3"], mem: { queue: "[ ]" } },
+  { ops: [null, { t: "take(): empty, parks", k: "hot" }], note: "take blocks while the queue is empty, the same way." },
+  { ops: ["put(4)", { t: "take() → 4", k: "live" }], mem: { queue: "[ ]" }, note: "the producer's put wakes the consumer. this is the whole producer-consumer pattern, with zero locks in your code." },
+];
+
+<InShort>
+`java.util.concurrent` has collections built for many threads at once. **`ConcurrentHashMap`** locks almost nothing: an empty bin gets a CAS, a busy bin locks only its own first node, and reads never lock. **`CopyOnWriteArrayList`** copies the whole array on every write so iteration is a free, consistent **snapshot**. **`BlockingQueue`** is producer-consumer in one object: `put` waits when it's full, `take` waits when it's empty.
+</InShort>
+
+## the picture
+
+a plain `HashMap` shared between threads is a filing cabinet with no rules: two people shoving folders into the same drawer at once can lose one, or (in older javas) jam the drawer so badly the next person searching it loops forever. `Collections.synchronizedMap` puts one lock on the whole cabinet: safe, and only one person at a time. `ConcurrentHashMap` puts a tiny lock on each drawer, and only uses it when the drawer already has something in it.
+
+first, how bad the plain one is. two threads, 100,000 distinct keys each, one shared `HashMap`:
+
+```java title="Main.java" run
+import java.util.HashMap;
+import java.util.Map;
+
+void main() throws InterruptedException {
+    Map<Integer, Integer> map = new HashMap<>();
+    Thread a = new Thread(() -> { for (int i = 0; i < 100_000; i++) map.put(i, i); });
+    Thread b = new Thread(() -> { for (int i = 100_000; i < 200_000; i++) map.put(i, i); });
+    a.start();
+    b.start();
+    a.join();
+    b.join();
+    IO.println("size = " + map.size());
+}
+```
+
+five runs on jdk 25 printed 133,580, 116,515, 119,990, 123,785 and 123,666. it should be 200,000. no exception, no warning: tens of thousands of entries silently gone, mostly when two resizes or two inserts into the same bucket raced.
+
+## ConcurrentHashMap
+
+since java 8, `ConcurrentHashMap` is the same array-of-bins layout as [HashMap](/learn/collections/hashmap), with a different write path:
+
+- **empty bin**: install the new node with one CAS. no lock at all.
+- **non-empty bin**: `synchronized` on the bin's *first node*, then walk or append. only that one bin is locked; the rest of the table is open.
+- **get**: never locks. bins and node links are volatile, so a reader always sees fully published nodes.
+- **resize**: threads that bump into a resize in progress help move bins over, instead of waiting for it.
+
+<Figure wide caption={<>three scenarios. different bins: two writers, two <C k="live">CAS</C>es, fully parallel. same empty bin: one CAS wins, the other <C k="hot">fails</C> and falls back to locking that bin. busy bin: writers queue on that bin's <C k="meta">head node</C> while a reader in another bin never waits.</>}>
+<ChmBins />
+</Figure>
+
+with 8 bins that's 8 independent locks, and real tables have thousands of bins, so two writers rarely want the same one. the full source walk-through, including treeified bins and the `CounterCell`s that make `size()` scale like a `LongAdder`, is in [ConcurrentHashMap internals](/learn/deep-dives/concurrenthashmap-internals).
+
+## compound actions: use the atomic methods
+
+`ConcurrentHashMap` makes every *single* call thread-safe. it can't make two calls atomic together, so the [check-then-act](/learn/concurrency/race-conditions) race is still yours to avoid:
+
+<Compare>
+<Bad label="two safe calls, one race">
+```java
+Integer n = counts.get(word);
+counts.put(word, n == null ? 1 : n + 1);
+```
+</Bad>
+<Good label="one atomic call">
+```java
+counts.merge(word, 1, Integer::sum);
+```
+</Good>
+</Compare>
+
+`merge`, `compute`, `computeIfAbsent`, `computeIfPresent` and `putIfAbsent` all run under the bin's lock, so the read and the write happen as one step:
+
+```java title="Main.java" run output="6000 2000"
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+
+void main() throws InterruptedException {
+    List<String> words = List.of("the", "cat", "sat", "on", "the", "mat", "the", "end");
+    ConcurrentHashMap<String, Integer> counts = new ConcurrentHashMap<>();
+    Runnable count = () -> {
+        for (int round = 0; round < 1000; round++)
+            for (String w : words) counts.merge(w, 1, Integer::sum);   // atomic read-modify-write
+    };
+    Thread a = new Thread(count);
+    Thread b = new Thread(count);
+    a.start();
+    b.start();
+    a.join();
+    b.join();
+    IO.println(counts.get("the") + " " + counts.get("cat"));
+}
+```
+
+<Gotcha title="the function runs under a lock">
+the lambda you pass to `compute` or `computeIfAbsent` runs while holding the bin's lock. keep it short and never touch the same map from inside it: a `computeIfAbsent` whose function calls `computeIfAbsent` on the same map can deadlock or throw `IllegalStateException: Recursive update`. and no I/O in there; every other writer to that bin waits for you.
+</Gotcha>
+
+a few more differences from `HashMap`:
+
+- **no nulls.** `put(k, null)` throws `NullPointerException`. otherwise `get` returning null would be ambiguous ("absent" or "mapped to null?") with no way to check both atomically.
+- **iterators are weakly consistent.** they never throw `ConcurrentModificationException`, and may or may not show changes made during iteration.
+- **`size()` is a moment in a moving stream.** under concurrent updates it's an estimate. `mappingCount()` returns a `long` for huge maps.
+
+## CopyOnWriteArrayList
+
+every write (`add`, `set`, `remove`) copies the entire backing array, modifies the copy, and swaps it in with a volatile write. reads and iteration just use whatever array is current, with no locking at all.
+
+<Figure wide caption={<>step through it. the iterator holds a reference to the <em>old</em> array, so <code>add("d")</code> can't disturb it: it prints <code>abc</code>, while the list moves on to a <C k="hot">new array</C>.</>}>
+<MemoryStepper trace={cow} />
+</Figure>
+
+```java title="Main.java" run output="abc [a, b, c, d]"
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+void main() {
+    var list = new CopyOnWriteArrayList<>(List.of("a", "b", "c"));
+    var it = list.iterator();         // a snapshot of the array, right now
+    list.add("d");                    // copies the array, then swaps it in
+    while (it.hasNext()) IO.print(it.next());
+    IO.println(" " + list);
+}
+```
+
+perfect for small lists that are read constantly and changed rarely: event listeners, plugin registries, routing rules. terrible for anything written often: adding n elements one by one copies O(n²) elements in total.
+
+## BlockingQueue: producer-consumer, built in
+
+a `BlockingQueue` is the [bounded buffer](/learn/concurrency/wait-and-notify) from the wait/notify chapter, done properly, with the conditions and the loop already inside:
+
+<Figure wide caption={<>a producer and a consumer on a queue of 2. both block at the edges, full and empty, and wake each other up. <C k="hot">amber</C> is a thread hitting the edge.</>}>
+<Lanes threads={["producer", "consumer"]} cells={["queue"]} steps={bq} />
+</Figure>
+
+each operation comes in four flavors, depending on what you want to happen at the edge:
+
+| | throws | returns a value | blocks | times out |
+| --- | --- | --- | --- | --- |
+| insert | `add(e)` | `offer(e)` → false | `put(e)` | `offer(e, t, unit)` |
+| remove | `remove()` | `poll()` → null | `take()` | `poll(t, unit)` |
+
+and the implementations:
+
+| class | shape | notes |
+| --- | --- | --- |
+| `ArrayBlockingQueue` | bounded array | one lock, two conditions (`notFull`, `notEmpty`) |
+| `LinkedBlockingQueue` | linked, optionally bounded | two locks: one for `put`, one for `take`, so a producer and a consumer don't contend. unbounded unless you pass a capacity |
+| `SynchronousQueue` | capacity zero | every `put` waits for a `take`: a direct hand-off between threads |
+| `PriorityBlockingQueue` | unbounded heap | takes in priority order |
+| `DelayQueue` | unbounded | an element can only be taken once its delay has expired |
+| `LinkedTransferQueue` | unbounded | `transfer(e)` waits until a consumer actually receives it |
+
+## which one, when
+
+| you have | use |
+| --- | --- |
+| a map many threads read and write | `ConcurrentHashMap` |
+| a sorted map or set, concurrently | `ConcurrentSkipListMap` / `ConcurrentSkipListSet` |
+| a list read constantly, written rarely | `CopyOnWriteArrayList` |
+| producers and consumers handing off work | an `ArrayBlockingQueue` or bounded `LinkedBlockingQueue` |
+| a queue that must never block | `ConcurrentLinkedQueue` (lock-free, CAS-based) |
+| a counter | `LongAdder`, not a map entry ([atomics](/learn/concurrency/atomics-and-cas)) |
+| state that's replaced, never modified | an immutable collection behind a `volatile` field |
+
+<Note title="what about Collections.synchronizedMap and Hashtable?">
+both put one lock around every method, so only one thread at a time can touch the map, readers included. and iterating still needs a manual `synchronized (map)` block around the loop, or you get `ConcurrentModificationException`. `Hashtable` and `Vector` are legacy. `synchronizedMap` is fine for low-traffic code, but `ConcurrentHashMap` is better in every way that matters.
+</Note>
+
+<Interview q="how does ConcurrentHashMap achieve thread safety without locking the whole map?">
+since java 8 it uses CAS to insert into an empty bin, and `synchronized` on the first node of a bin only when that bin already has nodes, so writers only contend when they hit the same bin. reads take no lock: the table and node fields are volatile, so a get sees safely published nodes. size is tracked with striped counter cells, and resizing is done cooperatively by the threads that run into it. java 7 and earlier used a fixed number of segments, each a separate lock; that design is gone.
+</Interview>
+
+<Keylines>
+- a plain `HashMap` shared between threads silently loses entries.
+- `ConcurrentHashMap`: CAS for empty bins, a lock on one bin's head otherwise, no locks for reads.
+- single calls are atomic, pairs of calls aren't. use `merge` and `compute*`.
+- `CopyOnWriteArrayList` copies on every write, so iteration is a free snapshot. read-mostly only.
+- `BlockingQueue` is producer-consumer done right. keep it bounded.
+</Keylines>

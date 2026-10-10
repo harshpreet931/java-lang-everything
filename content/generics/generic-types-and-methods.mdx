@@ -1,0 +1,150 @@
+import { InferenceLab } from "@/components/figures/generics/InferenceLab";
+import { Morph } from "@/components/figures/generics/Morph";
+import { boxSteps } from "@/components/figures/generics/steps";
+
+<InShort>
+a **type parameter** (`<T>`) is a placeholder type you declare once and then use like any other type. callers fill it in with a **type argument**: `Box<String>`. classes can declare them (`class Box<T>`) and so can single methods (`static <T> List<T> repeat(T x, int n)`).
+
+most of the time you never write the type argument at all. **inference** works it out from the arguments and from where the result is going.
+</InShort>
+
+## the picture
+
+you know how a method has parameters, so one method body works for any value you pass in? a type parameter is the same trick, one level up: one class body that works for any *type* you pass in.
+
+think of a printed form with a blank: "this box holds ______". the form is the class. filling the blank (`String`) gives you a specific kind of box, and from then on the clerk (javac) checks everything you put in against what's written there. the form itself never changes, however many ways it gets filled in.
+
+<Figure wide caption={<>step through it, or click a tab. a box that holds <code>Object</code> turns into a <code>Box&lt;T&gt;</code>, one edit at a time. <C k="hot">amber</C> is what changed in each step.</>}>
+<Morph file="Box.java" steps={boxSteps} />
+</Figure>
+
+the vocabulary, since people mix it up: in `class Box<T>`, `T` is the **type parameter**. in `Box<String>`, `String` is the **type argument**, and `Box<String>` is a **parameterized type**. `Box` by itself, with nothing in the brackets, is the raw type ([why that's bad](/learn/generics/why-generics)).
+
+## a whole generic class
+
+here's a real one, with a generic method inside it. `map` declares its own type parameter `R`, separate from the class's `T`, because the result can be a different type than the contents:
+
+```java title="Main.java" run output="Box[ada] Box[3] 3"
+class Box<T> {
+    private final T value;
+
+    Box(T value) { this.value = value; }
+
+    T get() { return value; }
+
+    <R> Box<R> map(Function<T, R> f) { return new Box<>(f.apply(value)); }
+
+    public String toString() { return "Box[" + value + "]"; }
+}
+
+void main() {
+    Box<String> name = new Box<>("ada");
+    Box<Integer> len = name.map(String::length);   // R = Integer
+    int n = len.get();                             // no cast
+    IO.println(name + " " + len + " " + n);
+}
+```
+
+`T` is fixed per **object**: `name` is a `Box<String>` for its whole life. `R` is fixed per **call**: every call to `map` can pick a different one. (the real JDK version of this, `Optional.map`, takes a `Function<? super T, ? extends R>`. those question marks are [wildcards](/learn/generics/wildcards-and-pecs), and they make it accept more functions.)
+
+the usual names are single capital letters, so you can tell a type parameter from a class at a glance:
+
+<Defs>
+<dt>`T`, `U`, `S`</dt><dd>a type. the first, second, third one.</dd>
+<dt>`E`</dt><dd>an element of a collection: `List<E>`, `Set<E>`.</dd>
+<dt>`K`, `V`</dt><dd>key and value: `Map<K, V>`.</dd>
+<dt>`R`</dt><dd>a result: `Function<T, R>`.</dd>
+<dt>`X`</dt><dd>an exception type, like the `X` in `Optional.orElseThrow`.</dd>
+</Defs>
+
+## generic methods
+
+a method can have type parameters of its own, even in a class that has none. the `<T>` goes right before the return type, and it's in scope for the parameters, the return type and the body:
+
+```java title="Main.java" run output="[hey, hey, hey] [., .] [0, 0] 0"
+static <T> List<T> repeat(T x, int times) {
+    List<T> out = new ArrayList<>();
+    for (int i = 0; i < times; i++) out.add(x);
+    return out;
+}
+
+void main() {
+    List<String> hey = repeat("hey", 3);                 // T = String
+    List<Character> dots = repeat('.', 2);               // T = Character (boxed)
+    List<Number> zeros = repeat(0, 2);                   // T = Number, from the target
+    var empty = Collections.<String>emptyList();         // T = String, said out loud
+    IO.println(hey + " " + dots + " " + zeros + " " + empty.size());
+}
+```
+
+nobody wrote a type argument on the first three calls. javac worked out `T` each time. and look at `zeros`: the argument is an `Integer`, but `T` came out as `Number`, because the result was going into a `List<Number>`. inference doesn't just look at the arguments.
+
+## how inference picks T
+
+javac treats `T` like an unknown in an equation. every argument adds a clue ("T must be able to hold an Integer"), the target adds another ("the result must be a `List<Number>`"), and then it solves for the one type that satisfies all of them. try it on `List.of`, whose element type is called `E`:
+
+<Figure wide caption={<>pick a call. clues from the arguments say what <code>E</code> must be able to hold, clues from the target say what it must be exactly. the answer is <C k="live">green</C>, or javac&apos;s real error in <C k="dead">red</C>. every result was checked against javac 25.</>}>
+<InferenceLab />
+</Figure>
+
+the rules, roughly: if the target pins `E` down exactly, that's the answer (as long as the arguments fit). otherwise `E` is the most specific type that's a supertype of every argument (the **least upper bound**), which can be an intersection like `Number & Comparable<...>` that you could never type yourself. and with no clues at all, `E` is just its bound, `Object`.
+
+<Predict options={["it doesn't compile", "it compiles, list is an ArrayList<Object>", "it compiles, list is an ArrayList<String>"]} answer={1}>
+```java
+var list = new ArrayList<>();
+list.add("ada");
+list.add(42);
+IO.println(list);
+```
+<Explain>
+`var` takes its type from the right side, and the diamond takes its type from the left side. nobody has an opinion, so `E` falls back to `Object` and `list` is an `ArrayList<Object>` (javac 25 confirms it). it prints `[ada, 42]`, and you've quietly built a list that accepts anything. with `var`, give the diamond something to go on: `new ArrayList<String>()`, or a constructor argument like `new ArrayList<>(List.of("ada"))`.
+</Explain>
+</Predict>
+
+<Deep title="what target typing used to miss">
+inference that looks at the target is older than you'd think (`List<String> s = Collections.emptyList()` worked in java 5), but it only looked at assignments. java 8 (JEP 101, generalized target-type inference) made it work through method arguments and chains, which lambdas needed: a lambda has no type of its own, so `list.sort((a, b) -> ...)` only compiles because javac can push the expected type into the argument. javac's exact algorithm is chapter 18 of the language spec: collect bounds, reduce them, resolve each variable, lower bounds first.
+</Deep>
+
+## the diamond, and where it gets smart
+
+`<>` (java 7) is inference for constructors. `new HashMap<>()` asks javac to fill the type arguments from the target, exactly like a generic method call. since java 9 it also works on anonymous classes, as long as the inferred type is something you could have written:
+
+```java
+Comparator<String> byLength = new Comparator<>() {     // java 9+
+    public int compare(String a, String b) { return a.length() - b.length(); }
+};
+```
+
+<Gotcha title="static members can't see the class's T">
+`T` belongs to an instance: a `Box<String>` and a `Box<Integer>` each have their own. a static field or method belongs to the class, shared by all of them, so which `T` would it mean? javac refuses:
+
+```java
+class Box<T> {
+    static T counter;        // [!code error]
+}
+```
+
+```text
+error: non-static type variable T cannot be referenced from a static context
+```
+
+if a static method needs a type parameter, give it its own: `static <T> Box<T> of(T value)`. that's exactly how `List.of` and `Optional.of` are written.
+</Gotcha>
+
+<Quiz question={<>in <code>class Cache&lt;K, V&gt;</code>, a method is declared <code>&lt;V&gt; V load(K key)</code>. what is that method&apos;s <code>V</code>?</>} options={["the class's V", "a new V that hides the class's", "a compile error"]} answer={1}>
+<Explain>
+a method's type parameter is a fresh declaration, and it **shadows** the class's parameter of the same name inside that method, just like a local variable hides a field. it compiles, and inside `load` you can't name the class's `V` at all. real bug source. if the method should use the class's `V`, don't redeclare it: `V load(K key)`.
+</Explain>
+</Quiz>
+
+<Interview q="what's the difference between a generic class and a generic method?">
+a generic class declares its type parameters after the class name, and they're fixed per instance: a `Box<String>` stays a `Box<String>`. a generic method declares its own before the return type, and they're inferred fresh for each call, from the arguments and the target type. static methods can't use a class's type parameters, so static factories like `List.of` are generic methods. bonus point: you can always override inference with an explicit witness, `Collections.<String>emptyList()`.
+</Interview>
+
+<Keylines>
+- `class Box<T>`: T is a type parameter. `Box<String>`: String is the type argument.
+- a class's type parameters are fixed per object. a method's are picked per call.
+- inference solves for T from the arguments and the target. you rarely write it.
+- with no clues, T is `Object`. `var` + `<>` is how you get there by accident.
+- static members can't use the class's T. give static methods their own.
+</Keylines>

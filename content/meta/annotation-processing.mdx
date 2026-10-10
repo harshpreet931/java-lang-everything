@@ -1,0 +1,205 @@
+import { ProcessingRounds } from "@/components/figures/meta/ProcessingRounds";
+import { TwoWays } from "@/components/figures/meta/TwoWays";
+
+<InShort>
+an **annotation processor** is a plugin for javac. it runs *during compilation*, looks at your declarations, and can **generate new source files**, which javac then compiles too, in another **round**. it can also fail the build with a proper error message.
+
+what it officially can't do is change the code you wrote. lombok does that anyway, by reaching into javac's internals.
+</InShort>
+
+## the picture
+
+[reflection](/learn/meta/reflection) reads your code while it runs, every time it runs. an annotation processor reads it once, at compile time, and writes ordinary java that does the same job. no reflection at runtime, no surprises at startup, and you can open the generated file and read it.
+
+think of a manuscript with notes in the margin, going through a publisher. the processor is an editor who reads the notes and is allowed to add new chapters (new files), as many as they like, but never to touch a page you wrote. lombok is the editor who takes out a pen and writes on your pages anyway.
+
+## a processor you can actually run
+
+the goal: put `@Builder` on a record and get a `PersonBuilder` class for free. first the annotation, `SOURCE` retention because nothing after javac needs to see it ([annotations](/learn/meta/annotations)):
+
+```java title="gen/Builder.java"
+package gen;
+
+import java.lang.annotation.*;
+
+@Retention(RetentionPolicy.SOURCE)
+@Target(ElementType.TYPE)
+public @interface Builder {}
+```
+
+then the processor. it extends `AbstractProcessor`, says which annotation it handles, and gets a `process` call for every round:
+
+```java title="gen/BuilderProcessor.java"
+package gen;
+
+import java.io.Writer;
+import java.util.Set;
+import javax.annotation.processing.*;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.*;
+import javax.tools.Diagnostic;
+
+@SupportedAnnotationTypes("gen.Builder")
+@SupportedSourceVersion(SourceVersion.RELEASE_25)
+public class BuilderProcessor extends AbstractProcessor {
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment round) {
+        for (Element e : round.getElementsAnnotatedWith(Builder.class)) {
+            if (e.getKind() != ElementKind.RECORD) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, "@Builder only works on records", e);
+                continue;
+            }
+            TypeElement rec = (TypeElement) e;
+            String name = rec.getSimpleName() + "Builder";
+            StringBuilder src = new StringBuilder("public class " + name + " {\n");
+            StringBuilder args = new StringBuilder();
+            for (RecordComponentElement c : rec.getRecordComponents()) {
+                String t = c.asType().toString(), n = c.getSimpleName().toString();
+                src.append("    private ").append(t).append(" ").append(n).append(";\n");
+                src.append("    public ").append(name).append(" ").append(n).append("(").append(t)
+                   .append(" v) { this.").append(n).append(" = v; return this; }\n");
+                args.append(args.isEmpty() ? "" : ", ").append(n);
+            }
+            src.append("    public ").append(rec.getSimpleName()).append(" build() { return new ")
+               .append(rec.getSimpleName()).append("(").append(args).append("); }\n}\n");
+            try (Writer w = processingEnv.getFiler().createSourceFile(name, rec).openWriter()) {
+                w.write(src.toString());
+            } catch (Exception ex) {
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR, ex.toString());
+            }
+        }
+        return true;
+    }
+}
+```
+
+notice what it works with: `TypeElement`, `RecordComponentElement`, `asType()`. that's `javax.lang.model`, javac's read-only view of *declarations*: classes, members, types, annotations. method bodies aren't in it. and the only way to produce anything is the `Filer`, which creates new files.
+
+the app uses a class that doesn't exist yet:
+
+```java title="Person.java + Main.java"
+@Builder
+public record Person(String name, int age) {}
+
+public class Main {
+    public static void main(String[] args) {
+        Person p = new PersonBuilder().name("ada").age(36).build();
+        System.out.println(p);
+    }
+}
+```
+
+compile the processor, then compile the app with it, asking javac to narrate its rounds:
+
+```bash
+$ javac -d procout gen/Builder.java gen/BuilderProcessor.java
+$ javac -cp procout -processor gen.BuilderProcessor -s gensrc -d out -XprintRounds Main.java Person.java
+Round 1:
+	input files: {Main, Person}
+	annotations: [gen.Builder]
+	last round: false
+Round 2:
+	input files: {PersonBuilder}
+	annotations: []
+	last round: false
+Round 3:
+	input files: {}
+	annotations: []
+	last round: true
+$ java -cp out Main
+Person[name=ada, age=36]
+$ cat gensrc/PersonBuilder.java
+public class PersonBuilder {
+    private java.lang.String name;
+    public PersonBuilder name(java.lang.String v) { this.name = v; return this; }
+    private int age;
+    public PersonBuilder age(int v) { this.age = v; return this; }
+    public Person build() { return new Person(name, age); }
+}
+```
+
+## rounds
+
+why three rounds for one generated file? because generated files can carry annotations too, which might need processing, which might generate more files. javac keeps going until a round produces nothing new.
+
+<Figure wide caption={<>step through the compile. the phase in <C k="hot">amber</C> is where javac is; new files appear in amber too. watch Main.java: it refers to a class that doesn't exist until round 1, and javac holds its tongue until type-checking, after processing is done.</>}>
+<ProcessingRounds />
+</Figure>
+
+that ordering is the whole trick. javac parses and enters everything first, runs the processors, and only type-checks method bodies afterwards. so code can depend on generated classes, as long as a processor generates them.
+
+<Quiz question="can a processor written against the standard API add a getName() method to an existing class?" options={["yes, through the Filer", "yes, by editing the TypeElement", "no, it can only create new files", "only for records"]} answer={2}>
+<Explain>
+no. `javax.lang.model` elements are read-only, and the `Filer` only creates new files: overwriting a class you wrote is off the table. the standard way around it is to generate a *new* class: a subclass, an implementation, or a companion like `PersonBuilder`. that's how AutoValue, MapStruct, Dagger and Immutables work. lombok is the one that doesn't play by this rule.
+</Explain>
+</Quiz>
+
+## errors are a feature
+
+a processor can fail the build, pointing at the exact element:
+
+```bash
+$ javac -cp builder.jar -proc:full -d out Car.java
+Car.java:4: error: @Builder only works on records
+public class Car {}
+       ^
+1 error
+```
+
+that's the real payoff over runtime reflection. MapStruct checks every property name in your mappings while compiling. misspell one, and instead of a mapper that silently copies `0` in production:
+
+```bash
+CarMapper.java:9: error: No property named "numberOfSeat" exists in source parameter(s). Did you mean "numberOfSeats"?
+    @Mapping(target = "seatCount", source = "numberOfSeat")
+                                            ^
+```
+
+## mapstruct by the rules, lombok around them
+
+both are "annotation processors", and both run inside javac. that's where the similarity ends.
+
+<Figure caption={<>flip between them. both outputs are real (mapstruct 1.6.3, lombok 1.18.48, javac 25). the <C k="hot">amber</C> parts didn't exist in anything you wrote; the <C k="meta">purple</C> box is javac's private machinery.</>}>
+<TwoWays />
+</Figure>
+
+lombok's `@Getter`, `@Builder`, `@Data` and friends add members to *your* class. the processor API can't do that, so lombok's processor casts the environment javac hands it to javac's internal implementation class, gets the actual syntax tree (`com.sun.tools.javac.tree.JCTree`) and inserts method nodes into it before code generation. since [strong encapsulation](/learn/meta/reflection) closed `jdk.compiler`'s internals, it gets in with `sun.misc.Unsafe`, which is the warning javac 25 printed above.
+
+it works, millions of projects use it, and the trade-off is honest to state: your source isn't the whole truth anymore, every tool that reads java (IDEs, static analyzers, coverage) needs a lombok plugin to understand it, and each new JDK can break it until lombok catches up. [records](/learn/modern/records) quietly replaced one of its most popular annotations, `@Value`, with a language feature.
+
+the processors that play by the rules are everywhere, often invisibly: **Dagger** and **Micronaut** generate dependency injection wiring, **MapStruct** generates mappers, **AutoValue** and **Immutables** generate value classes, **Hibernate**'s metamodel generator writes `Person_` classes for type-safe queries, and **JMH** generates the harness around your [benchmarks](/learn/performance/jmh).
+
+## how javac finds processors
+
+<Figure caption="hover a stage. three ways to hand javac a processor; the third one stopped being automatic in java 23.">
+<Flow stages={[
+  { label: "-processor gen.X", sub: "name it", note: "run exactly these processor classes, found on the processor path (or the class path)." },
+  { label: "--processor-path", sub: "point at jars", note: "look for processors only in these jars, through META-INF/services/javax.annotation.processing.Processor. maven's annotationProcessorPaths and gradle's annotationProcessor configuration set this." },
+  { label: "the class path", sub: "implicit discovery", note: "before java 23, javac also scanned the class path for that services file and ran whatever it found. since java 23 it only does that with -proc:full." },
+]} />
+</Figure>
+
+<Gotcha title="the processor that silently stopped running">
+a processor jar on the class path used to just work, because javac discovered it through the [`ServiceLoader`](/learn/meta/service-loader) file inside the jar. jdk 21 and 22 printed a note about it. since jdk 23, javac doesn't run implicitly discovered processors unless you pass `-proc:full`, or name them with `-processor` or `--processor-path`. on jdk 25, the build from above, with the processor jar sitting on the class path, fails like this:
+
+```bash
+$ javac -cp builder.jar -s gensrc -d out Main.java Person.java
+Main.java:3: error: cannot find symbol
+        Person p = new PersonBuilder().name("ada").age(36).build();
+                       ^
+  symbol:   class PersonBuilder
+```
+
+the processor never ran, so the class it would have generated doesn't exist. the fix is to declare processors explicitly in your build (maven's `annotationProcessorPaths`, gradle's `annotationProcessor` configuration), which you should be doing anyway so a random jar on the class path can't run code inside your compiler.
+</Gotcha>
+
+<Interview q="how does lombok work? is it reflection?">
+no, nothing happens at runtime. lombok is an annotation processor, so javac loads it during compilation. but the standard processor API only allows generating new files, and lombok needs to add methods to your existing class. so it uses javac's internal classes to get at the compiler's syntax tree for your file and inserts the getter, setter or builder nodes directly, before bytecode is generated. the class file ends up with methods that exist in no source file. the cost: it depends on javac internals (and, on recent JDKs, `sun.misc.Unsafe` to reach them), so tools need plugins to understand lombok code, and new JDK versions can break it until lombok releases a fix.
+</Interview>
+
+<Keylines>
+- a processor runs inside javac, reads declarations, and writes new source files.
+- every round that generates files triggers another round. type-checking waits until processing is done.
+- processors can fail the build with real errors: mistakes surface at compile time, not in prod.
+- the standard API can't edit your classes. lombok edits javac's syntax tree instead.
+- since java 23, declare processors explicitly. class-path discovery needs `-proc:full`.
+</Keylines>

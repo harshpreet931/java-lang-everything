@@ -1,0 +1,189 @@
+import { MonitorRoom } from "@/components/figures/concurrency/MonitorRoom";
+import { WhichLock } from "@/components/figures/concurrency/WhichLock";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const syncTrace = [
+  { mem: { count: 0, owner: "·" }, note: "the same two threads and the same count++, now wrapped in synchronized (lock)." },
+  { ops: [{ t: "enter → owns lock", k: "meta" }, null], mem: { owner: "T1" }, note: "T1 gets to the monitor first and owns it." },
+  { ops: ["read count → 0", { t: "enter → BLOCKED", k: "meta", wait: true }], note: "T2 tries to enter. the monitor is taken, so T2 is BLOCKED. it can't run a single instruction of the block." },
+  { ops: ["add → 1", { t: "BLOCKED", wait: true }], note: "T1 is in the middle of count++, and nobody can see the half-done state." },
+  { ops: ["write count = 1", { t: "BLOCKED", wait: true }], mem: { count: 1 } },
+  { ops: [{ t: "exit → release", k: "meta" }, null], mem: { owner: "·" }, note: "T1 leaves the block. releasing the monitor also publishes T1's writes to whoever locks it next." },
+  { ops: [null, { t: "enter → owns lock", k: "meta" }], mem: { owner: "T2" }, note: "T2 finally gets in." },
+  { ops: [null, "read count → 1"], note: "T2 reads 1. it can't read a stale 0: it wasn't allowed to start until T1 was completely finished." },
+  { ops: [null, "add → 2"] },
+  { ops: [null, "write count = 2"], mem: { count: 2 } },
+  { ops: [null, { t: "exit → release", k: "meta" }], mem: { count: { v: 2, k: "live" }, owner: "·" }, note: "2, every time. the three steps of one count++ can no longer interleave with the three steps of another. that's mutual exclusion." },
+];
+
+<InShort>
+every java object carries a **monitor**: a lock that one thread at a time can own. `synchronized (obj) { ... }` grabs `obj`'s monitor, runs the block, and lets go. other threads that want the same monitor wait in line (**BLOCKED**). that turns read-add-write into one indivisible step, and makes the owner's writes **visible** to the next owner.
+</InShort>
+
+## the picture
+
+a single-occupancy room with one chair (the monitor). the door opens from inside only. whoever's inside can stay as long as they like, and can even walk through inner doors of the same room without knocking again (reentrancy). everyone else queues outside the door (the entry set). there's a second waiting area too, for people who stepped out to wait for something specific (the wait set). that one belongs to the [next chapter](/learn/concurrency/wait-and-notify).
+
+<Figure wide caption={<>be the scheduler again. enter with T1, then try entering with T2 and T3: they pile up in the <strong>entry set</strong>, BLOCKED. let T1 enter again (hold count 2) and exit once: still the owner. the <C k="meta">monitor</C> only moves on when the hold count hits 0.</>}>
+<MonitorRoom waits={false} />
+</Figure>
+
+## the counter, fixed
+
+`synchronized` on a method locks `this` for the whole body. here's last chapter's race, done right:
+
+```java title="Main.java" run output="count = 2000000"
+class Counter {
+    private int count;
+    synchronized void increment() { count++; }
+    synchronized int get() { return count; }
+}
+
+void main() throws InterruptedException {
+    Counter c = new Counter();
+    Runnable work = () -> {
+        for (int i = 0; i < 1_000_000; i++) c.increment();
+    };
+    Thread a = new Thread(work);
+    Thread b = new Thread(work);
+    a.start();
+    b.start();
+    a.join();
+    b.join();
+    IO.println("count = " + c.get());
+}
+```
+
+<Figure wide caption={<>the same count++ as the <a href="/learn/concurrency/race-conditions">race chapter</a>, inside a monitor. T2's lane is <C k="mute">dashed</C> while it's BLOCKED: it doesn't get to do part of its increment early, it doesn't get to do anything.</>}>
+<Lanes threads={["T1", "T2"]} cells={["count", "owner"]} steps={syncTrace} />
+</Figure>
+
+notice `get()` is synchronized too. that's not decoration. a lock does two jobs:
+
+1. **mutual exclusion:** only one thread inside at a time, so compound actions can't interleave.
+2. **visibility:** everything a thread wrote before releasing a monitor is visible to the next thread that acquires the same monitor. an unsynchronized `get()` gets neither, and is allowed to return a stale value forever. the rules behind that are the [java memory model](/learn/concurrency/java-memory-model).
+
+<Effective item={78} title="synchronize access to shared mutable data">
+locking only the writes and leaving the reads bare is the classic half-fix. both sides of the conversation need the lock, or the reader may never see what the writer did. the item's famous example is a stop flag that a background thread never notices, which the memory model chapter reproduces.
+</Effective>
+
+## what actually gets locked
+
+a synchronized method is just shorthand. the two forms on each row below are identical:
+
+| you write | it locks |
+| --- | --- |
+| `synchronized void inc()` | `synchronized (this) { ... }` |
+| `static synchronized void reset()` | `synchronized (Counter.class) { ... }` |
+| `synchronized (lock) { ... }` | whatever object `lock` points at right now |
+
+so the question "are these thread-safe together?" is always "do they lock the *same object*?". pick a call for each thread:
+
+<Figure wide caption={<>two calls only exclude each other when they need the <C k="meta">same monitor</C>. try <code>a.inc()</code> with <code>a.inc()</code>, then with <code>Counter.reset()</code>, then with <code>a.get()</code>, the <C k="dead">unlocked</C> one.</>}>
+<WhichLock />
+</Figure>
+
+lock objects are per-object, not per-class and not per-method. two threads in two *different* synchronized methods of the same object still exclude each other (same `this`). two threads in the *same* method of two different objects don't.
+
+<Quiz question="T1 calls a.inc() while T2 calls Counter.reset(), a static synchronized method of the same class. what happens?" options={["T2 waits for T1", "both run at the same time", "it depends on the JVM"]} answer={1}>
+<Explain>
+`a.inc()` locks the instance `a`. `Counter.reset()` locks the `Counter.class` object. different monitors, no exclusion. if `reset()` touches the same fields as `inc()`, that's a race you have to fix by locking one shared object in both.
+</Explain>
+</Quiz>
+
+## reentrancy
+
+a thread that owns a monitor can enter it again. the monitor keeps a hold count, and only the last exit releases it. without that, this would deadlock against itself:
+
+```java title="Main.java" run output="70"
+class Account {
+    private int balance = 100;
+
+    synchronized void withdraw(int amount) {
+        if (canWithdraw(amount)) {   // another synchronized method, same monitor
+            balance -= amount;
+        }
+    }
+    synchronized boolean canWithdraw(int amount) { return balance >= amount; }
+    synchronized int balance() { return balance; }
+}
+
+void main() {
+    Account acc = new Account();
+    acc.withdraw(30);
+    IO.println(acc.balance());
+}
+```
+
+`withdraw` owns `acc`'s monitor, calls `canWithdraw`, which wants the same monitor, and just walks in. recursion and overriding methods that call `super.method()` work the same way. this check-and-act is also the fix for last chapter's overdraft: both halves happen under one lock.
+
+## what the JVM does with it
+
+a synchronized block compiles to two bytecodes, `monitorenter` and `monitorexit`, plus a hidden exception handler that releases the monitor if the block throws. you can never forget to unlock:
+
+```text title="javap -c Counter  (synchronized (lock) { count++; })"
+ 6: monitorenter
+ 7: aload_0
+ 8: dup
+ 9: getfield      #13    // Field count:I
+12: iconst_1
+13: iadd
+14: putfield      #13    // Field count:I
+17: aload_1
+18: monitorexit          ← normal exit
+19: goto          27
+22: astore_2
+23: aload_1
+24: monitorexit          ← exit when an exception is thrown
+25: aload_2
+26: athrow
+Exception table:
+   from    to  target type
+      7    19    22   any
+```
+
+a synchronized *method* doesn't use those at all: it just has the `ACC_SYNCHRONIZED` flag, and the JVM does the same thing around the call.
+
+<Deep title="where the lock actually lives">
+an object doesn't carry a full lock around. its header has a mark word, and when a lock is uncontended the JVM can lock it with a single CAS and a little per-thread bookkeeping, no OS involvement at all. only when threads actually contend (or someone calls `wait()`) does it inflate into a real `ObjectMonitor` with an entry list and a wait set, the structure in the figure above. that's why uncontended synchronized is cheap and contended synchronized is not (threads get parked by the OS). biased locking, an older trick for the single-thread case, was turned off in java 15 and later removed. the details are in [how locks work inside](/learn/jvm/locking-internals).
+</Deep>
+
+## the gotchas
+
+<Gotcha title="locking on something that changes">
+`synchronized (count)` on an `Integer` field locks whatever object `count` points at *right now*. `count++` boxes a brand-new `Integer`, so the next thread locks a different object and walks right in:
+
+```java title="BrokenCounter.java"
+private Integer count = 0;
+void increment() {
+    synchronized (count) {   // locks the current Integer
+        count++;             // ...then points count at a new one
+    }
+}
+```
+
+four runs of two threads × 1,000,000 increments gave 1,707,016, 1,596,879, 1,605,541 and 1,693,360. javac even warns you now: `warning: [identity] attempt to synchronize on an instance of a value-based class`. lock on a `private final Object lock = new Object()` instead. never on boxed numbers, never on string literals (interned, so shared with every other class that has the same literal), never on a non-final field.
+</Gotcha>
+
+<Gotcha title="synchronized(this) is public">
+anyone holding a reference to your object can `synchronized (yourObject)` and hold your lock hostage. for library code, lock a private final object that nobody else can reach.
+</Gotcha>
+
+<Effective item={79} title="avoid excessive synchronization">
+keep the block small, and never call code you don't control (a listener, an overridable method, a lambda someone passed in) while holding a lock. that alien code might take other locks (hello, [deadlock](/learn/concurrency/deadlocks-and-liveness)), block on I/O, or call back into your object.
+</Effective>
+
+`synchronized` can't time out, can't be interrupted while waiting, and can't be tried without blocking. when you need any of those, that's what [ReentrantLock](/learn/concurrency/locks-and-aqs) is for.
+
+<Interview q="what's the difference between a synchronized method and a synchronized block?">
+a synchronized instance method locks `this` (a static one locks the `Class` object) for its whole body, marked with the `ACC_SYNCHRONIZED` flag. a block locks any object you name, for just the statements inside, using `monitorenter`/`monitorexit`. blocks let you hold the lock for less time and choose a private lock object, so outsiders can't interfere. semantically, `synchronized void m() { body }` is exactly `void m() { synchronized (this) { body } }`.
+</Interview>
+
+<Keylines>
+- every object has a monitor. synchronized owns it for the length of the block.
+- it gives mutual exclusion and visibility, and you need both, so reads get locked too.
+- two calls only exclude each other if they lock the same object.
+- synchronized methods lock `this`, static ones lock the `Class`.
+- reentrant: the owner can re-enter, and only the last exit releases.
+- lock a private final object. never a boxed number, a string literal, or a field that changes.
+</Keylines>

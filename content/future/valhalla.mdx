@@ -1,0 +1,107 @@
+import { FlatArray } from "@/components/figures/future/FlatArray";
+import { BitBudget } from "@/components/figures/future/BitBudget";
+import { StatusBoard } from "@/components/figures/future/StatusBoard";
+
+export const board = [
+  { name: "value objects", jep: "JEP 401", status: "integrated", where: "jdk 28, preview", note: "value classes and value records, == by state, and about 30 JDK classes (the wrappers, Optional, the java.time types) migrated under --enable-preview. in the jdk 28 early-access builds now; jdk 28 is due in march 2027." },
+  { name: "strict field initialization in the JVM", jep: "JEP 539", status: "integrated", where: "jdk 28, preview", note: "the bytecode-level rule value classes depend on: a strictly-initialized field must be set before anyone can read it, so nobody ever sees a half-built value object. javac marks every field of a value class this way." },
+  { name: "null-restricted and nullable types", jep: "draft 8303099", status: "draft", where: "not targeted", note: "nullness markers on types: Foo! rejects null, Foo? allows it, plain Foo stays unspecified. the draft was last updated in july 2025, and its syntax may still change." },
+  { name: "null-restricted value class types", jep: "draft 8316779", status: "draft", where: "not targeted", note: "the storage half: let a variable of a value class type exclude null, so the JVM can drop the null flag and flatten more. a draft since 2023." },
+  { name: "enhanced primitive boxing", jep: "JEP 402", status: "draft", where: "not targeted", note: "part of unifying primitives and classes: treating int and Integer as two views of one thing, so the line between them mostly disappears." },
+  { name: "specialized generics", status: "exploring", where: "design notes only", note: "the parametric JVM: letting List<int> exist and be specialized at run time. there's no JEP, just design notes. it's the furthest-out piece." },
+  { name: "warnings for value-based classes", jep: "JEP 390", status: "final", where: "java 16", note: "the groundwork, already shipped: the wrapper constructors like new Integer(5) are deprecated for removal, and javac warns when you synchronize on an instance of a value-based class." },
+];
+
+<InShort>
+a **value class** is a class whose instances have **no identity**: two of them are `==` when their fields are equal, you can't lock on them, and the JVM is free to copy them around instead of pointing at them. that freedom is the point: arrays and fields of value objects can be **flattened**, holding the data inline instead of a pointer to a separate object with a header.
+
+as of october 2026, value objects ([JEP 401](https://openjdk.org/jeps/401)) are integrated into jdk 28 as a **preview**, due march 2027. `Integer`, `Optional` and the `java.time` types become value classes under `--enable-preview`. null-restricted types and specialized generics are still drafts and ideas.
+</InShort>
+
+## the picture
+
+you know how an `ArrayList<Integer>` of a million numbers costs about 20 MB while an `int[]` costs 4? (measured in [ArrayList vs LinkedList](/learn/deep-dives/arraylist-vs-linkedlist).) every `Integer` is a full object: a 12-byte header, the 4-byte value, padding, and a pointer from the list to find it. most of that exists so each `Integer` can have an **identity**: so `==` can tell two `1996`s apart, so you could `synchronized` on one, so it could be `null` or be the same object in two places.
+
+almost nobody wants any of that from a number. think of writing a phone number on a page versus writing "see the sticky note in drawer 4" and keeping the number on the sticky note. the sticky note is identity: you can point at it from many places and cross it out in one. for a phone number, you just want it written down. valhalla's motto is "codes like a class, works like an int".
+
+## what a value class is
+
+<Since preview v={28} /> one modifier. this is jdk 28 code (preview), adapted from JEP 401's examples, and it doesn't compile on jdk 25 or 27:
+
+```java
+// jdk 28, javac --release 28 --enable-preview (JEP 401). illustrative: not runnable here.
+value record Point(int x, int y) {}
+
+value class Money {
+    private long cents;                    // fields of a value class are implicitly final
+    public Money(long cents) { this.cents = cents; }
+    public long cents() { return cents; }
+}
+```
+
+what changes, per the JEP:
+
+- **`==` compares state.** two value objects are `==` if they're the same class and their fields are the same (primitive fields bit for bit, reference fields recursively). `new Point(17, 3) == new Point(17, 3)` is true. `equals` still exists for "means the same value" when that's looser than "same fields".
+- **no identity operations.** `synchronized` on a value object is a compile error, or an `IdentityException` at run time through an `Object` reference. `wait`/`notify` throw. you can't make a `WeakReference` to one. `Objects.hasIdentity(o)` tells you which kind you have.
+- **the class and its fields are implicitly final.** a value object can't change after construction, which is what makes copying it safe.
+- **it's still an object.** it has a class, methods, can implement interfaces, and a variable of a value class type can still be `null`. java still has exactly two kinds of values: primitives and references.
+
+and under `--enable-preview` the JDK itself moves over: `Integer`, `Long` and the other wrappers, `Optional` and its primitive cousins, and most of `java.time` (`LocalDate`, `Duration`, ...) become value classes. `String` does not.
+
+<Predict options={["true", "false", "compile error"]} answer={0} question="on jdk 28 with --enable-preview, what does this print?">
+```java
+Integer x = 1996, y = 1996;
+IO.println(x == y);
+```
+<Explain>
+`true`. under the preview, `Integer` is a value class, so `==` compares the values. JEP 401 shows exactly this in jshell. on jdk 25 (and on 28 without the flag) it prints `false`: 1996 is outside the [integer cache](/learn/deep-dives/integer-cache), so autoboxing makes two different objects and `==` compares the two arrows. the most famous java interview trap stops being one, but only for code that opts in.
+</Explain>
+</Predict>
+
+## flattening
+
+no identity means the JVM never has to keep "this particular object" anywhere. so it can store the data directly where the reference would have been: in an array element, in a field (**flattening**), or spread across registers in a method (**scalarization**).
+
+<Figure wide caption={<>the same eight elements three ways. switch layouts. today every element is a <C k="ref">pointer</C> to an object with its own <C k="meta">header</C>. flattened, the data sits in the array. the flattened layout is what JEP 401 says a JVM may do, not a promise: it's the JVM's call, element by element.</>}>
+<FlatArray />
+</Figure>
+
+the speedup isn't only memory. one load instead of two, no pointer chasing, data packed in order, so a loop over a flattened `Integer[]` is a sequential scan, the friendliest thing you can do for a CPU (why that matters: [ArrayList vs LinkedList](/learn/deep-dives/arraylist-vs-linkedlist)). and the GC has a lot fewer objects to trace.
+
+flattening works best when the variable has the exact value class type. a `Point[]` or a `Point` field can be flattened; an `Object[]` holding points can't, because it might hold anything.
+
+## the 64-bit budget
+
+there's a catch that explains a lot of valhalla's roadmap. a flattened value in a field or array element you can write to must be read and written in one go, or another thread could see half an old value and half a new one (a "torn" read). on common hardware that means 64 bits at most. and a nullable reference needs at least one extra bit to say "this is null".
+
+<Figure wide caption={<>bits each value needs, plus a <C k="hot">null flag</C>, against the 64 bits hardware updates atomically (the <C k="dead">dashed line</C>). switch to the draft null-restricted mode to see what dropping the flag buys.</>}>
+<BitBudget />
+</Figure>
+
+so in jdk 28's preview, an `Integer[]` can flatten and a `Long[]` probably can't (65 bits, one too many). that's why the other half of valhalla is about telling the JVM more: "this variable is never null" (null-restricted types), or "this class doesn't mind being updated non-atomically" (an option the JEP mentions as possible future work). fields *of a value class* don't have the limit at all, because nobody can ever observe them changing.
+
+## what's next
+
+valhalla has been running since 2014, and it ships in pieces. as of october 2026:
+
+<Figure caption={<>valhalla's pieces and where each one stands, checked against the JEP pages and the project page on openjdk.org (october 2026). click a row for what it is.</>}>
+<StatusBoard rows={board} />
+</Figure>
+
+the order matters: value objects first (identity is the thing that blocks everything else), then nullness (which unlocks more flattening), then generics over primitives (`List<int>`, which needs both). the [vector API](/learn/future/panama-and-babylon) is also waiting on value objects: its vectors want to be values, not heap objects.
+
+<Gotcha title="code that relies on identity">
+under the preview, code that treats wrappers or `java.time` objects as having identity changes behaviour: `synchronized (someInteger)` throws `IdentityException` ("Cannot synchronize on an instance of value class ..."), an `IdentityHashMap<Integer, ...>` can no longer tell equal numbers apart, a `WeakHashMap` with `LocalDate` keys throws, and `==` between boxes starts returning true where it used to return false. javac has warned about synchronizing on value-based classes since java 16 (JEP 390), and `new Integer(...)` has been deprecated for removal since then. if your code is clean of those warnings today, it's most of the way ready.
+</Gotcha>
+
+<Interview q="what is a value class in project valhalla, and why does it matter?">
+a class declared with the `value` modifier whose instances have no identity: they're compared by their field values with `==`, they're immutable, and identity-based operations like `synchronized` or weak references aren't allowed on them. giving up identity lets the JVM flatten them into arrays and fields and keep them in registers, so an array of value objects can have roughly primitive-array density and locality while still being objects with methods. it's JEP 401, a preview feature in jdk 28 (as of october 2026), where the wrapper classes, `Optional` and the `java.time` types also become value classes. the follow-ups, null-restricted types and specialized generics, are still drafts.
+</Interview>
+
+<Keylines>
+- a value class has no identity: `==` compares fields, no locking, no weak references, immutable.
+- that lets the JVM flatten value objects into arrays and fields: data inline, no header, no pointer.
+- JEP 401 is integrated into jdk 28 as a preview (as of october 2026). `Integer`, `Optional`, `LocalDate` migrate under the flag.
+- flattening a mutable field has a 64-bit budget, null flag included. that's why null-restricted types matter.
+- null-restricted types and `List<int>` are drafts and design notes, not features yet.
+</Keylines>

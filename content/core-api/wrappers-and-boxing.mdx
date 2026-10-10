@@ -1,0 +1,200 @@
+import { IntegerCacheFig } from "@/components/figures/core-api/IntegerCacheFig";
+
+<InShort>
+every primitive has a **wrapper** class (`int` → `Integer`) so it can live where only objects are allowed, like a `List`. **autoboxing** is just javac quietly writing `Integer.valueOf(x)` and `x.intValue()` for you.
+
+but a wrapper is an object: it can be `null`, `==` compares arrows instead of values, and `valueOf` hands out **cached** objects for -128..127. that's why `127 == 127` and `128 != 128`.
+</InShort>
+
+## the picture
+
+an `int` is a number written straight into its slot. an `Integer` is that number put in a little box on the heap, and the slot holds an arrow to the box. same number, different packaging.
+
+why bother with boxes? because a lot of java only speaks objects:
+
+- **generics**: `List<int>` doesn't compile, `List<Integer>` does. (why: [generics limitations](/learn/generics/generics-limitations).)
+- **null**: a field of type `Integer` can say "nobody told me yet". an `int` can only say `0`.
+- **a home for the helpers**: `Integer.parseInt`, `Integer.MAX_VALUE`, `Character.isDigit`, `Long.compare`.
+
+| primitive | wrapper | cached by `valueOf` |
+| --- | --- | --- |
+| `boolean` | `Boolean` | both: `Boolean.TRUE`, `Boolean.FALSE` |
+| `byte` | `Byte` | all 256 values |
+| `short` | `Short` | -128..127 |
+| `char` | `Character` | 0..127 |
+| `int` | `Integer` | -128..127 (upper bound is tunable) |
+| `long` | `Long` | -128..127 |
+| `float` | `Float` | nothing |
+| `double` | `Double` | nothing |
+
+## autoboxing is just method calls
+
+here's a tiny method and what javac actually wrote into the `.class` file (`javap -c`, jdk 25):
+
+<Tabs>
+<Tab label="what you write">
+```java
+Integer x = 5;
+int y = x + 1;
+return y;
+```
+</Tab>
+<Tab label="what javac emits">
+```text
+0: iconst_5
+1: invokestatic  #7    // Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;
+4: astore_0
+5: aload_0
+6: invokevirtual #13   // Method java/lang/Integer.intValue:()I
+9: iconst_1
+10: iadd
+11: istore_1
+```
+</Tab>
+</Tabs>
+
+boxing is a call to `Integer.valueOf`. unboxing is a call to `intValue()`. there's no special JVM magic, which means every rule that applies to method calls on objects applies here too, including the one where the object is `null`.
+
+## the integer cache
+
+`Integer.valueOf` doesn't always allocate. at startup, the `Integer` class builds an array of 256 `Integer` objects, one for every value from -128 to 127, and `valueOf` returns one of those whenever it can. small numbers are everywhere (loop counters, flags, sizes), so sharing them saves a lot of tiny objects.
+
+<Figure wide caption={<>drag <code>v</code> across the <C k="meta">cached range</C>. inside it, both variables get the same object and <code>==</code> is <C k="live">true</C>. one step outside, <code>valueOf</code> allocates twice and <code>==</code> is <C k="dead">false</C>, even though the numbers are equal.</>}>
+<IntegerCacheFig />
+</Figure>
+
+`==` on two objects asks "same object?", never "same value?". the cache just makes that question accidentally come out right for small numbers, which is the worst kind of bug: every test with `1`, `2` and `42` passes, and production fails on order number 128.
+
+<Predict options={["true true", "true false", "false false"]} answer={1}>
+```java
+Integer a = 127, b = 127;
+Integer c = 128, d = 128;
+IO.println((a == b) + " " + (c == d));
+```
+<Explain>
+127 comes from the cache, so `a` and `b` are arrows to the same object. 128 isn't cached, so `c` and `d` are two different objects that happen to hold the same number. use `c.equals(d)` (true) or compare `int`s.
+</Explain>
+</Predict>
+
+<Predict options={["true", "false", "compile error"]} answer={1}>
+```java
+Long id = 127L;
+IO.println(id.equals(127));
+```
+<Explain>
+`127` is an `int` literal, so it's boxed to an `Integer`, and `Long.equals` returns false for anything that isn't a `Long`, no matter the value. `id.equals(127L)` is true. this one bites people comparing ids from a database (`Long`) with a literal.
+</Explain>
+</Predict>
+
+<Predict options={["true", "false"]} answer={0}>
+```java
+Integer big = 1000;
+int n = 1000;
+IO.println(big == n);
+```
+<Explain>
+one side is a primitive, so java unboxes `big` and compares two `int`s. `==` between a wrapper and a primitive is a numeric comparison. it's only wrapper vs wrapper that compares identity.
+</Explain>
+</Predict>
+
+<Deep title="where the cache comes from, and how to change it">
+it's a private nested class, `Integer.IntegerCache`, with a `static final Integer[] cache`. on HotSpot the array even comes pre-built from the CDS archive (the class data sharing file that ships with the JDK), so startup doesn't pay for it.
+
+the upper bound is configurable: `-XX:AutoBoxCacheMax=1000` (which sets the `java.lang.Integer.IntegerCache.high` property) makes `128 == 128` true. the lower bound is fixed at -128. please don't use this to "fix" `==` bugs. it's a memory/allocation knob, and your code should be correct with the default.
+</Deep>
+
+## null, and the unboxing NPE
+
+since unboxing is a method call, unboxing a `null` is `null.intValue()`. the classic place this happens is a map lookup:
+
+```java title="Stock.java" run output="apples: 3\nException in thread \"main\" java.lang.NullPointerException: Cannot invoke \"java.lang.Integer.intValue()\" because the return value of \"java.util.Map.get(Object)\" is null"
+import java.util.HashMap;
+import java.util.Map;
+
+void main() {
+    Map<String, Integer> stock = new HashMap<>();
+    stock.put("apples", 3);
+    IO.println("apples: " + stock.get("apples"));
+    int pears = stock.get("pears");   // no pears: get returns null, then null.intValue()
+    IO.println("pears: " + pears);
+}
+```
+
+the line has no method call in sight, which is why this NPE confuses people. the fix is to say what "missing" means: `stock.getOrDefault("pears", 0)`.
+
+<Gotcha title="the ternary that unboxes behind your back">
+```java
+Integer v = known ? map.get(key) : 0;   // NPE when get returns null
+```
+one branch is `Integer`, the other is the `int` literal `0`. the java rules for `?:` say a mix of `Integer` and `int` has type `int`, so the `Integer` branch gets unboxed first, then the result is boxed again for `v`. if `get` returns `null`, that unboxing throws. make both branches `Integer` (write `Integer.valueOf(0)` instead of `0`), or better, use `map.getOrDefault(key, 0)`.
+</Gotcha>
+
+## what boxes cost
+
+an `int` is 4 bytes. an `Integer` is a whole object: a 12-byte header plus the 4-byte value, so 16 bytes on the heap, plus the 4-byte reference pointing at it. a `Long` is 24.
+
+<Figure caption={<>allocated bytes for 10 million numbers, measured on temurin 25 (compressed references on, the default). the <C k="dead">list</C> pays for an array of references <em>and</em> one object per number.</>}>
+<Bars
+  unit="MB"
+  data={[
+    { label: "int[10_000_000]", value: 38.1, tone: "live" },
+    { label: "ArrayList\u003cInteger>", value: 190.7, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+time follows memory. summing that list took about 4× longer than summing the array, because every element is a pointer to chase instead of the next 4 bytes.
+
+the famous one is an accidentally boxed accumulator:
+
+```java
+Long sum = 0L;                  // capital L
+for (int i = 0; i < 100_000_000; i++) {
+    sum += i;                   // unbox, add, box a new Long. every time.
+}
+```
+
+honest numbers from jdk 25: in this exact loop, C2's escape analysis notices the `Long`s never leave the method and deletes them, so it allocated 0 bytes and was only 1.5× slower than `long` (40 ms vs 27 ms). switch that off with `-XX:-DoEscapeAnalysis` and the same loop allocates 2.3 GB and takes 183 ms. the JIT saved you here, but only because the box never escaped. put the values in a field or a collection and nothing can save you.
+
+<Effective item={61} title="prefer primitive types to boxed primitives">
+use primitives unless you have to have an object (collection elements, type arguments, a real "no value"). boxed types bring identity (so `==` lies), `null` (so unboxing throws) and allocation (so loops get slow). item 6 uses the boxed-accumulator loop above as its example of an unnecessary object.
+</Effective>
+
+<Gotcha title="list.remove(1) removes index 1, not the value 1">
+`List` has `remove(int index)` and `remove(Object o)`. with a `List<Integer>`, `list.remove(1)` picks the `int` version, because overload resolution tries exact matches before boxing. so `[10, 20, 30].remove(1)` gives `[10, 30]`. to remove the value, box it yourself: `list.remove(Integer.valueOf(10))`.
+</Gotcha>
+
+## the helpers worth knowing
+
+```java title="Helpers.java" run output="297\n1010 ff\n-1 2147483647\nfalse true\ntrue false\nFor input string: \"4 2\""
+void main() {
+    IO.println(Integer.parseInt("42") + Integer.parseInt("ff", 16));   // 42 + 255
+    IO.println(Integer.toBinaryString(10) + " " + Integer.toHexString(255));
+    IO.println(Integer.compare(3, 7) + " " + Integer.MAX_VALUE);
+    IO.println((Double.NaN == Double.NaN) + " " + Double.valueOf(Double.NaN).equals(Double.NaN));
+    IO.println((0.0 == -0.0) + " " + Double.valueOf(0.0).equals(-0.0));
+    try {
+        Integer.parseInt("4 2");
+    } catch (NumberFormatException e) {
+        IO.println(e.getMessage());
+    }
+}
+```
+
+`parseInt` gives you an `int`, `valueOf` gives you an `Integer` (through the cache). use `Integer.compare(a, b)` in comparators, never `a - b`, which overflows (more in [casting and overflow](/learn/basics/casting-and-overflow)). and notice `Double.equals` disagrees with `==` on `NaN` and on `-0.0`: `equals` compares bit patterns, so a `NaN` can be found in a `HashSet<Double>`.
+
+<Note title="new Integer(5) is deprecated">
+the constructors have been deprecated since java 9. they always allocate, they skip the cache, and they're in the way of [project valhalla](/learn/future/valhalla), which wants wrappers to become value classes with no identity at all. use `Integer.valueOf(5)`, or just write `5` and let autoboxing call it.
+</Note>
+
+<Interview q="why does 127 == 127 but 128 != 128 for Integer?">
+autoboxing calls `Integer.valueOf`, which returns shared objects from a cache for -128..127 and allocates new ones outside it. `==` on objects compares references, so inside the cache both sides are the same object and outside they're two objects with the same value. the fix is `equals`, or comparing unboxed `int`s. bonus: the upper bound can be raised with `-XX:AutoBoxCacheMax`, and `Long`, `Short` and `Byte` cache the same range.
+</Interview>
+
+<Keylines>
+- autoboxing is `valueOf()` on the way in and `xxxValue()` on the way out. nothing more.
+- wrapper `==` wrapper compares objects. use `equals`, or compare primitives.
+- `valueOf` caches -128..127, so `==` works on small numbers and lies on big ones.
+- unboxing `null` throws an NPE, often on a line with no visible method call.
+- a box costs 16 bytes or more. in hot code and big collections, stay primitive.
+</Keylines>

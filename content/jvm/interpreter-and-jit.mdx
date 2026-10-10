@@ -1,0 +1,176 @@
+import { TierMeter } from "@/components/figures/jvm/TierMeter";
+import { MeasuredBars } from "@/components/figures/jvm/MeasuredBars";
+
+<InShort>
+every method starts out **interpreted**: the JVM reads its bytecode one instruction at a time, and counts how often it runs. once a method gets warm, **C1** compiles it to machine code fast, with instrumentation that records how the code actually behaves. once it gets hot, **C2** recompiles it slowly and carefully, using that **profile**.
+
+that's **tiered compilation**: levels 0 to 4. hot code climbs; code that never matters never gets compiled at all.
+</InShort>
+
+## the picture
+
+you know how java is "slow to start, fast once it's going"? that's this chapter. it's not the JVM being lazy: it's deliberately waiting to see what your code does before it spends effort optimizing it.
+
+think of learning a commute in a new city. the first week you follow the map turn by turn (the interpreter). after a few trips you know the route, and you start noticing things: this light is always red, that road is always empty at 9 (C1, with profiling). a month in, you take shortcuts based on everything you noticed (C2). and if one day a road you counted on is closed, you pull the map back out (deoptimization).
+
+## watch a method warm up
+
+`digitSum` adds up the digits of a number. it's called in batches of 100, and every batch is timed. this is a real run on jdk 25: scrub through it, or warm it up.
+
+```java title="Warmup.java"
+static int digitSum(int n) {
+    int sum = 0;
+    while (n > 0) {
+        sum += n % 10;
+        n /= 10;
+    }
+    return sum;
+}
+```
+
+<Figure wide caption={<>drag <code>calls</code> or press warm it up. the <C k="hot">hot</C> rung is the tier the method is running at. the curve is measured (jdk 25, M4 Pro): one representative run of five, where C1's code always landed after 900 to 1,100 calls and C2's after about 14,000 to 15,600.</>}>
+<TierMeter />
+</Figure>
+
+two things that surprise people. first, compilation doesn't pause your program: the method is queued, a compiler thread works on it in the background, and the interpreter keeps running the old way until the new code is installed (that's the gap between 256 and 900 calls). second, the curve has two steps, not one. the first is the jump from bytecode to machine code. the second is C2 doing actual optimization with what tier 3 learned.
+
+## the five tiers
+
+| tier | runs as | what it's for |
+| --- | --- | --- |
+| 0 | the interpreter | everything starts here. counts calls and loop back-edges |
+| 1 | C1, no profiling | trivial methods (getters) where C2 couldn't do better anyway |
+| 2 | C1, counters only | a stopgap while C2's queue is long |
+| 3 | C1, full profiling | the normal middle step. records types at call sites, branch directions |
+| 4 | C2 | the real optimizer. uses the tier 3 profile to bet on what will happen |
+
+the usual path is 0 → 3 → 4. the thresholds are plain JVM flags (`java -XX:+PrintFlagsFinal -version`, jdk 25):
+
+| flag | default | means |
+| --- | --- | --- |
+| `Tier3InvocationThreshold` | 200 | calls before a method is queued for tier 3 |
+| `Tier3CompileThreshold` | 2000 | or: calls + back-edges past this (with at least 100 calls) |
+| `Tier3BackEdgeThreshold` | 60000 | loop iterations before an OSR compile (see below) |
+| `Tier4InvocationThreshold` | 5000 | calls (counted in tier 3 code) before C2 |
+| `Tier4CompileThreshold` | 15000 | or: calls + back-edges past this (with at least 600 calls) |
+| `Tier0InvokeNotifyFreqLog` | 7 | the interpreter checks every 2^7 = 128 calls |
+
+the thresholds also scale with how busy the compiler queues are, so "200" is a starting point, not a promise. that's why the logged run queued `digitSum` at 256: the first check after 200.
+
+how much does each tier actually buy? same loop, same method, forcing the JVM to stop at each tier with `-XX:TieredStopAtLevel` (or `-Xint` for interpreter only):
+
+<Figure caption={<>steady-state cost of one call, median of three runs, jdk 25 on an M4 Pro. tier 3 is <em>slower</em> than tiers 1 and 2: that's the price of recording the profile.</>}>
+<MeasuredBars unit="ns/call" data={[
+  { label: "tier 0 · -Xint", value: 68.6 },
+  { label: "tier 3 · C1 + full profile", value: 17.7 },
+  { label: "tier 2 · C1 + counters", value: 9.9 },
+  { label: "tier 1 · C1, no profile", value: 9.2 },
+  { label: "tier 4 · C2 (default)", value: 7.8, tone: "live" },
+]} />
+</Figure>
+
+tier 3 being twice as slow as tier 1 is the whole design in one number. profiling is expensive, so the JVM only does it for a while, only on code that's warm, and only so C2 can make bets that beat C1 by a wide margin.
+
+## reading -XX:+PrintCompilation
+
+the JVM will tell you every compilation as it happens. here's a program with a hot method *and* a long loop in `main`:
+
+```java title="Hot.java"
+public class Hot {
+    static int digitSum(int n) {
+        int sum = 0;
+        while (n > 0) {
+            sum += n % 10;
+            n /= 10;
+        }
+        return sum;
+    }
+
+    public static void main(String[] args) {
+        long total = 0;
+        for (int i = 0; i < 1_000_000; i++) {
+            total += digitSum(i);
+        }
+        System.out.println(total);
+    }
+}
+```
+
+```text title="java -XX:+PrintCompilation Hot  (Hot's lines only)" {2,6,9}
+14    9       3       Hot::digitSum (23 bytes)
+14   10       4       Hot::digitSum (23 bytes)
+14    9       3       Hot::digitSum (23 bytes)   made not entrant: not used
+15   11 %     3       Hot::main @ 4 (32 bytes)
+15   12       3       Hot::main (32 bytes)
+15   13 %     4       Hot::digitSum @ 2 (23 bytes)
+15   11 %     3       Hot::main @ 4 (32 bytes)   made not entrant: OSR invalidation back branch
+15   14 %     3       Hot::main @ 4 (32 bytes)
+15   15 %     4       Hot::main @ 4 (32 bytes)
+16   14 %     3       Hot::main @ 4 (32 bytes)   made not entrant: OSR invalidation of lower level
+19   15 %     4       Hot::main @ 4 (32 bytes)   made not entrant: uncommon trap
+27000000
+```
+
+the columns, left to right:
+
+<Defs>
+<dt>`14`</dt><dd>milliseconds since the JVM started. the whole climb happened in about 5 ms.</dd>
+<dt>`9`</dt><dd>the compile id. the same id appears again when that compiled version is thrown away.</dd>
+<dt>`%`</dt><dd>flags. `%` is an OSR compile, `s` synchronized, `!` has exception handlers, `n` a native wrapper, `b` blocking.</dd>
+<dt>`3`</dt><dd>the tier.</dd>
+<dt>`@ 4`</dt><dd>for OSR: the bytecode index of the loop the compiled code is entered at.</dd>
+<dt>`(23 bytes)`</dt><dd>size of the method's bytecode, not of the machine code.</dd>
+<dt>`made not entrant`</dt><dd>this version can't be entered anymore. the reason follows: replaced by a better one, or an assumption broke.</dd>
+</Defs>
+
+## on-stack replacement
+
+look at `main` in that log. it's called exactly once, so its invocation counter never gets past 1. yet it got compiled, four times. that's **on-stack replacement** (OSR): the back-edge counter of its loop crossed the threshold while `main` was still inside the loop, so the JVM compiled a special version of `main` that starts *at the loop* (bytecode 4, the `iload_3` that `goto 4` jumps back to), copied the live locals out of the interpreter frame, and jumped into compiled code mid-loop.
+
+```text title="javap -c Hot (main)" {5,15}
+ 0: lconst_0
+ 1: lstore_1
+ 2: iconst_0
+ 3: istore_3
+ 4: iload_3
+ 5: ldc           #7     // int 1000000
+ 7: if_icmpge     24
+10: lload_1
+11: iload_3
+12: invokestatic  #8     // Method digitSum:(I)I
+15: i2l
+16: ladd
+17: lstore_1
+18: iinc          3, 1
+21: goto          4
+```
+
+the last line of the log is the next chapter in miniature. the C2 OSR version of `main` was built from a profile in which the loop never ended, so C2 didn't bother compiling the code after it. when `i` finally hit 1,000,000, execution reached that missing path, hit an **uncommon trap**, and the JVM threw the compiled code away and finished `main` in the interpreter. it printed `27000000` anyway. more on that in [JIT optimizations](/learn/jvm/jit-optimizations).
+
+<Quiz question="a program's main has one loop that runs 50 million times and calls nothing. main runs once. does any of it get JIT-compiled?" options={["no, main is only invoked once", "yes, through on-stack replacement", "only with -server", "only if the loop body is a separate method"]} answer={1}>
+<Explain>
+yes. compilation is triggered by back-edges (loop iterations) as well as calls. once the loop's back-edge counter crosses the threshold, the JVM OSR-compiles `main` and swaps to the compiled loop mid-flight. the `%` lines in PrintCompilation are exactly this. (`-server` hasn't meant anything on 64-bit JVMs for years.)
+</Explain>
+</Quiz>
+
+<Gotcha title="timing the first run measures the interpreter">
+the most common benchmark bug in java: run something once, time it, conclude java is slow. the first few hundred calls in the figure above were 4 to 5 times slower than the steady state, and they were *real*: that's just the interpreter. warmup is part of how the JVM works, so measure it on purpose or skip it on purpose. for small code, use [JMH](/learn/performance/jmh), which runs warmup iterations and forks fresh JVMs for you. and if what you care about is startup itself, see [AOT and Leyden](/learn/jvm/aot-and-leyden).
+</Gotcha>
+
+<Deep title="the code cache, and what happens when it fills">
+compiled code lives in the code cache, outside the heap (on this machine: 244 MB reserved, see [JVM architecture](/learn/jvm/jvm-architecture)). since java 9 it's segmented into three heaps: JVM-internal code, profiled code (tiers 2 and 3) and non-profiled code (tiers 1 and 4), so short-lived tier 3 code doesn't fragment the long-lived C2 code.
+
+if a segment fills up, the JVM prints `CodeCache is full. Compiler has been disabled.` (or the per-segment version, `... is full. Compiler has been disabled.`) and stops compiling new methods. everything keeps working, it just stays at whatever tier it reached, and anything new runs interpreted. on huge apps that's a real, slow-burning performance cliff: check `jcmd <pid> Compiler.codecache` and raise `-XX:ReservedCodeCacheSize` if you're near the top.
+</Deep>
+
+<Interview q="why does the JVM interpret first instead of compiling everything up front?">
+three reasons. startup: compiling everything before `main` would take seconds, and most code (startup paths, error handling) runs a handful of times, so compiling it is wasted work. information: the most valuable input to an optimizer is how the code actually behaves (which branch is taken, which class shows up at a call site), and you only know that after running it. and focus: the JIT can spend its budget on the few percent of methods where the program actually spends its time. the cost is warmup, which is why projects like Leyden (AOT caches with saved profiles) exist.
+</Interview>
+
+<Keylines>
+- every method starts interpreted. the JVM counts calls and loop iterations.
+- warm → C1 (fast to compile, tier 3 records a profile). hot → C2 (slow to compile, uses the profile).
+- compilation runs in the background. the interpreter keeps going until the code is ready.
+- a long loop can be compiled while it runs: on-stack replacement, the `%` in PrintCompilation.
+- `-XX:+PrintCompilation` shows the whole climb. warmup is real, so measure it on purpose.
+</Keylines>

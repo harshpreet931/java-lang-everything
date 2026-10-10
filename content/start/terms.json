@@ -1,0 +1,17 @@
+[
+  { "term": "OpenJDK", "short": "the open-source project the JDK is built from. temurin, corretto, oracle's JDK: all builds of it.", "chapter": "what-is-java" },
+  { "term": "JDK distribution", "short": "one vendor's build of OpenJDK. same code, different support, patches and license.", "chapter": "setup", "aka": ["temurin", "corretto", "zulu"] },
+  { "term": "JAVA_HOME", "short": "an environment variable pointing at one JDK's folder. build tools and IDEs read it, your shell doesn't.", "chapter": "setup" },
+  { "term": "compact source file", "short": "a .java file with methods and fields but no class around them. java 25.", "chapter": "hello-world", "aka": ["implicit class", "simple source file", "unnamed class"] },
+  { "term": "instance main method", "short": "a main that isn't static. the launcher creates the object first. java 25.", "chapter": "hello-world" },
+  { "term": "source launcher", "short": "java Main.java: compiles the file in memory and runs it, no .class on disk. java 11, multi-file in 22.", "chapter": "compile-and-run", "aka": ["single-file source-code program"] },
+  { "term": "classpath", "short": "the list of folders and jars the JVM searches for classes. the current directory by default.", "chapter": "compile-and-run", "aka": ["-cp"] },
+  { "term": "javap", "short": "the JDK's class file disassembler. javap -c shows the bytecode javac produced.", "chapter": "compile-and-run" },
+  { "term": "class file version", "short": "the major version in a .class header. java version + 44, so java 25 is 69.", "chapter": "compile-and-run", "aka": ["major version", "UnsupportedClassVersionError"] },
+  { "term": "jshell", "short": "java's REPL. type a snippet, see its value, no class or main needed. java 9.", "chapter": "jshell", "aka": ["REPL"] },
+  { "term": "scratch variable", "short": "the $1, $2... name jshell gives a result you didn't name.", "chapter": "jshell" },
+  { "term": "stack trace", "short": "the call stack when an exception was thrown, newest call first.", "chapter": "debugging", "aka": ["stacktrace"] },
+  { "term": "breakpoint", "short": "a line where the debugger pauses the program so you can look around.", "chapter": "debugging" },
+  { "term": "JDWP", "short": "java debug wire protocol. how a debugger talks to a running JVM over a socket.", "chapter": "debugging", "aka": ["jdb", "remote debugging"] },
+  { "term": "helpful NullPointerException", "short": "since java 14, NPE messages name exactly what was null.", "chapter": "debugging", "aka": ["JEP 358"] }
+]

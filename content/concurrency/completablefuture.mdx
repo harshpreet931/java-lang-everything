@@ -1,0 +1,199 @@
+import { CfDag } from "@/components/figures/concurrency/CfDag";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const who = [
+  { ops: ["f = supplyAsync(slow)", "slow() running", null], note: "supplyAsync hands slow() to the common pool. main gets a future back immediately." },
+  { ops: [{ t: "f.thenApply(g)", k: "hot" }, "slow() running", null], note: "f isn't done yet, so g can't run. it's stored on f as a callback, and main moves on without waiting." },
+  { ops: [null, "slow() returns", null], note: "the pool thread completes f..." },
+  { ops: [null, { t: "runs g", k: "hot" }, null], note: "...and then runs the callbacks stored on it, right there, on the same thread. g ran on worker-1, not on main, not on a fresh thread." },
+  { ops: [{ t: "f.thenApply(h)", k: "hot" }, null, null], note: "now f is already complete. thenApply has nobody to wait for..." },
+  { ops: [{ t: "runs h", k: "hot" }, null, null], note: "...so it runs h immediately, on the calling thread. main." },
+  { ops: ["f.thenApplyAsync(k)", null, null], note: "the Async versions never run inline. they always hand the function to an executor: the common pool, unless you pass your own." },
+  { ops: [null, null, { t: "runs k", k: "hot" }], note: "so k runs on a pool thread, whichever one is free." },
+];
+
+<InShort>
+a **`CompletableFuture`** is a box that will hold a value (or an exception) later. instead of blocking on it, you attach the next steps: **`thenApply`** to transform the value, **`thenCompose`** to chain another async call, **`thenCombine`** / **`allOf`** to wait for several, and **`exceptionally`** / **`handle`** to recover from failures. you build a graph of stages, and the stages run as their inputs complete.
+</InShort>
+
+## the picture
+
+ordering food at a counter that hands you a buzzer. a plain `Future` is a buzzer you can only stare at: `get()` means standing at the counter until it goes off, doing nothing else. a `CompletableFuture` is a buzzer you can program: "when it buzzes, put ketchup on it, then when the drinks buzzer goes too, bring both to table 4". you walk away. the instructions run when the food is ready, whoever happens to be standing there at the time.
+
+## a pipeline
+
+each method returns a new future for the next stage, so a pipeline reads top to bottom:
+
+```java title="Main.java" run output="dr. ADA, 36"
+import java.util.concurrent.CompletableFuture;
+
+CompletableFuture<String> lookupTitle(String name) {
+    return CompletableFuture.supplyAsync(() -> "dr. " + name);   // async, returns a future
+}
+
+void main() {
+    CompletableFuture<Integer> age = CompletableFuture.supplyAsync(() -> 36);
+
+    String result = CompletableFuture
+            .supplyAsync(() -> "ada")                     // runs on a pool thread
+            .thenApply(String::toUpperCase)               // a plain function: map
+            .thenCompose(name -> lookupTitle(name))       // a function returning a future: flatMap
+            .thenCombine(age, (who, a) -> who + ", " + a) // wait for both, then merge
+            .join();                                      // block main until it's all done
+
+    IO.println(result);
+}
+```
+
+the ones you'll actually use:
+
+| method | takes | think of it as |
+| --- | --- | --- |
+| `supplyAsync(supplier)` / `runAsync(runnable)` | a task | start something on a pool |
+| `thenApply(fn)` | `T → U` | `map` |
+| `thenAccept(consumer)` / `thenRun(runnable)` | `T → void` | do something with it, end of chain |
+| `thenCompose(fn)` | `T → CompletableFuture<U>` | `flatMap`: chain another async call |
+| `thenCombine(other, fn)` | another future + `(T, U) → V` | wait for two, merge them |
+| `allOf(f...)` / `anyOf(f...)` | many futures | wait for all of them / the first one |
+| `exceptionally(fn)` | `Throwable → T` | catch: replace a failure with a value |
+| `handle(fn)` / `whenComplete(fn)` | `(T, Throwable) → U` | finally: see both outcomes |
+
+## a graph, step by step
+
+real pipelines fan out and back in. here's a product page: fetch the user and the price in parallel, derive the name, chain an orders lookup, combine, recover, and wait for everything.
+
+<Figure wide caption={<>step through the happy path first and watch the <span className="text-faint">thread</span> under each box: dependent stages run on whichever thread completed their input. then make fetchPrice <C k="dead">throw</C> and see the failure flow down the edges until <code>exceptionally</code> turns it back into a <C k="live">value</C>. remove the exceptionally and it reaches <code>join()</code>.</>}>
+<CfDag />
+</Figure>
+
+two things fall out of that. total time is the slowest branch, not the sum of all of them, which is the whole point. measured, with three fake calls that sleep 100, 150 and 200 ms:
+
+<Figure caption={<>three blocking calls, run one after another vs started together with <code>supplyAsync</code> (on a virtual-thread executor) and joined with <code>allOf</code>. median of 3 runs on jdk 25. the <C k="live">parallel</C> version costs the slowest call plus a few milliseconds.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "one after another", value: 461 },
+    { label: "allOf", value: 203, tone: "live" },
+  ]}
+/>
+</Figure>
+
+the other thing: every stage you didn't make `Async` runs on some thread you didn't choose.
+
+## which thread runs it?
+
+this trips everyone up at least once. a stage without `Async` runs on one of two threads:
+
+- if its input is **not complete yet**: the thread that eventually completes the input.
+- if its input is **already complete**: the thread that's attaching the stage, right now, inline.
+
+<Figure wide caption={<>the same <code>thenApply</code>, two different threads, depending only on timing. <code>g</code> runs on the pool thread, <code>h</code> on main. the <code>Async</code> variant always goes to the pool.</>}>
+<Lanes threads={["main", "worker-1", "worker-2"]} steps={who} />
+</Figure>
+
+```java title="Main.java" run output="thenApply on a finished future: main\nthenApplyAsync: common pool? true"
+import java.util.concurrent.CompletableFuture;
+
+String where() { return Thread.currentThread().getName(); }
+
+void main() {
+    CompletableFuture<String> done = CompletableFuture.completedFuture("x");
+    done.thenApply(s -> { IO.println("thenApply on a finished future: " + where()); return s; });
+    done.thenApplyAsync(s -> { IO.println("thenApplyAsync: common pool? " + where().startsWith("ForkJoinPool.commonPool")); return s; }).join();
+}
+```
+
+usually that's fine. it bites when a "quick" callback is actually slow, and runs on a thread you needed for something else: a UI thread, an I/O event loop, or the common pool.
+
+<Gotcha title="the common pool is not for blocking">
+`supplyAsync(supplier)` with no executor uses `ForkJoinPool.commonPool()`, which has one fewer thread than you have cores (13 on my 14-core machine) and is shared by the whole JVM: parallel streams, other libraries, everyone. put blocking calls (JDBC, HTTP, `Thread.sleep`) on it and you starve all of them. pass your own executor for I/O: `supplyAsync(() -> callDb(), ioPool)`, or on java 21+ a virtual-thread executor.
+</Gotcha>
+
+## thenApply vs thenCompose
+
+same shape as `map` vs `flatMap` on streams and optionals. if your function itself returns a future, `thenApply` gives you a future of a future:
+
+<Compare>
+<Bad label="thenApply: a box in a box">
+```java
+CompletableFuture<CompletableFuture<List<Order>>> nested =
+        user.thenApply(u -> fetchOrders(u));
+```
+</Bad>
+<Good label="thenCompose: flattened">
+```java
+CompletableFuture<List<Order>> orders =
+        user.thenCompose(u -> fetchOrders(u));
+```
+</Good>
+</Compare>
+
+## when things fail
+
+an exception thrown inside a stage doesn't crash anything. it's stored in that stage's future, and every stage that depends on it is skipped and completes exceptionally too, until something handles it:
+
+```java title="Main.java" run output="fallback, because price service down\nhandle saw CompletionException\njoin threw CompletionException, cause: java.lang.IllegalStateException: price service down"
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+
+void main() {
+    CompletableFuture<Integer> price = CompletableFuture.supplyAsync(() -> {
+        throw new IllegalStateException("price service down");
+    });
+    CompletableFuture<String> page = price.thenApply(p -> "price: " + p);  // never runs
+
+    IO.println(page.exceptionally(t -> "fallback, because " + t.getCause().getMessage()).join());
+    IO.println(page.handle((v, t) -> t == null ? v : "handle saw " + t.getClass().getSimpleName()).join());
+    try {
+        page.join();
+    } catch (CompletionException e) {
+        IO.println("join threw CompletionException, cause: " + e.getCause());
+    }
+}
+```
+
+notice the wrapping: the handlers see a `CompletionException` with your exception as its cause, so `t.getCause()` is the thing you threw. `join()` throws that `CompletionException` (unchecked); the old `get()` throws a checked `ExecutionException` instead, also wrapping your exception as its cause.
+
+<Gotcha title="a failure nobody looks at is invisible">
+if a future fails and no stage handles it and nobody calls `join()`/`get()` on it, the exception is never printed anywhere. fire-and-forget `runAsync(...)` with no `exceptionally` or `whenComplete` is a silent bug waiting to happen. end every chain with something that looks at the outcome.
+</Gotcha>
+
+<Predict options={["3", "nothing", "it throws"]} answer={1}>
+```java
+int slowAdd(int a, int b) {
+    try { Thread.sleep(100); } catch (InterruptedException e) { }
+    return a + b;
+}
+
+void main() {
+    CompletableFuture.supplyAsync(() -> slowAdd(1, 2))
+            .thenAccept(IO::println);
+}
+```
+<Explain>
+nothing (ten runs out of ten on jdk 25). the work runs on a common-pool thread, and common-pool threads are daemons. main returns right away, the JVM finds no non-daemon threads left, and exits while `slowAdd` is still sleeping. drop the sleep and it printed 3 every time instead, because the JVM's own shutdown took longer than `1 + 2`. a program whose output depends on that is broken either way: keep the future and `join()` it before main ends.
+</Explain>
+</Predict>
+
+## timeouts and cancellation
+
+- `orTimeout(2, SECONDS)` <Since v={9} />: complete exceptionally with a `TimeoutException` if it isn't done in time.
+- `completeOnTimeout(fallback, 2, SECONDS)`: complete with a default value instead.
+- `cancel(true)` completes the future with a `CancellationException`, but it does **not** interrupt the thread running the task. the work keeps going, nobody listens to its result. for real cancellation that propagates to running work, look at [structured concurrency](/learn/concurrency/structured-concurrency).
+
+<Note title="with virtual threads, maybe just block">
+`CompletableFuture` chains exist largely so you don't block a scarce platform thread while waiting. on a [virtual thread](/learn/concurrency/virtual-threads), blocking is cheap, so plain sequential code (`var user = fetchUser(); var price = fetchPrice();`) inside a virtual thread, plus [structured concurrency](/learn/concurrency/structured-concurrency) for the parallel parts, is often clearer than a long chain. chains are still great for genuinely event-driven code.
+</Note>
+
+<Interview q="what's the difference between thenApply and thenApplyAsync?">
+`thenApply` runs the function synchronously: on the thread that completes the previous stage, or on the calling thread if that stage is already complete. `thenApplyAsync` always submits the function to an executor, the common ForkJoinPool by default or one you pass in. use the Async variant (with your own executor) when the function is slow or blocking, so it doesn't hijack whatever thread happened to complete the previous stage.
+</Interview>
+
+<Keylines>
+- a CompletableFuture is a value that arrives later. attach stages instead of blocking.
+- `thenApply` is map, `thenCompose` is flatMap, `thenCombine` / `allOf` join branches.
+- non-Async stages run on whoever completes the input, or inline if it's already done.
+- the default pool is the shared common pool. never block on it.
+- exceptions flow down the graph wrapped in `CompletionException` until something handles them.
+- `cancel(true)` doesn't stop the running work.
+</Keylines>

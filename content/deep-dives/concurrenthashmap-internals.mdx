@@ -1,0 +1,170 @@
+import { LockStripes } from "@/components/figures/deep-dives/LockStripes";
+import { CasRace } from "@/components/figures/deep-dives/CasRace";
+import { CoopResize } from "@/components/figures/deep-dives/CoopResize";
+import { CounterCells } from "@/components/figures/deep-dives/CounterCells";
+
+<InShort>
+since java 8, `ConcurrentHashMap` is the same power-of-two table as [HashMap](/learn/deep-dives/hashmap-internals), made thread-safe one bin at a time. a put into an empty bin is a single **CAS**, no lock. a put into a busy bin **locks that bin's first node** and nothing else. reads never lock. when the table grows, every thread that bumps into the resize **helps move bins**, and the size is kept in a striped counter instead of one hot field.
+</InShort>
+
+## the picture
+
+the [concurrent collections](/learn/concurrency/concurrent-collections) chapter covers when to reach for it. this one is about how 6,400 lines of Doug Lea's code avoid a global lock.
+
+think of a supermarket. a `Hashtable` is one checkout for the whole shop (`synchronized` on every method). java 7's `ConcurrentHashMap` opened 16 checkouts (segments) and sent each customer to one by their surname. java 8 tore the checkouts out: you pay at the shelf you took from, and if nobody's standing at an empty shelf you don't even queue.
+
+<Figure caption={<>pick a version, then where threads A and B write. in java 7 two writes to <em>neighbouring</em> slots can still <C k="dead">block</C>, because they share a segment&apos;s lock. in java 8 the lock is the bin&apos;s own first node (<C k="meta">purple ring</C>), and an empty bin takes no lock at all.</>}>
+<LockStripes />
+</Figure>
+
+java 7's segments were a decent idea with a fixed ceiling: the number of segments (`concurrencyLevel`, default 16) was set in the constructor and never changed, so at most 16 writers could make progress at once no matter how big the map got. java 8 drops that ceiling. the lock count is the bin count, and it grows with the table. the constructor still accepts `concurrencyLevel`, but now it's only a sizing hint, and the `Segment` class left in the jdk 25 source exists purely so old serialized maps still deserialize.
+
+## put: CAS first, lock second
+
+`putVal` is one loop. the branches that matter, read straight from the source:
+
+| the bin is | what put does |
+| --- | --- |
+| `null` (empty) | `casTabAt(tab, i, null, newNode)`. no lock. if the CAS fails, loop and look again |
+| a `ForwardingNode` (hash `MOVED`, -1) | a resize is running. go help it (`helpTransfer`), then retry on the new table |
+| anything else | `synchronized (f)` on the first node `f`, check `f` is *still* first, then walk and append (or `putTreeVal` for a tree bin) |
+
+<Figure wide caption={<>step through two puts racing for one empty bin, plus a reader. the losing CAS (<C k="dead">false</C>) costs one retry, not a wait. the <C k="meta">lock</C> only ever covers bin 5, and T3&apos;s get walks straight past it.</>}>
+<CasRace />
+</Figure>
+
+two details make this safe:
+
+- **using the first node as the lock** costs zero extra memory (the source says it doesn't want "a distinct lock object" per bin). it works because new nodes are only ever appended, so a node that's first stays first until it's removed or the bin is moved. that's also why the code re-checks `tabAt(tab, i) == f` after it gets the lock: if the head changed while it was waiting, it locked the wrong thing and goes round again.
+- **reads don't need the lock** because the fields they touch are published safely: `tabAt` is an acquire read of the array slot, and `Node.val` and `Node.next` are `volatile`. a reader sees either the old chain or the new one, never a half-built node. (the happens-before rules behind that are in [the java memory model](/learn/concurrency/java-memory-model).)
+
+how often do two writers actually collide on one bin? the source works it out: for two threads touching different random keys, roughly 1 in (8 × number of elements). on a map with a million entries, that's basically never.
+
+## resizing together
+
+a `HashMap` resize is one thread doing all the work while nobody else is allowed near the map. `ConcurrentHashMap` can't stop the world, so it turns the resize into a job board. whoever starts it allocates the new array and posts the work as `transferIndex`. anyone who walks into a moved bin takes a stride of bins off the board and moves them, then goes back to what they were doing.
+
+<Figure wide caption={<>step through a 64 → 128 resize with a helper and a reader. moved bins become <C k="meta">ForwardingNodes</C>, which point readers at the new table. watch <code>sizeCtl</code>: its low bits count the resizers going up and down.</>}>
+<CoopResize />
+</Figure>
+
+`sizeCtl` is one `volatile int` that means five different things, depending on its sign and the moment:
+
+| `sizeCtl` | meaning |
+| --- | --- |
+| `0` | table not created yet, use the default (16) |
+| positive, before the table exists | the initial capacity to create |
+| `-1` | some thread is creating the table right now (others `Thread.yield()` and spin) |
+| positive, after | the resize threshold, `n - (n >>> 2)`, which is 0.75 × n |
+| negative, during a resize | high 16 bits: a stamp for "resizing from size n". low 16 bits: 1 + number of active resizers |
+
+the stamp is `numberOfLeadingZeros(n) | (1 << 15)`, shifted up 16. the `1 << 15` makes the whole int negative, and the leading-zero count makes the stamp different for every table size. the source calls it a generation stamp: it's what stops two resizes from overlapping. the stride is `max(16, (n >>> 3) / NCPU)`: tiny tables get handed out 16 bins at a time, big tables get split across your cores. and bins are moved from the top down (index `n - 1` first), which is part of how iterators running mid-resize avoid skipping or repeating nodes.
+
+<Deep title="the lastRun trick: most nodes aren't copied at all">
+when `transfer` splits a chain, it first scans for the longest run at the tail where every node goes to the same side (lo or hi). that whole tail is reused as-is, since none of its `next` pointers change. only the nodes in front of it get cloned (old nodes can't be relinked while readers might be walking them). the source estimates that only about one in six nodes needs cloning when a table doubles. the price: the cloned prefix ends up in reverse order, which nobody can observe because map iteration order was never promised.
+</Deep>
+
+## counting without a counter
+
+a `size` field updated by every put would be one memory location that every core fights over. the same problem [LongAdder](/learn/concurrency/atomics-and-cas) solves, solved the same way (the source calls its counter "a specialization of LongAdder"):
+
+1. try a CAS on `baseCount`. no contention, done.
+2. lost the CAS? from then on, add to a `CounterCell` picked by the thread's random probe. cells are padded with `@Contended` so two of them never share a cache line.
+3. still colliding on a cell? double the cell array, up to the number of CPUs.
+
+`size()` just adds `baseCount` and every cell.
+
+<Figure caption={<>real numbers: 800,000 puts split across 1 to 16 threads on a 14-core mac, then every field read with reflection. one thread never needs a cell. with 16 threads the array stopped growing at 16, the first power of two at or above the core count.</>}>
+<CounterCells />
+</Figure>
+
+the sum isn't a snapshot. while you add up cell 3, someone can increment cell 0 behind you. so `size()` is exact when the map is quiet and an estimate when it isn't, and that's fine: a size that's correct for one nanosecond is useless to a concurrent program anyway. if the map can hold more than `Integer.MAX_VALUE` entries, use `mappingCount()`, which returns the `long`.
+
+## no nulls, ever
+
+`HashMap` lets you store `null` keys and values. `ConcurrentHashMap` throws `NullPointerException` for either.
+
+<Predict options={["null, then done", "null, then a NullPointerException", "a NullPointerException on the get"]} answer={1}>
+```java
+var m = new ConcurrentHashMap<String, Integer>();
+m.put("a", 1);
+IO.println(m.get("b"));
+m.put("b", null);
+IO.println("done");
+```
+<Explain>
+`get` of a missing key returns `null`, fine. `put("b", null)` throws: the very first line of `putVal` is `if (key == null || value == null) throw new NullPointerException()`.
+</Explain>
+</Predict>
+
+the reason is ambiguity under concurrency. in a `HashMap`, if `get(k)` returns `null` you can follow up with `containsKey(k)` to find out whether that meant "absent" or "mapped to null", because nobody changes the map between your two calls. in a concurrent map, somebody can. so `ConcurrentHashMap` makes `null` mean exactly one thing, "not there right now", and it can only promise that if `null` can never be stored. the javadoc leans on the same idea for its bulk operations: since keys and values are never null, a `null` result is a reliable "no result".
+
+```java run output="null\nNullPointerException"
+void main() {
+    var m = new ConcurrentHashMap<String, Integer>();
+    m.put("a", 1);
+    IO.println(m.get("b"));
+    try {
+        m.put("b", null);
+    } catch (NullPointerException e) {
+        IO.println("NullPointerException");
+    }
+}
+```
+
+## the traps
+
+thread-safe methods don't make your *sequence* of calls thread-safe.
+
+<Compare>
+<Bad label="check, then act">
+```java
+if (!cache.containsKey(id)) {
+    cache.put(id, load(id)); // two threads both load
+}
+Integer n = counts.get(word);
+counts.put(word, n == null ? 1 : n + 1); // lost updates
+```
+</Bad>
+<Good label="one atomic call">
+```java
+cache.computeIfAbsent(id, this::load);
+counts.merge(word, 1, Integer::sum);
+```
+</Good>
+</Compare>
+
+`computeIfAbsent`, `compute` and `merge` run your function while holding the bin's lock (for an empty bin, the bin holds a placeholder `ReservationNode` while it runs). that makes them atomic, and it means the function must be short and must never touch the same map. the textbook way to break that rule is memoized recursion:
+
+```java run output="fib(20) with a memo...\nException in thread \"main\" java.lang.IllegalStateException: Recursive update"
+final ConcurrentHashMap<Integer, Long> memo = new ConcurrentHashMap<>();
+
+long fib(int n) {
+    if (n < 2) return n;
+    return memo.computeIfAbsent(n, k -> fib(k - 1) + fib(k - 2));
+}
+
+void main() {
+    IO.println("fib(20) with a memo...");
+    IO.println(fib(20));
+}
+```
+
+computing key 20 parks a `ReservationNode` in bin 4 (20 & 15). sixteen levels down, key 4 hashes to the same bin, finds the reservation, and the map refuses to deadlock with itself. a plain `HashMap` throws `ConcurrentModificationException` for the same code. memoize with an explicit `get` and `putIfAbsent`, or just use a loop.
+
+<Gotcha title="the constructor argument means something different">
+`new HashMap<>(16)` gets 16 bins. `new ConcurrentHashMap<>(16)` gets 32. the `ConcurrentHashMap` constructor treats the number as "how many entries i expect" and sizes for 16 / 0.75 + 1 = 22, rounded up to 32. we checked both with reflection on jdk 25 (`sizeCtl` was 32 before the first put, the table 32 after). it's the right behaviour, it's just not what `HashMap` does.
+</Gotcha>
+
+<Interview q="how does ConcurrentHashMap stay thread-safe without locking the whole map?">
+since java 8 there's no map-wide lock at all. an empty bin is filled with a CAS. a non-empty bin is locked by synchronizing on its first node, so two writers only wait for each other when they hit the same bin. reads never lock: the table slots are read with acquire semantics and `val`/`next` are volatile. resizing is cooperative: threads claim strides of bins through a CAS on `transferIndex`, moved bins get a `ForwardingNode` that redirects readers to the new table, and writers that hit one help instead of waiting. the size lives in a LongAdder-style striped counter. bonus: java 7 used 16 `ReentrantLock` segments instead, and the leftover `Segment` class is still in the source for serialization.
+</Interview>
+
+<Keylines>
+- empty bin: one CAS, no lock. busy bin: `synchronized` on its first node. that's the whole write path.
+- `get` never locks. volatile fields and acquire reads make a half-built node impossible to see.
+- resizes are shared: threads grab 16+ bins at a time off `transferIndex`, and `ForwardingNode`s send readers to the new table.
+- `sizeCtl` is a threshold, an init flag and a resizer count, depending on its sign.
+- `size()` sums `baseCount` and the counter cells. under writes it's an estimate, by design.
+- no null keys or values, so `null` always means "not there". and never touch the map from inside `computeIfAbsent`.
+</Keylines>

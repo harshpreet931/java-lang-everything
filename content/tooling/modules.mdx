@@ -1,0 +1,144 @@
+import { ModuleGraph } from "@/components/figures/tooling/ModuleGraph";
+import { AccessMatrix } from "@/components/figures/tooling/AccessMatrix";
+
+<InShort>
+a **module** is a jar with a `module-info.java` that answers two questions: which modules do i need (**`requires`**), and which of my packages may other code use (**`exports`**). a package that isn't exported is invisible from outside, `public` classes included.
+
+that's **strong encapsulation**: `public` stops meaning "the whole planet" and starts meaning "public, inside my walls".
+</InShort>
+
+## the picture
+
+before java 9, `public` had one setting: everyone. if your library had a `public class` in `com.acme.internal`, anyone could import it, and then you could never change it without breaking them. the package name saying "internal" was a polite request. people ignored it (hi, `sun.misc.Unsafe`).
+
+a module puts a wall around a jar. think of an office building: the floor plan (`module-info.java`) says which rooms visitors may walk into (`exports`), and the visitor list says whose offices you're allowed to visit (`requires`). rooms not on the plan are still there, staff use them all day. you just can't get in from the lobby.
+
+```java title="src/shop.orders/module-info.java"
+module shop.orders {
+    requires transitive shop.money;   // i need it, and so will anyone who uses me
+    exports shop.orders.api;          // the front door
+                                      // shop.orders.internal: not listed, so sealed
+}
+```
+
+<Figure caption={<>flip the switches. every combination was compiled for real with javac 25, and the error text is javac's. notice that without <code>transitive</code>, <code>shop.app</code> can't even <em>name</em> <code>Money</code>, the type that <code>Orders.total()</code> returns.</>} wide>
+<ModuleGraph />
+</Figure>
+
+two words to keep straight:
+
+<Defs>
+<dt>reads</dt><dd>module A <strong>reads</strong> module B if A `requires` B (or gets it implied, below). you can only use types from modules you read.</dd>
+<dt>exports</dt><dd>B makes a package <strong>accessible</strong> to modules that read it. reading isn't enough: the package also has to be exported.</dd>
+<dt>implied readability</dt><dd>`requires transitive B` in A means everyone who reads A also reads B. use it when B's types show up in A's public API (`Orders.total()` returns a `Money`).</dd>
+</Defs>
+
+## everything a module-info can say
+
+there are only a handful of directives. you'll write the first three 95% of the time.
+
+| directive | means |
+| --- | --- |
+| `requires m;` | i read module `m`. checked at compile time and at startup |
+| `requires transitive m;` | i read `m`, and so does anyone who reads me |
+| `exports p;` | public types in package `p` are usable by anyone who reads me |
+| `exports p to m1, m2;` | a qualified export: only those modules get `p` (the JDK does this a lot) |
+| `opens p;` | `p` is open for deep reflection at runtime, private members included |
+| `requires static m;` | needed at compile time, optional at runtime (annotations, optional integrations) |
+| `uses S;` / `provides S with Impl;` | the [ServiceLoader](/learn/meta/service-loader) plugin system, declared up front |
+| `open module m { }` | every package is open for reflection. common for apps, rare for libraries |
+
+the module path also gets checked when the JVM starts, not just when you compile. a missing `requires` dependency is a startup error, not a `NoClassDefFoundError` an hour into production. reliable configuration, the JEP calls it.
+
+## exports vs opens
+
+this is the one that confuses everyone, because there are really two kinds of "access". **exports** is about compiling and calling: can your code use these types? **opens** is about reflection: can a framework reach in and touch private fields? jackson filling a `private` field from JSON, hibernate setting an entity's id, spring injecting into a `private` field: that's all deep reflection, and it needs `opens`.
+
+<Figure caption={<>pick a declaration. <C k="live">green</C> rows are allowed, <C k="dead">red</C> rows fail, with the real exception. note that <code>opens</code> alone doesn't let you compile against the package. it's purely a runtime door.</>}>
+<AccessMatrix />
+</Figure>
+
+the JDK holds itself to the same rules. `java.base` exports 58 packages to everyone and keeps the other 138 to itself (57 of those are qualified exports to specific JDK modules). so reaching into `String`'s private bytes doesn't work anymore:
+
+<Predict options={["got in", "InaccessibleObjectException", "NoSuchFieldException"]} answer={1}>
+```java run output="InaccessibleObjectException"
+void main() throws Exception {
+    var f = String.class.getDeclaredField("value");
+    try {
+        f.setAccessible(true);
+        IO.println("got in");
+    } catch (RuntimeException e) {
+        IO.println(e.getClass().getSimpleName());
+    }
+}
+```
+<Explain>
+`getDeclaredField` works: you're allowed to *see* that the field exists. `setAccessible(true)` is where the wall is. the full message is `module java.base does not "opens java.lang" to unnamed module`. run the same file with `--add-opens java.base/java.lang=ALL-UNNAMED` and it prints `got in`. that flag is the escape hatch, and every time you add one you're depending on a JDK internal that can change in any release.
+</Explain>
+</Predict>
+
+## the JDK is made of modules too
+
+the JDK was the first big project to be modularized (project jigsaw, java 9). it's 69 modules on temurin 25: the `java.*` ones are the standard API, the `jdk.*` ones are this JDK's tools and extras.
+
+```java title="Main.java" run output="69 modules in this JDK\njava.*: 22\njdk.*:  47\nnamed? false"
+import java.lang.module.ModuleFinder;
+
+void main() {
+    var names = ModuleFinder.ofSystem().findAll().stream()
+            .map(m -> m.descriptor().name())
+            .toList();
+    IO.println(names.size() + " modules in this JDK");
+    IO.println("java.*: " + names.stream().filter(n -> n.startsWith("java.")).count());
+    IO.println("jdk.*:  " + names.stream().filter(n -> n.startsWith("jdk.")).count());
+    IO.println("named? " + getClass().getModule().isNamed());
+}
+```
+
+that last line: code that isn't in a module (like this file) lives in the **unnamed module**, which reads everything. that's the compatibility story, and it's the whole next chapter: [classpath to module path](/learn/tooling/classpath-to-modulepath).
+
+<Figure caption="java.se is a module with no code at all, just requires transitive. click a node to fold it. every edge here comes from java --describe-module on jdk 25.">
+<Tree>{`
+java.se                      // no code, just 20 requires transitive
+    java.base                #meta // everyone reads this one, no requires needed
+    java.sql                 // exports java.sql, javax.sql
+        java.logging
+        java.xml
+        java.transaction.xa
+    java.net.http            // HttpClient
+    java.desktop             // awt, swing, java.beans
+        java.xml
+        java.datatransfer
+    java.naming
+    java.management
+    java.compiler
+    java.scripting
+    ...12 more
+`}</Tree>
+</Figure>
+
+`java.base` is special: every module reads it without saying so (`--describe-module` prints it as `requires java.base mandated`). it's where `String`, `List` and `Thread` live.
+
+<Gotcha title="frameworks need opens, and the error shows up at runtime">
+your code compiles. the tests pass. then jackson, hibernate or spring tries to set a private field in your module, and you get `InaccessibleObjectException: ... module app does not "opens com.acme.model" to module com.fasterxml.jackson.databind`. compile time had no way to know a framework would reflect. the fix is `opens com.acme.model;` (or `opens com.acme.model to com.fasterxml.jackson.databind;` if you want to be precise), not `--add-opens` on the command line forever.
+</Gotcha>
+
+<Deep title="how strong encapsulation got turned on, one release at a time">
+java 9 shipped modules but kept a crowbar: `--illegal-access=permit` was the default, so old code reaching into JDK internals got a warning and kept working. java 16 flipped the default to `deny` ([JEP 396](https://openjdk.org/jeps/396)), and java 17 removed the crowbar entirely ([JEP 403](https://openjdk.org/jeps/403)): JDK internals are sealed, and `--add-opens`/`--add-exports` are the only way through. `sun.misc.Unsafe` is the famous exception. it lives in the `jdk.unsupported` module, which still exports it so the libraries that depended on it had time to move to [VarHandles](/learn/meta/method-handles-and-varhandles) and the [FFM API](/learn/performance/ffm-api). its memory methods have been on the way out since 23 (JEP 471) and warn by default since 24 (JEP 498).
+</Deep>
+
+<Note title="import module is a different feature">
+java 25's `import module java.base;` ([JEP 511](https://openjdk.org/jeps/511)) imports every package a module exports, in one line. it's a convenience for *using* modules, mostly for small programs and teaching. you don't need a `module-info.java` to use it, and it doesn't make your code a module.
+</Note>
+
+<Interview q="what's the difference between exports and opens?">
+`exports p` gives other modules compile-time and runtime access to the public types and members in `p`. `opens p` gives runtime-only reflective access to everything in `p`, private members included, but nothing at compile time. libraries export their API; apps open their model packages to the frameworks that bind them. bonus point: both have qualified forms (`to m`), and `open module` opens every package at once.
+</Interview>
+
+<Keylines>
+- a module is a jar plus `module-info.java`: what it requires, what it exports.
+- not exported = invisible from outside, even if it's `public`.
+- `requires transitive` when the other module's types appear in your API.
+- `exports` is for compiling against you. `opens` is for reflecting into you.
+- the JDK's own internals are sealed since 17. `--add-opens` is a crowbar, not a fix.
+</Keylines>

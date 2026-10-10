@@ -1,0 +1,127 @@
+import { HelloMorph } from "@/components/figures/start/HelloMorph";
+import { LaunchPicker } from "@/components/figures/start/LaunchPicker";
+
+<InShort>
+since java 25, a whole program is `void main() { IO.println("hello, world"); }`. the classic `public static void main(String[] args)` still works and you'll see it everywhere: it's the **same program** with the scaffolding written out. this chapter is about what each piece of that scaffolding does.
+</InShort>
+
+## the picture
+
+make a file called `Main.java`, put three lines in it, run it:
+
+```java title="Main.java" run output="hello, world"
+void main() {
+    IO.println("hello, world");
+}
+```
+
+```bash
+$ java Main.java
+hello, world
+```
+
+that's a real, complete java program. no class, no `public`, no `static`. it's called a **compact source file**, and it became a final feature in java 25 ([JEP 512](https://openjdk.org/jeps/512)).
+
+for almost 30 years before that, the first program anyone wrote in java looked like five lines of ceremony around one line of work. you'll still see that version in every book, tutorial and codebase, so you need to read it fluently. the good news: it's the same program. the extra words each do one small job.
+
+## from void main() to public static void main
+
+<Figure wide caption={<>press step (or click the figure and use <kbd>←</kbd> <kbd>→</kbd>). each step adds one thing, highlighted in <C k="hot">amber</C>. every version is a valid program on java 25, and they all print the same line.</>}>
+<HelloMorph />
+</Figure>
+
+so when you see `public static void main(String[] args)`, read it as: "a method anyone can call (`public`), that doesn't need an object (`static`), returns nothing (`void`), is called `main`, and receives the command-line words (`String[] args`)".
+
+```java title="Main.java"
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(args.length + " args: " + String.join(", ", args));
+    }
+}
+```
+
+```bash
+$ java Main.java one two "three four"
+3 args: one, two, three four
+```
+
+the shell splits on spaces (quotes keep words together), and `args` is just a `String[]` [array](/learn/basics/arrays) holding what's left after the class name.
+
+<Figure caption={<>what <code>main</code> receives for <code>java Main.java one two "three four"</code>. the class name and the <code>java</code> command itself are not in there (unlike C's <code>argv</code>).</>}>
+<ArrayViz values={['"one"', '"two"', '"three four"']} label="String[] args" cell={104} />
+</Figure>
+
+<Predict options={["0", "null, so it throws NullPointerException", "it won't compile"]} answer={0}>
+```java
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(args.length);
+    }
+}
+```
+you run it with plain `java Main.java`, no arguments. what prints?
+<Explain>
+`args` is never `null`. with no arguments the launcher passes an empty array, so `args.length` is `0`.
+</Explain>
+</Predict>
+
+## which main runs
+
+a class can have more than one method called `main`. the launcher (the `java` command) has a fixed rule for which one it calls.
+
+<Figure caption={<>give the class a <code>main(String[])</code>, a <code>main()</code>, both, or neither. the one with <code>String[]</code> always wins. an instance main means the launcher creates the object first. the error is the real one from jdk 25.</>}>
+<LaunchPicker />
+</Figure>
+
+the full rule from JEP 512: if the class has a `main(String[])` (declared or inherited), run that. otherwise, if it has a `main()`, run that. otherwise, error. if the chosen one isn't `static`, the launcher calls the class's no-argument constructor first, then calls `main` on that object.
+
+## what a compact file gives you
+
+a compact source file isn't a toy mode. it's normal java with three things done for you:
+
+- **a class around everything.** fields and methods you write at the top level become members of a class named after the file. it's `final` and you can't refer to it by name.
+- **`import module java.base`.** every public class in `java.util`, `java.io`, `java.time`, `java.math` and friends is already imported. `List`, `Map`, `ArrayList`, `LocalDate`: just use them.
+- **`IO`.** `IO.println`, `IO.print` and `IO.readln` live in `java.lang`, so they're available everywhere (in normal classes too).
+
+```java title="Main.java" run output="hi from Main\n[1, 2, 3]"
+String greeting = "hi";
+
+void main() {
+    IO.println(greeting + " from " + getClass().getName());
+    IO.println(List.of(1, 2, 3));
+}
+```
+
+`greeting` is a field, `main` is an instance method, and `getClass().getName()` proves there really is a class called `Main` under there. `List` worked without an import. ask the class file itself and it agrees:
+
+```bash
+$ javac Main.java && javap -p Main
+Compiled from "Main.java"
+final class Main {
+  java.lang.String greeting;
+  Main();
+  void main();
+}
+```
+
+when a compact file grows up, you don't rewrite it: wrap it in `class Main { ... }`, add imports for whatever you used, done.
+
+<Gotcha title="the class you didn't write still has rules">
+you can't put a compact source file in a package, and other files can't use its class by name (it has no name you can type). it also has to have a `main`. it's for programs, not for libraries: the moment a second file needs to call your code, give it a real `class` declaration.
+</Gotcha>
+
+<Interview q="why is main static?">
+because when the JVM starts, there are no objects yet. a `static` method belongs to the class, so the launcher can call it without creating anything first. that's also why `static` was mandatory until java 25. since 25 (JEP 512), `main` can be an instance method: the launcher simply calls `new Main()` first and then calls `main` on it. it was never a law of nature, just the simplest thing for the launcher to do.
+</Interview>
+
+<Deep title="how long this took to land">
+the idea went through four previews before it was final. JEP 445 (java 21) called them "unnamed classes". JEP 463 (22) renamed them "implicitly declared classes", and JEP 477 (23) added the automatic `java.base` import plus a `java.io.IO` class whose `println` you could call bare. JEP 495 (24) only changed the name, to "simple source files". then JEP 512 (25) finalized it as "compact source files", with three last-minute changes: `IO` moved to `java.lang`, you now write `IO.println` instead of a bare `println`, and `IO` prints through `System.out` instead of the system console, so it plays nicely with redirection and pipes. that's how preview features are supposed to work: ship, listen, adjust. more in [preview features](/learn/modern/preview-features).
+</Deep>
+
+<Keylines>
+- `void main() { IO.println("hi"); }` is a complete java 25 program.
+- `public static void main(String[] args)` is the same thing with the scaffolding written out.
+- `static` means no object needed. `String[] args` holds the command-line words, never `null`.
+- the launcher prefers `main(String[])` over `main()`. an instance main gets a fresh object first.
+- compact files import all of `java.base` for you. when the file grows up, wrap it in a class.
+</Keylines>

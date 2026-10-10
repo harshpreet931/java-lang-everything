@@ -1,0 +1,202 @@
+import { TextBlockWhitespace } from "@/components/figures/basics/TextBlockWhitespace";
+
+export const immut = {
+  file: "Main.java",
+  source: `public class Main {
+    public static void main(String[] args) {
+        String s = "duke";
+        String t = s;
+        s = s + "!";
+        s.toUpperCase();
+        String u = s.toUpperCase();
+        System.out.println(t + " " + s + " " + u);
+    }
+}`,
+  steps: [
+    { line: 3, frames: [{ name: "main", locals: {} }], heap: {}, note: "main starts." },
+    {
+      line: 4,
+      frames: [{ name: "main", locals: { s: { ref: "o1" } } }],
+      heap: { o1: { type: "String", value: '"duke"', tag: "string pool" } },
+      note: "a string literal. the JVM keeps one shared copy of every literal (the string pool), and s points at it.",
+    },
+    {
+      line: 5,
+      frames: [{ name: "main", locals: { s: { ref: "o1" }, t: { ref: "o1" } } }],
+      heap: { o1: { type: "String", value: '"duke"', tag: "string pool" } },
+      note: "t = s copies the reference. one string, two arrows.",
+    },
+    {
+      line: 6,
+      frames: [{ name: "main", locals: { s: { ref: "o2" }, t: { ref: "o1" } } }],
+      heap: { o1: { type: "String", value: '"duke"', tag: "string pool" }, o2: { type: "String", value: '"duke!"' } },
+      note: "s + \"!\" can't change \"duke\": strings are immutable. it builds a brand new \"duke!\" and moves s's arrow to it. t still sees \"duke\".",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { s: { ref: "o2" }, t: { ref: "o1" } } }],
+      heap: {
+        o1: { type: "String", value: '"duke"', tag: "string pool" },
+        o2: { type: "String", value: '"duke!"' },
+        o4: { type: "String", value: '"DUKE!"', state: "dead", tag: "nobody kept it" },
+      },
+      note: "s.toUpperCase() doesn't touch s either. it returns a NEW string, and since nobody stores it, it's garbage the moment it's made.",
+    },
+    {
+      line: 8,
+      frames: [{ name: "main", locals: { s: { ref: "o2" }, t: { ref: "o1" }, u: { ref: "o3" } } }],
+      heap: {
+        o1: { type: "String", value: '"duke"', tag: "string pool" },
+        o2: { type: "String", value: '"duke!"' },
+        o3: { type: "String", value: '"DUKE!"' },
+      },
+      note: "this time the result is kept: u points at another new \"DUKE!\". s still says \"duke!\".",
+    },
+    {
+      line: 9,
+      frames: [{ name: "main", locals: { s: { ref: "o2" }, t: { ref: "o1" }, u: { ref: "o3" } } }],
+      heap: {
+        o1: { type: "String", value: '"duke"', tag: "string pool" },
+        o2: { type: "String", value: '"duke!"' },
+        o3: { type: "String", value: '"DUKE!"' },
+      },
+      stdout: "duke duke! DUKE!\n",
+      note: "three variables, three different strings, and not one of them was ever modified.",
+    },
+  ],
+};
+
+<InShort>
+a `String` is an **object** holding text, and it's **immutable**: every method that seems to change it returns a new string instead. string literals are shared through the **string pool**, which is why `==` sometimes seems to work. compare strings with **`.equals()`**, always. and `"""` text blocks make multi-line strings painless.
+</InShort>
+
+## the picture
+
+a `String` is not a primitive. it's an object on the heap, and your variable holds a reference to it, exactly like the `Point` in [stack and heap](/learn/basics/stack-and-heap). it just gets special treatment: literals in quotes, `+` to glue, and a shared pool for literals.
+
+```java
+String a = "hi";
+String b = "hi";
+String c = new String("hi");
+```
+
+<Figure caption={<>two literals with the same text share one object from the <strong>string pool</strong>. <code>new String</code> always makes a separate object, even with the same characters. three <C k="ref">references</C>, two objects.</>}>
+<Memory
+  frames={[{ name: "main", locals: { a: { ref: "p1" }, b: { ref: "p1" }, c: { ref: "o2" } } }]}
+  heap={{ p1: { type: "String", value: '"hi"', tag: "string pool" }, o2: { type: "String", value: '"hi"' } }}
+/>
+</Figure>
+
+## == vs equals
+
+you know how `==` on two strings sometimes works and sometimes doesn't? kinda cursed. here's why: `==` on references asks **"same object?"**, not "same text?". literals share a pooled object, so `==` happens to say yes. strings built at runtime are new objects, so it says no, even when the text is identical.
+
+```java title="Main.java" run output="true false true true false true"
+void main() {
+    String a = "hi";
+    String b = "hi";
+    String c = new String("hi");
+    String d = "h" + "i";
+    String h = "h";
+    String e = h + "i";
+    IO.println((a == b) + " " + (a == c) + " " + a.equals(c) + " " + (a == d) + " " + (a == e) + " " + (a == e.intern()));
+}
+```
+
+`"h" + "i"` is folded into `"hi"` by the compiler, so it's a literal and lands in the pool. `h + "i"` happens at runtime and makes a new object. `intern()` looks a string up in the pool and returns the pooled copy. none of that is something you want your program's correctness to depend on.
+
+<Predict options={["same", "different", "it depends on the JVM"]} answer={1}>
+```java
+String name = IO.readln("name? ");   // you type: duke
+if (name == "duke") IO.println("same");
+else IO.println("different");
+```
+<Explain>
+"different". the string you typed was read at runtime, so it's a brand new object, not the pooled literal `"duke"`. `==` compares references and they differ. `name.equals("duke")` is the check you meant. (`"duke".equals(name)` is even better: it can't throw if `name` is null.)
+</Explain>
+</Predict>
+
+## immutable means new objects
+
+no `String` method ever changes the string you call it on. `toUpperCase`, `replace`, `trim`, `+`: each one builds a new string and returns it. if you don't store the result, it's gone.
+
+<Figure wide caption={<>step through. watch the <C k="ref">arrows</C> move and the old strings stay exactly as they were. the <C k="dead">red</C> one at step 5 is a result nobody kept.</>}>
+<MemoryStepper trace={immut} />
+</Figure>
+
+so `s.toUpperCase();` on its own line is a bug: it does the work and throws it away. you meant `s = s.toUpperCase();`.
+
+the methods you'll use all the time (the full tour is in [the string api](/learn/core-api/string-api)):
+
+```java title="Main.java" run output="12 H 7 Duke\nHELLO, DUKE! HeLLo, Duke! true true\na|b|c ababab true true"
+void main() {
+    String s = "  Hello, Duke!  ";
+    String t = s.strip();
+    IO.println(t.length() + " " + t.charAt(0) + " " + t.indexOf("Duke") + " " + t.substring(7, 11));
+    IO.println(t.toUpperCase() + " " + t.replace('l', 'L') + " " + t.contains("Duke") + " " + t.startsWith("Hell"));
+    IO.println(String.join("|", "a", "b", "c") + " " + "ab".repeat(3) + " " + "   ".isBlank() + " " + "".isEmpty());
+}
+```
+
+indexes start at 0, and `substring(7, 11)` means "from index 7 up to, but not including, 11". that half-open range is everywhere in java.
+
+## gluing strings together
+
+`+` with a `String` on either side means concatenation, and it reads left to right: `1 + 2 + "3"` is `"33"` but `"1" + 2 + 3` is `"123"` (more in [operators](/learn/basics/operators)). careful with `char`s: `'a' + 'b'` is the `int` 195, because two chars add as numbers. `"" + 'a' + 'b'` is `"ab"`.
+
+in a loop, `+` gets expensive, because every round copies the whole string so far into a new one:
+
+<Compare>
+<Bad label="+ in a loop: a new string every time">
+```java
+String csv = "";
+for (int i = 0; i < 10_000; i++) {
+    csv += i + ",";
+}
+```
+10,000 rounds, each copying everything built so far. quadratic.
+</Bad>
+<Good label="StringBuilder: one growing buffer">
+```java
+var sb = new StringBuilder();
+for (int i = 0; i < 10_000; i++) {
+    sb.append(i).append(',');
+}
+String csv = sb.toString();
+```
+one mutable buffer that grows as needed, one final string.
+</Good>
+</Compare>
+
+outside loops, just use `+`. the compiler makes it fast.
+
+## text blocks
+
+for multi-line text (json, sql, html), a **text block** opens with `"""` and a line break, and closes with `"""` <Since v={15} />. no `\n`, no escaping quotes. the clever part is the indentation: java strips the spaces that are only there because your code is indented, and keeps the rest.
+
+<Figure wide caption={<>move the closing <code>"""</code> and watch the result. the shaded spaces are <strong>incidental</strong> (just code indentation) and get stripped; the <C k="hot">amber dots</C> are spaces that end up in the string. lengths are from a real run.</>}>
+<TextBlockWhitespace />
+</Figure>
+
+the rule: java finds the smallest indentation among the content lines (counting the closing `"""` line if it's on its own), and removes exactly that much from every line. trailing spaces on each line are stripped too. two escapes help: `\s` is a space that won't be stripped, and a `\` at the end of a line joins it with the next one.
+
+<Gotcha title="strings aren't characters, they're UTF-16 code units">
+`length()` counts `char`s, not letters. `"😀".length()` is 2, because that emoji needs two `char`s (a surrogate pair). `charAt` can hand you half of it. for anything user-facing with emoji or non-latin scripts, count with `codePointCount` or walk `codePoints()`. see [variables and primitives](/learn/basics/variables-and-primitives) for why a `char` is only 16 bits.
+</Gotcha>
+
+<Deep title="what a String looks like inside">
+since java 9 ([JEP 254](https://openjdk.org/jeps/254), "compact strings"), a `String` holds a `byte[]` plus a one-byte `coder`. if every character fits in Latin-1, it uses one byte per character; otherwise two (UTF-16). most strings in most programs are Latin-1, so this roughly halved the memory strings use. also since java 9 ([JEP 280](https://openjdk.org/jeps/280)), `a + b + c` compiles to a single `invokedynamic` call that sizes the result once, instead of a chain of `StringBuilder.append` calls. that's why plain `+` is fine outside loops. and the `hashCode` is computed once and cached in the object, which is only safe because the string can never change.
+</Deep>
+
+<Interview q="why are strings immutable in java?">
+because strings are shared everywhere. the pool hands the same object to every piece of code that uses a literal, so if anyone could modify it, they'd modify it for everyone. immutability also makes strings safe to share between threads with no locking, safe to use as `HashMap` keys (the hash can't change after insertion, and it's cached), and safe for security checks (a file path or class name can't be swapped after it's validated). the cost is garbage: every "change" is a new object, which is what `StringBuilder` is for.
+</Interview>
+
+<Keylines>
+- a String is an object. the variable holds a reference.
+- strings never change. every "modifying" method returns a new string, so keep the result.
+- `==` asks "same object?". `.equals()` asks "same text?". you almost always mean equals.
+- literals are pooled, which is why `==` sometimes looks like it works. don't rely on it.
+- `+` is fine, except in loops: use `StringBuilder`.
+- text blocks strip the indentation your code added, decided by the least indented line.
+</Keylines>

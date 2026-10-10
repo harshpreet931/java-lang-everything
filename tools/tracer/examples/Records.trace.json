@@ -1,0 +1,274 @@
+{
+  "file": "Records.java",
+  "source": "public class Records {\n    sealed interface Shape permits Circle, Square {}\n\n    record Circle(double radius) implements Shape {}\n\n    record Square(double side) implements Shape {}\n\n    static double area(Shape shape) {\n        return switch (shape) {\n            case Circle(double r) -> 3 * r * r;\n            case Square(double side) -> side * side;\n        };\n    }\n\n    public static void main(String[] args) {\n        Shape a = new Circle(1.5);\n        Shape b = new Square(2.0);\n        double total = area(a) + area(b);\n        System.out.println(a);\n        System.out.println(\"total = \" + total);\n    }\n}\n",
+  "steps": [
+    {"line": 16, "frames": [{"name": "main", "line": 16, "locals": {}}], "heap": {}, "stdout": ""},
+    {
+      "line": 4,
+      "frames": [
+        {"name": "main", "line": 16, "locals": {}},
+        {"name": "new Circle", "line": 4, "locals": {"this": {"ref": "o1"}, "radius": 1.5}}
+      ],
+      "heap": {"o1": {"type": "Circle", "fields": {"radius": "0.0"}, "state": "new"}},
+      "stdout": ""
+    },
+    {
+      "line": 16,
+      "frames": [{"name": "main", "line": 16, "locals": {}}],
+      "heap": {"o1": {"type": "Circle", "fields": {"radius": 1.5}}},
+      "stdout": ""
+    },
+    {
+      "line": 17,
+      "frames": [{"name": "main", "line": 17, "locals": {"a": {"ref": "o1"}}}],
+      "heap": {"o1": {"type": "Circle", "fields": {"radius": 1.5}}},
+      "stdout": "",
+      "changed": ["a"]
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 17, "locals": {"a": {"ref": "o1"}}},
+        {"name": "new Square", "line": 6, "locals": {"this": {"ref": "o2"}, "side": "2.0"}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "0.0"}, "state": "new"}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 17,
+      "frames": [{"name": "main", "line": 17, "locals": {"a": {"ref": "o1"}}}],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 18,
+      "frames": [{"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}}],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "",
+      "changed": ["b"]
+    },
+    {
+      "line": 9,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 9, "locals": {"shape": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 10,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 10, "locals": {"shape": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 4,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 10, "locals": {"shape": {"ref": "o1"}}},
+        {"name": "radius", "line": 4, "locals": {"this": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 10,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 10, "locals": {"shape": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "",
+      "note": "radius returned 1.5"
+    },
+    {
+      "line": 9,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 9, "locals": {"shape": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 18,
+      "frames": [{"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}}],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "",
+      "note": "area returned 6.75"
+    },
+    {
+      "line": 9,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 9, "locals": {"shape": {"ref": "o2"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 11,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 11, "locals": {"shape": {"ref": "o2"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 11, "locals": {"shape": {"ref": "o2"}}},
+        {"name": "side", "line": 6, "locals": {"this": {"ref": "o2"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 11,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 11, "locals": {"shape": {"ref": "o2"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "",
+      "note": "side returned 2.0"
+    },
+    {
+      "line": 9,
+      "frames": [
+        {"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}},
+        {"name": "area", "line": 9, "locals": {"shape": {"ref": "o2"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 18,
+      "frames": [{"name": "main", "line": 18, "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}}}],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "",
+      "note": "area returned 4.0"
+    },
+    {
+      "line": 19,
+      "frames": [
+        {
+          "name": "main",
+          "line": 19,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "total": 10.75}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "",
+      "changed": ["total"]
+    },
+    {
+      "line": 4,
+      "frames": [
+        {
+          "name": "main",
+          "line": 19,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "total": 10.75}
+        },
+        {"name": "toString", "line": 4, "locals": {"this": {"ref": "o1"}}}
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": ""
+    },
+    {
+      "line": 20,
+      "frames": [
+        {
+          "name": "main",
+          "line": 20,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "total": 10.75}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "Circle[radius=1.5]\n",
+      "note": "toString returned \"Circle[radius=1.5]\""
+    },
+    {
+      "line": 21,
+      "frames": [
+        {
+          "name": "main",
+          "line": 21,
+          "locals": {"a": {"ref": "o1"}, "b": {"ref": "o2"}, "total": 10.75}
+        }
+      ],
+      "heap": {
+        "o1": {"type": "Circle", "fields": {"radius": 1.5}},
+        "o2": {"type": "Square", "fields": {"side": "2.0"}}
+      },
+      "stdout": "Circle[radius=1.5]\ntotal = 10.75\n"
+    },
+    {
+      "line": 21,
+      "frames": [],
+      "heap": {},
+      "stdout": "Circle[radius=1.5]\ntotal = 10.75\n",
+      "note": "main returned, program ends"
+    }
+  ]
+}

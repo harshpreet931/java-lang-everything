@@ -1,0 +1,188 @@
+import { HandleChain } from "@/components/figures/meta/HandleChain";
+import { AccessModes } from "@/components/figures/meta/AccessModes";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+a **`MethodHandle`** is a typed, directly callable reference to a method, a constructor or a field access. you get one from a **`Lookup`**, which checks access *once*, when you find it. calling it with **`invokeExact`** can be as fast as a normal call. a **`VarHandle`** is the same idea for variables, plus a menu of **memory-ordering modes** and atomic operations like `compareAndSet`.
+
+they arrived in java 7 and 9, and today they're the engine under reflection, lambdas, string concatenation and most of `java.util.concurrent`.
+</InShort>
+
+## the picture
+
+[reflection](/learn/meta/reflection) is calling the front desk every time: "is this caller allowed to use method `bark`? what's its signature? fine, boxing your arguments, connecting you." a method handle is a speed-dial button. the front desk checks you're allowed when the button gets programmed (the lookup), and after that, pressing it is just a call. you can also wire buttons together into macros (combinators), and the result is still one button.
+
+## lookup, find, invoke
+
+```java title="Main.java" run output="ababab 9\n(String,int)String\n9\nhandle's method type (int,int)int but found (int,int)long"
+import java.lang.invoke.*;
+
+void main() throws Throwable {
+    MethodHandles.Lookup lookup = MethodHandles.lookup();
+
+    MethodHandle repeat = lookup.findVirtual(String.class, "repeat",
+        MethodType.methodType(String.class, int.class));
+    MethodHandle max = lookup.findStatic(Math.class, "max",
+        MethodType.methodType(int.class, int.class, int.class));
+
+    String s = (String) repeat.invokeExact("ab", 3);
+    int m = (int) max.invokeExact(4, 9);
+    IO.println(s + " " + m);
+    IO.println(repeat.type());
+
+    Object loose = max.invoke((Integer) 4, (short) 9);
+    IO.println(loose);
+
+    try {
+        long wrong = (long) max.invokeExact(4, 9);
+    } catch (WrongMethodTypeException e) {
+        IO.println(e.getMessage());
+    }
+}
+```
+
+the pieces:
+
+- **`MethodHandles.lookup()`** returns a `Lookup` carrying *your class's* access rights. if your code could call a private method directly, this lookup can find it; if not, `findVirtual` throws `IllegalAccessException` right there, at lookup time. there's no `setAccessible` (for another module's privates you need `privateLookupIn`, and the package has to be opened to you).
+- **`MethodType`** is the signature: return type first, then parameters. `repeat` is an instance method, so its handle's type is `(String,int)String`: the receiver becomes parameter zero.
+- **`findVirtual`**, **`findStatic`**, **`findConstructor`**, **`findGetter`**, **`findSpecial`**, and `unreflect` to convert a reflective `Method` you already have.
+
+and then the strange part. `invokeExact` is declared as `invokeExact(Object...)`, but javac doesn't compile it like a varargs call. it writes the *types at your call site* into the bytecode:
+
+```text title="javap -c Main"
+53: invokevirtual #49  // Method java/lang/invoke/MethodHandle.invokeExact:(Ljava/lang/String;I)Ljava/lang/String;
+62: invokevirtual #55  // Method java/lang/invoke/MethodHandle.invokeExact:(II)I
+93: invokevirtual #75  // Method java/lang/invoke/MethodHandle.invoke:(Ljava/lang/Integer;S)Ljava/lang/Object;
+107: invokevirtual #79 // Method java/lang/invoke/MethodHandle.invokeExact:(II)J
+```
+
+that's a **signature polymorphic** method: every call site gets its own descriptor, built from the argument types and the cast on the result. `invokeExact` then demands that descriptor equal the handle's type, exactly. no boxing, no widening, no array. that's why it can be fast, and why the last call fails: the cast to `long` made the call site `(II)J`, and the handle is `(int,int)int`.
+
+`invoke` is the forgiving version: it adapts the call (unboxing the `Integer`, widening the `short`) with `asType`, at some cost.
+
+<Predict options={["9", "9L", "WrongMethodTypeException", "compile error"]} answer={2}>
+```java
+MethodHandle max = lookup.findStatic(Math.class, "max",
+    MethodType.methodType(int.class, int.class, int.class));
+Object r = max.invokeExact(4, 9);
+```
+<Explain>
+`WrongMethodTypeException`. there's no cast on the result, so javac makes the call site return `Object`: the descriptor is `(II)Ljava/lang/Object;`, and the handle returns `int`. with `invokeExact`, even a cast you'd consider harmless is part of the type. write `int r = (int) max.invokeExact(4, 9);`.
+</Explain>
+</Predict>
+
+## building handles out of handles
+
+`MethodHandles` has a toolbox of combinators that take handles and return new handles: bind an argument, drop one, reorder them, filter a result, add a `try`/`catch`, add an `if`, even build loops. the result is one handle you can call, pass around, or hand to the JIT.
+
+<Figure caption={<>type a name, then click a stage. each stage is a new handle built from the one above; the <C k="meta">purple</C> type on the right is what <code>type()</code> returns for it. the last one turned a two-argument <code>concat</code> into <code>(String)int</code>.</>}>
+<HandleChain />
+</Figure>
+
+```java title="Main.java" run output="HELLO, ADA\n10\n(String)int"
+import java.lang.invoke.*;
+import static java.lang.invoke.MethodType.methodType;
+
+void main() throws Throwable {
+    var lookup = MethodHandles.lookup();
+    MethodHandle concat = lookup.findVirtual(String.class, "concat", methodType(String.class, String.class));
+    MethodHandle upper = lookup.findVirtual(String.class, "toUpperCase", methodType(String.class));
+    MethodHandle length = lookup.findVirtual(String.class, "length", methodType(int.class));
+
+    MethodHandle hello = MethodHandles.insertArguments(concat, 0, "hello, ");   // (String)String
+    MethodHandle shout = MethodHandles.filterReturnValue(hello, upper);        // (String)String
+    MethodHandle size = MethodHandles.filterReturnValue(shout, length);       // (String)int
+
+    IO.println((String) shout.invokeExact("ada"));
+    IO.println((int) size.invokeExact("ada"));
+    IO.println(size.type());
+}
+```
+
+this is how language runtimes on the JVM (JRuby, Groovy, Nashorn back when it shipped) build their dispatch logic, and how [invokedynamic](/learn/meta/invokedynamic) call sites get wired: a bootstrap method assembles a handle out of pieces like these, and the JVM calls it.
+
+## how fast
+
+same benchmark as the reflection chapter: `t.add(x)`, measured with [JMH](/learn/performance/jmh) on jdk 25, apple M4 Pro.
+
+<Figure caption={<>a handle in a <code>static final</code> field is a constant to the JIT, and it inlines straight through: <C k="live">the same speed as a direct call</C>. in an ordinary field, it's an opaque target and costs a few nanoseconds.</>}>
+<Bench
+  unit="ns/op"
+  data={[
+    { label: "direct call", value: 0.711, err: 0.03, tone: "live" },
+    { label: "MethodHandle, static final", value: 0.707, err: 0.03, tone: "live" },
+    { label: "Method.invoke, static final", value: 1.592, err: 0.009 },
+    { label: "MethodHandle, plain field", value: 3.099, err: 0.043 },
+    { label: "Method.invoke, plain field", value: 5.565, err: 0.051 },
+  ]}
+/>
+</Figure>
+
+so the rule for handles is the same as for reflection, but the payoff is bigger: look it up once, store it in a `static final`, call `invokeExact`. that's exactly what the JDK does internally (and since java 18, `Method.invoke` itself is implemented with method handles, [JEP 416](https://openjdk.org/jeps/416)).
+
+## VarHandles: a handle to a variable
+
+a `VarHandle` points at a field, an array element, or a spot in a byte buffer, and offers every way of accessing it: plain reads and writes, ordered ones, and atomic read-modify-write.
+
+```java title="Main.java" run output="true false 42\n42 → 50\nint [class Main$Counter]\n7"
+import java.lang.invoke.*;
+
+class Counter {
+    int count;
+    static final VarHandle COUNT;
+    static {
+        try {
+            COUNT = MethodHandles.lookup().findVarHandle(Counter.class, "count", int.class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+}
+
+void main() {
+    Counter c = new Counter();
+    Counter.COUNT.set(c, 41);
+    boolean won = Counter.COUNT.compareAndSet(c, 41, 42);
+    boolean lost = Counter.COUNT.compareAndSet(c, 41, 99);
+    IO.println(won + " " + lost + " " + c.count);
+    int before = (int) Counter.COUNT.getAndAdd(c, 8);
+    IO.println(before + " → " + (int) Counter.COUNT.getVolatile(c));
+    IO.println(Counter.COUNT.varType() + " " + Counter.COUNT.coordinateTypes());
+    Counter.COUNT.setRelease(c, 7);
+    IO.println((int) Counter.COUNT.getAcquire(c));
+}
+```
+
+the field is a plain `int`, not an `AtomicInteger`, and yet you got a real [CAS](/learn/concurrency/atomics-and-cas) on it. the "coordinates" are what locates the variable (here, which `Counter`), and like `invokeExact`, the access methods are signature polymorphic, hence the `(int)` casts.
+
+that's the point of VarHandles: atomic operations on ordinary fields, without allocating a wrapper object per field and without `sun.misc.Unsafe`, which is what libraries reached for before java 9. `FutureTask` keeps its state in three VarHandles (`javap -p` shows `STATE`, `RUNNER` and `WAITERS`); the very core, like `AtomicInteger` and `ConcurrentHashMap`, still calls the JDK's own internal `Unsafe`, which your code can't touch. there are also `MethodHandles.arrayElementVarHandle(int[].class)` for array slots and `byteArrayViewVarHandle` to read an `int` or `long` out of a `byte[]` at any offset, in either byte order.
+
+## the access modes
+
+here's what's genuinely new compared to `volatile` fields: you pick the memory ordering per access.
+
+<Figure caption={<>pick a mode. each rung keeps the guarantees of the ones below it. the two tests are the classic litmus tests; <C k="dead">red</C> means the java memory model allows the surprising outcome, <C k="live">green</C> means it can't happen.</>}>
+<AccessModes />
+</Figure>
+
+almost all code should use volatile semantics (a `volatile` field, an `AtomicXxx`, or `getVolatile`/`setVolatile`/`compareAndSet`). the weaker modes exist for the people writing lock-free queues and concurrency libraries, who need to shave off the fences that volatile implies in a hot loop. on x86 even that saving is small: every mode except a volatile *write* compiles to an ordinary memory instruction there.
+
+<Gotcha title="weak modes fail on the other CPU">
+x86 orders memory strongly in hardware, so code that uses plain or opaque where it needed acquire/release usually works on an intel laptop anyway. ARM (apple silicon, AWS graviton, most phones) reorders far more aggressively, and the same code breaks there, rarely, under load. if you use anything weaker than volatile, test on ARM with a tool built for it ([jcstress](/learn/concurrency/testing-concurrent-code)), and read the [memory model](/learn/concurrency/java-memory-model) chapter first.
+</Gotcha>
+
+<Deep title="what the JIT sees">
+a method handle is an object, but its behaviour is described by a small internal graph of "lambda forms" that the JVM can compile. when the handle is a compile-time constant (a `static final` field, or the target of a linked `invokedynamic`), C2 can look through the whole graph, inline the target method, and the handle disappears from the generated code. combinators fold away the same way, so `filterReturnValue(shout, length)` becomes a straight-line `concat`, `toUpperCase`, `length`. when the handle isn't a constant, the JVM has to go through an `invokeBasic` on whatever handle it finds at runtime, which can't be inlined, and that's the 3 ns row in the chart.
+</Deep>
+
+<Interview q="what's the difference between a MethodHandle and a reflective Method?">
+a `Method` is a description that you invoke reflectively: access is checked on use, arguments are boxed into an `Object[]`, and the JIT can only optimize it well when it's a constant. a `MethodHandle` is a typed, directly executable reference: access is checked once when the `Lookup` finds it, `invokeExact` is signature polymorphic (no boxing, no array), and a constant handle inlines like a direct call. handles also compose, through combinators, into new handles, which is what `invokedynamic` bootstraps return. reflection is for discovering what a class has; handles are for calling things fast once you know.
+</Interview>
+
+<Keylines>
+- a `Lookup` checks access once. the handle it returns is just a call after that.
+- `invokeExact` needs the call site's types, cast included, to match the handle's type exactly.
+- keep handles in `static final` fields and they cost the same as a direct call.
+- combinators build handles out of handles: bind, filter, guard, catch, loop.
+- a `VarHandle` gives plain fields CAS and per-access memory ordering. volatile is the right default.
+</Keylines>

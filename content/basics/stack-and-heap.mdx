@@ -1,0 +1,226 @@
+import { StackOverflowMeter } from "@/components/figures/basics/StackOverflowMeter";
+import { ThreadsShareHeap } from "@/components/figures/basics/ThreadsShareHeap";
+
+export const walk = {
+  file: "Main.java",
+  source: `class Point {
+    int x, y;
+    Point(int x, int y) { this.x = x; this.y = y; }
+}
+
+void main() {
+    int a = 7;
+    int b = a;
+    b = 9;
+    Point p = new Point(1, 2);
+    Point q = p;
+    q.x = 100;
+    p = new Point(5, 5);
+    q = null;
+    IO.println(a + " " + b + " " + p.x);
+}`,
+  steps: [
+    { line: 7, frames: [{ name: "main", locals: {} }], heap: {}, note: "main gets a frame on the stack. nothing in it yet." },
+    { line: 8, frames: [{ name: "main", locals: { a: 7 } }], heap: {}, note: "a is a primitive. the 7 lives right inside main's frame." },
+    { line: 9, frames: [{ name: "main", locals: { a: 7, b: 7 } }], heap: {}, note: "b = a copies the value. now there are two separate 7s." },
+    { line: 10, frames: [{ name: "main", locals: { a: 7, b: 9 } }], heap: {}, note: "changing b doesn't touch a. they never shared anything." },
+    {
+      line: 3,
+      frames: [
+        { name: "main", locals: { a: 7, b: 9 } },
+        { name: "new Point(1, 2)", locals: { this: { ref: "p1" }, x: 1, y: 2 } },
+      ],
+      heap: { p1: { type: "Point", fields: { x: 0, y: 0 } } },
+      note: "new puts a Point on the heap with every field zeroed, then calls the constructor. a constructor is just a method with a hidden this.",
+    },
+    {
+      line: 11,
+      frames: [{ name: "main", locals: { a: 7, b: 9, p: { ref: "p1" } } }],
+      heap: { p1: { type: "Point", fields: { x: 1, y: 2 } } },
+      note: "the constructor's frame is gone. p holds a reference: an arrow to the object, not the object.",
+    },
+    {
+      line: 12,
+      frames: [{ name: "main", locals: { a: 7, b: 9, p: { ref: "p1" }, q: { ref: "p1" } } }],
+      heap: { p1: { type: "Point", fields: { x: 1, y: 2 } } },
+      note: "q = p copies the arrow. one object, two arrows.",
+    },
+    {
+      line: 13,
+      frames: [{ name: "main", locals: { a: 7, b: 9, p: { ref: "p1" }, q: { ref: "p1" } } }],
+      heap: { p1: { type: "Point", fields: { x: 100, y: 2 } } },
+      note: "q.x = 100 follows q's arrow and changes the object. p sees it too, because it's the same object.",
+    },
+    {
+      line: 14,
+      frames: [{ name: "main", locals: { a: 7, b: 9, p: { ref: "p2" }, q: { ref: "p1" } } }],
+      heap: { p1: { type: "Point", fields: { x: 100, y: 2 } }, p2: { type: "Point", fields: { x: 5, y: 5 } } },
+      note: "p now points at a brand new Point. q still points at the old one.",
+    },
+    {
+      line: 15,
+      frames: [{ name: "main", locals: { a: 7, b: 9, p: { ref: "p2" }, q: null } }],
+      heap: { p2: { type: "Point", fields: { x: 5, y: 5 } } },
+      note: "nothing points at the old Point anymore. it's garbage. the GC reclaims it whenever it gets around to it.",
+    },
+    {
+      line: 16,
+      frames: [{ name: "main", locals: { a: 7, b: 9, p: { ref: "p2" }, q: null } }],
+      heap: { p2: { type: "Point", fields: { x: 5, y: 5 } } },
+      stdout: "7 9 5\n",
+      note: "a is still 7, b is 9, p.x is 5.",
+    },
+    {
+      line: 16,
+      frames: [],
+      heap: {},
+      stdout: "7 9 5\n",
+      note: "main returns. its whole frame is popped at once: every local, gone. the last Point has no references left either.",
+    },
+  ],
+};
+
+<InShort>
+every method call gets a **frame** on the **stack** for its local variables. every object lives on the **heap**. a variable of an object type holds a **reference**, an arrow to the object, never the object itself.
+
+that's the whole chapter. the rest is pictures.
+</InShort>
+
+## the picture
+
+you know how `int b = a` makes a copy, but `Point q = p` somehow doesn't? that's because there are two kinds of memory in play, and the variable only ever holds what fits in its own little slot.
+
+think of a coat check. the heap is the cloakroom (where the coats actually are). a reference is the ticket in your pocket. you can photocopy the ticket as many times as you want and there's still one coat. lose every ticket and the coat just sits there until staff clears it out (that's the garbage collector).
+
+<Figure caption={<>one frame, one object. <C k="ref">blue</C> is always a reference, everywhere on this site.</>}>
+<Memory
+  frames={[{ name: "main", locals: { age: 21, p: { ref: "p1" } } }]}
+  heap={{ p1: { type: "Person", fields: { name: { ref: "s1" }, age: 36 } }, s1: { type: "String", value: '"ada"' } }}
+/>
+</Figure>
+
+notice `age` appears twice and means two different things. the local `age` (21) sits in the frame. the field `age` (36) sits inside the object, on the heap, because fields are part of the object no matter what type they are. and `name` isn't text sitting in the Person, it's another arrow, because `String` is an object too.
+
+## walk through it
+
+press step (or click the figure and use <kbd>←</kbd> <kbd>→</kbd>). watch what `=` actually copies each time.
+
+<Figure wide caption={<>step 5 is the one people miss: the object exists with zeroed fields <em>before</em> the constructor runs. step 10 shows an object becoming <C k="dead">unreachable</C>.</>}>
+<MemoryStepper trace={walk} />
+</Figure>
+
+see? `b = a` copies a number. `q = p` copies an arrow. same `=`, same rule (copy what's in the slot), wildly different vibes because of what's in the slot.
+
+<Predict options={["1", "99", "compile error"]} answer={1}>
+```java
+int[] a = {1, 2, 3};
+int[] b = a;
+b[0] = 99;
+IO.println(a[0]);
+```
+<Explain>
+arrays are objects, so `b = a` copies the arrow. `b[0] = 99` follows that arrow into the one array both of them point at.
+</Explain>
+</Predict>
+
+<Predict options={["hi", "hi!", "compile error"]} answer={0}>
+```java
+String s = "hi";
+String t = s;
+t = t + "!";
+IO.println(s);
+```
+<Explain>
+`t + "!"` doesn't change the `"hi"` object (strings are immutable). it builds a new `"hi!"` and moves `t`'s arrow to it. `s` still points at `"hi"`.
+</Explain>
+</Predict>
+
+## what lives where
+
+| thing | where it lives |
+| --- | --- |
+| a local primitive (`int n = 3`) | in the frame, on the stack |
+| a local reference (`Point p`) | the reference is in the frame. the object is on the heap |
+| every object, every array | the heap. always. no exceptions in the language |
+| fields, even `int` ones | inside their object, so on the heap |
+| `static` fields | with the class, which the JVM keeps on the heap too |
+| method parameters | in the callee's frame, as copies (more in [pass-by-value](/learn/basics/pass-by-value)) |
+| string literals | on the heap, deduplicated in the [string pool](/learn/deep-dives/string-pool) |
+
+<Gotcha title="locals don't get defaults, fields do">
+an object's memory is zeroed when it's allocated, so an unset `int` field is `0` and an unset reference field is `null`. a frame's slots aren't zeroed for you, so the compiler refuses to let you read a local before you've assigned it.
+
+```java title="Locals.java"
+public class Locals {
+    static int field;
+    public static void main(String[] args) {
+        int local;
+        System.out.println(field); // fine, prints 0
+        System.out.println(local); // [!code error]
+    }
+}
+```
+
+`error: variable local might not have been initialized`
+</Gotcha>
+
+## why two kinds of memory
+
+because they die differently.
+
+a frame dies the instant its method returns. the JVM doesn't clean up anything, it just moves a pointer back down, so allocating and freeing locals is basically free. but that only works because nothing outlives the call.
+
+objects need to outlive the method that made them (you return them, store them in lists, hand them to other threads). so they go somewhere that doesn't care about calls: the heap. the price is that someone has to figure out when an object is actually dead. that someone is the [garbage collector](/learn/gc/gc-fundamentals).
+
+<Figure caption="each thread gets its own stack. there's one heap. anything reachable from two stacks can be touched by two threads at once, which is where every concurrency bug in part 09 comes from.">
+<ThreadsShareHeap />
+</Figure>
+
+## when the stack runs out
+
+a stack is a fixed-size block (set with `-Xss`). every call pushes a frame, so recursion without a base case eventually runs out of room.
+
+```java title="Main.java"
+public class Main {
+    static int calls = 0;
+    static void down() { calls++; down(); }
+
+    public static void main(String[] args) {
+        try {
+            down();
+        } catch (StackOverflowError e) {
+            System.out.println("overflowed after " + calls + " calls");
+        }
+    }
+}
+```
+
+<Figure caption="drag the depth, or let it run. the numbers are real: measured on jdk 25 on an arm mac, where the default stack is 2 MB.">
+<StackOverflowMeter />
+</Figure>
+
+<Deep title="why the same program overflows at different depths">
+run that program twice in a row inside the same JVM and the second run goes deeper. on jdk 25 with `-Xss1m` it was 20,773 calls cold and 57,948 once the JIT had compiled `down()`.
+
+interpreted frames are generous: they carry the full local array, an operand stack and bookkeeping for the interpreter. compiled frames only keep what the optimized code needs. same method, smaller frames, more of them fit. so "how deep can i recurse" has no single answer, which is a good reason to never design code that depends on it.
+</Deep>
+
+the heap can run out too. that's `OutOfMemoryError: Java heap space`, and it's a whole different story (spoiler: usually a leak). see the [OOM zoo](/learn/deep-dives/out-of-memory-zoo).
+
+<Deep title="objects that never touch the heap">
+"every object lives on the heap" is the language's promise. the JIT is allowed to cheat as long as you can't tell.
+
+if escape analysis proves an object never leaves the method that created it (never returned, never stored in a field, never passed somewhere that keeps it), C2 can skip the allocation entirely and keep the fields in registers. it's called scalar replacement. your code still looks like it allocated a `Point`, you just never paid for it. more in [JIT optimizations](/learn/jvm/jit-optimizations).
+</Deep>
+
+<Interview q="where are static variables stored?">
+in HotSpot (the JVM you're almost certainly running), static fields live inside the class's `java.lang.Class` object, on the heap. the class metadata itself (method bytecode, the constant pool) lives in metaspace, which is native memory. before java 8, metadata lived in permgen, a fixed-size slice of the heap that loved to run out. bonus point: a `static final` primitive set to a compile-time constant gets inlined by javac into every place that reads it, so at runtime nobody reads the field at all.
+</Interview>
+
+<Keylines>
+- every call gets a frame. the frame dies when the call returns.
+- objects live on the heap. variables hold arrows to them.
+- `=` always copies what's in the slot. for objects, that's the arrow.
+- two arrows to one object means changes through one show up through the other.
+- an object with no arrows left is garbage. the GC decides when to clean it up.
+</Keylines>

@@ -1,0 +1,219 @@
+import { ArraysPlayground } from "@/components/figures/basics/ArraysPlayground";
+
+export const jagged = {
+  file: "Main.java",
+  source: `void main() {
+    int[][] tri = new int[3][];
+    tri[0] = new int[] {1};
+    tri[1] = new int[] {1, 1};
+    tri[2] = new int[] {1, 2, 1};
+    int[] row = tri[2];
+    row[1] = 9;
+    IO.println(tri[2][1]);
+}`,
+  steps: [
+    { line: 2, frames: [{ name: "main", locals: {} }], heap: {}, note: "main starts." },
+    {
+      line: 3,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" } } }],
+      heap: { o1: { type: "int[][]", items: [null, null, null] } },
+      note: "new int[3][] makes ONE array with 3 slots. each slot can hold a reference to an int[]. none exist yet, so they're all null.",
+    },
+    {
+      line: 4,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" } } }],
+      heap: { o1: { type: "int[][]", items: [{ ref: "o2" }, null, null] }, o2: { type: "int[]", items: [1] } },
+      note: "row 0 is its own little array object, and tri[0] now points at it.",
+    },
+    {
+      line: 5,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" } } }],
+      heap: { o1: { type: "int[][]", items: [{ ref: "o2" }, { ref: "o3" }, null] }, o2: { type: "int[]", items: [1] }, o3: { type: "int[]", items: [1, 1] } },
+      note: "row 1, length 2.",
+    },
+    {
+      line: 6,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" } } }],
+      heap: {
+        o1: { type: "int[][]", items: [{ ref: "o2" }, { ref: "o3" }, { ref: "o4" }] },
+        o2: { type: "int[]", items: [1] },
+        o3: { type: "int[]", items: [1, 1] },
+        o4: { type: "int[]", items: [1, 2, 1] },
+      },
+      note: "three rows, three different lengths. that's a jagged array, and java is fine with it: each row is just another array.",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" }, row: { ref: "o4" } } }],
+      heap: {
+        o1: { type: "int[][]", items: [{ ref: "o2" }, { ref: "o3" }, { ref: "o4" }] },
+        o2: { type: "int[]", items: [1] },
+        o3: { type: "int[]", items: [1, 1] },
+        o4: { type: "int[]", items: [1, 2, 1] },
+      },
+      note: "row = tri[2] copies the reference. row and tri[2] now point at the same array.",
+    },
+    {
+      line: 8,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" }, row: { ref: "o4" } } }],
+      heap: {
+        o1: { type: "int[][]", items: [{ ref: "o2" }, { ref: "o3" }, { ref: "o4" }] },
+        o2: { type: "int[]", items: [1] },
+        o3: { type: "int[]", items: [1, 1] },
+        o4: { type: "int[]", items: [1, 9, 1] },
+      },
+      note: "row[1] = 9 writes into that one shared array...",
+    },
+    {
+      line: 9,
+      frames: [{ name: "main", locals: { tri: { ref: "o1" }, row: { ref: "o4" } } }],
+      heap: {
+        o1: { type: "int[][]", items: [{ ref: "o2" }, { ref: "o3" }, { ref: "o4" }] },
+        o2: { type: "int[]", items: [1] },
+        o3: { type: "int[]", items: [1, 1] },
+        o4: { type: "int[]", items: [1, 9, 1] },
+      },
+      stdout: "9\n",
+      note: "...so tri[2][1] is 9 too. same array, two ways to reach it.",
+    },
+  ],
+};
+
+<InShort>
+an array is a **fixed-size** row of slots, all of one type, numbered from **0**. it's an **object** on the heap, so the variable holds a reference to it. you can't grow one; you make a new one and copy. and a 2d array is literally an **array of arrays**, which is why its rows can have different lengths.
+</InShort>
+
+## the picture
+
+a row of numbered lockers, all the same size, bolted together. you get to pick how many when you build it, and that number is final. locker numbers start at 0, so a row of 5 goes from 0 to 4.
+
+```java
+int[] scores = {90, 72, 85};
+String[] names = {"ada", "linus"};
+```
+
+<Figure caption={<>both arrays live on the heap. an <code>int[]</code> holds the ints themselves. a <code>String[]</code> holds <C k="ref">references</C>, one arrow per slot, because strings are objects too.</>}>
+<Memory
+  frames={[{ name: "main", locals: { scores: { ref: "a1" }, names: { ref: "a2" } } }]}
+  heap={{
+    a1: { type: "int[]", items: [90, 72, 85] },
+    a2: { type: "String[]", items: [{ ref: "s1" }, { ref: "s2" }] },
+    s1: { type: "String", value: '"ada"' },
+    s2: { type: "String", value: '"linus"' },
+  }}
+/>
+</Figure>
+
+## making and using one
+
+```java title="Main.java" run output="5 3 5\n[0, 0, 0] [null, null] [false, false]"
+void main() {
+    int[] a = {3, 1, 4, 1, 5};
+    IO.println(a.length + " " + a[0] + " " + a[a.length - 1]);
+    IO.println(Arrays.toString(new int[3]) + " " + Arrays.toString(new String[2]) + " " + Arrays.toString(new boolean[2]));
+}
+```
+
+- `{3, 1, 4}` builds and fills one in one go. `new int[5]` makes an empty one of length 5.
+- an empty array isn't empty, it's **zeroed**: `0` for numbers, `false` for booleans, `null` for references. (fields get the same defaults; local variables don't.)
+- `a.length` is a field, no parentheses (unlike `String.length()`, a classic mixup).
+- the last element is `a[a.length - 1]`. `a[a.length]` is one past the end.
+
+<Figure wide caption={<>read any index, including <C k="dead">-1</C> and one past the end, then try the <code>Arrays</code> helpers. watch the object number: sort and fill change the array <em>in place</em>, but copyOf hands you a brand new array.</>}>
+<ArraysPlayground />
+</Figure>
+
+java checks **every** index, every time. read past the end and you get an exception, never somebody else's memory (that's a whole class of C security bugs that can't happen here):
+
+```java title="Main.java" run output="reading a[5]...\nException in thread \"main\" java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 5"
+void main() {
+    int[] a = new int[5];
+    IO.println("reading a[5]...");
+    IO.println(a[5]);
+}
+```
+
+## printing and comparing
+
+```java title="Main.java" run output="[1, 1, 3, 4, 5] [3, 1, 4, 1, 5, 0, 0]\nfalse false true"
+void main() {
+    int[] a = {3, 1, 4, 1, 5};
+    int[] b = Arrays.copyOf(a, 7);
+    Arrays.sort(a);
+    IO.println(Arrays.toString(a) + " " + Arrays.toString(b));
+    int[] d = {1, 2, 3};
+    int[] e = {1, 2, 3};
+    IO.println((d == e) + " " + d.equals(e) + " " + Arrays.equals(d, e));
+}
+```
+
+two traps in there. `println(a)` on an array prints something like `[I@5a4041cc` (the type code for "int array", an `@`, and a hash), never the contents: use `Arrays.toString`. and both `==` and `equals` on arrays ask "same object?", so two arrays with identical contents aren't "equal". use `Arrays.equals`.
+
+<Predict options={["[2, 4, 6]", "[1, 2, 3]", "compile error"]} answer={1}>
+```java
+int[] a = {1, 2, 3};
+for (int x : a) {
+    x *= 2;
+}
+IO.println(Arrays.toString(a));
+```
+<Explain>
+`[1, 2, 3]`. the for-each loop copies each element into `x`, and `x *= 2` changes the copy. the array never sees it. to change elements you need the index: `for (int i = 0; i < a.length; i++) a[i] *= 2;`.
+</Explain>
+</Predict>
+
+## 2d arrays are arrays of arrays
+
+java has no real grid type. `int[][]` means "an array whose elements are `int[]`s". the outer array holds references, and each row is a separate array object:
+
+```java
+int[][] grid = new int[3][4];
+grid[1][2] = 9;
+```
+
+<Figure caption={<>one outer array of 3 <C k="ref">references</C>, three separate row arrays of 4 ints. <code>grid[1][2]</code> means: follow slot 1 of the outer array, then read slot 2 of that row.</>}>
+<Memory
+  frames={[{ name: "main", locals: { grid: { ref: "g" } } }]}
+  heap={{
+    g: { type: "int[][]", items: [{ ref: "r0" }, { ref: "r1" }, { ref: "r2" }] },
+    r0: { type: "int[]", items: [0, 0, 0, 0] },
+    r1: { type: "int[]", items: [0, 0, 9, 0] },
+    r2: { type: "int[]", items: [0, 0, 0, 0] },
+  }}
+/>
+</Figure>
+
+since each row is its own array, the rows don't have to be the same length. leave the second size out (`new int[3][]`) and you get the outer array only, rows to be filled in later:
+
+<Figure wide caption={<>step through building a jagged (triangle-shaped) array row by row. at step 6, <code>row</code> and <code>tri[2]</code> become two <C k="ref">arrows</C> to the same row, so a write through one shows up through the other.</>}>
+<MemoryStepper trace={jagged} />
+</Figure>
+
+`Arrays.deepToString(grid)` prints nested arrays (`[[0, 0, 0, 0], [0, 0, 9, 0], [0, 0, 0, 0]]`), since plain `toString` would print the rows' `[I@...` addresses.
+
+<Gotcha title="arrays are fixed, lists grow">
+the size you give `new int[5]` is permanent. "adding" means making a bigger array and copying, which `Arrays.copyOf` does for you. if you need something that grows, you want an `ArrayList`, which is exactly that: an array plus the copying, done for you (see [ArrayList](/learn/collections/arraylist)). arrays are for fixed-size data and for raw speed with primitives.
+</Gotcha>
+
+<Deep title="arrays are covariant, and it can blow up at runtime">
+a `String[]` is a kind of `Object[]`, so this compiles:
+
+```java
+Object[] o = new String[1];
+o[0] = 42;
+```
+
+and then throws `ArrayStoreException: java.lang.Integer` when it runs, because the array remembers it was created as a `String[]` and checks every store. that runtime check is why arrays and generics don't mix well, and why `List<String>` is deliberately *not* a `List<Object>`. the whole story is in [arrays, varargs and other limits](/learn/generics/generics-limitations).
+</Deep>
+
+<Interview q="how are 2d arrays laid out in memory in java?">
+not as one block. an `int[3][4]` is an outer array of 3 references plus 3 separate `int[4]` objects, each with its own header, possibly far apart on the heap. that's why rows can have different lengths (jagged arrays), and why iterating row by row (`grid[i][j]` with `j` in the inner loop) is much faster than column by column: each row is contiguous, but jumping between rows means following a reference to a different object.
+</Interview>
+
+<Keylines>
+- an array is a fixed-size, zero-indexed object. the variable holds a reference.
+- new arrays are zeroed: 0, false, null.
+- every index is checked. out of range throws `ArrayIndexOutOfBoundsException`.
+- print with `Arrays.toString`, compare with `Arrays.equals`. `==` and `equals` mean "same object".
+- `int[][]` is an array of row arrays. rows can differ in length.
+</Keylines>

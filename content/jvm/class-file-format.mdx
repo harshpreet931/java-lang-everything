@@ -1,0 +1,196 @@
+import { ClassFileHex } from "@/components/figures/jvm/ClassFileHex";
+
+<InShort>
+a `.class` file is a flat run of bytes with a fixed shape: the **magic** `CAFEBABE`, a version, a **constant pool** (every name, type and literal the class uses, numbered), then the class's flags, fields, methods and attributes. almost everything after the pool is a two-byte **index into the pool**, not the thing itself.
+
+it's small enough to read by hand. so let's.
+</InShort>
+
+## the picture
+
+you know how `.class` files feel like opaque blobs that only the JVM is allowed to look at? they're not. they're one of the most readable binary formats around, and javac's output for a tiny class fits on one screen.
+
+think of it like a recipe book with a glossary in the front. the glossary (the constant pool) lists every ingredient and every technique once, numbered. the recipes themselves just say "use #7" instead of spelling it out. that's why the pool is most of the file: the rest is mostly numbers pointing back into it.
+
+here's the class:
+
+```java title="Point.java"
+public class Point {
+    int x;
+    int getX() { return x; }
+}
+```
+
+compiled with `javac -g:source Point.java` on jdk 25 (that flag keeps the file name but skips line numbers, so the file stays tiny). the result is 224 bytes. here's every one of them.
+
+<Figure wide caption={<>hover or click any byte (or focus the figure and use the arrow keys). <C k="meta">purple</C> bytes are constant pool entries, <C k="ref">blue</C> bytes are indexes pointing into the pool: select one and the entry it points at lights up. start at <code>0x00ae</code> to find the bytecode of the constructor.</>}>
+<ClassFileHex />
+</Figure>
+
+see the strip on top? 122 of the 224 bytes are the constant pool. the actual code (both methods' instructions) is 10 bytes.
+
+## the shape
+
+the JVM spec defines the whole file as one struct. `u2` and `u4` are unsigned 2 and 4 byte numbers, big-endian:
+
+```text title="JVMS §4.1"
+ClassFile {
+    u4             magic;
+    u2             minor_version;
+    u2             major_version;
+    u2             constant_pool_count;
+    cp_info        constant_pool[constant_pool_count-1];
+    u2             access_flags;
+    u2             this_class;
+    u2             super_class;
+    u2             interfaces_count;
+    u2             interfaces[interfaces_count];
+    u2             fields_count;
+    field_info     fields[fields_count];
+    u2             methods_count;
+    method_info    methods[methods_count];
+    u2             attributes_count;
+    attribute_info attributes[attributes_count];
+}
+```
+
+no padding, no alignment, no offsets table. the only way to find the methods is to walk the pool entry by entry (each tag tells you how long that entry is). that's what the JVM's class file parser does, and it's what `javap -v` prints for you:
+
+```text title="javap -v Point.class" {5,10-11}
+public class Point
+  minor version: 0
+  major version: 69
+  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+  this_class: #8                          // Point
+  super_class: #2                         // java/lang/Object
+  interfaces: 0, fields: 1, methods: 2, attributes: 1
+Constant pool:
+   #1 = Methodref          #2.#3          // java/lang/Object."<init>":()V
+   #2 = Class              #4             // java/lang/Object
+   #3 = NameAndType        #5:#6          // "<init>":()V
+   #4 = Utf8               java/lang/Object
+   ...
+   #7 = Fieldref           #8.#9          // Point.x:I
+```
+
+<Quiz question="javap says constant_pool_count is 18. how many entries does Point's constant pool actually have?" options={["18", "17", "16", "it depends on the JVM"]} answer={1}>
+<Explain>
+17. entries are numbered from 1, and the count is "one more than the last index". index 0 is reserved to mean "no entry" (that's what `super_class` holds in `java.lang.Object`, the one class with no superclass). bonus weirdness: a `long` or `double` constant takes two slots, so a pool with one long has a gap in its numbering.
+</Explain>
+</Quiz>
+
+## the constant pool is a graph
+
+the pool isn't a flat list of strings. entries point at other entries. `getfield #7` in `getX` names a field, and resolving what that means takes four hops:
+
+<Figure caption={<>the two references the bytecode actually uses, and everything they hang off. only the <C k="meta">Utf8</C> leaves hold real text. click a node to fold it.</>}>
+<Tree>{`
+#1 Methodref               // invokespecial in the constructor
+    #2 Class
+        #4 Utf8 java/lang/Object #meta
+    #3 NameAndType
+        #5 Utf8 <init> #meta
+        #6 Utf8 ()V #meta
+#7 Fieldref                // getfield in getX
+    #8 Class               // also this_class
+        #10 Utf8 Point #meta
+    #9 NameAndType
+        #11 Utf8 x #meta
+        #12 Utf8 I #meta
+`}</Tree>
+</Figure>
+
+this indirection is why linking is lazy. the bytes say "the field `x` of type `I` in class `Point`", by name. the first time `getfield #7` runs, the JVM looks that up, finds the field's real byte offset inside a `Point` object, and caches the answer in the runtime constant pool. after that it's a plain memory read. more in [class loading](/learn/jvm/class-loading).
+
+### descriptors
+
+types in a class file are written as compact strings called descriptors. you just saw `I` and `()V`. the full alphabet:
+
+<Defs>
+<dt>`B C D F I J S Z`</dt><dd>byte, char, double, float, int, **long**, short, **boolean**. (J and Z because L and B were taken.)</dd>
+<dt>`Ljava/lang/String;`</dt><dd>a class type: L, the internal name with slashes, a semicolon.</dd>
+<dt>`[I` · `[[Ljava/lang/Object;`</dt><dd>arrays: one `[` per dimension.</dd>
+<dt>`V`</dt><dd>void. only allowed as a return type.</dd>
+<dt>`(ILjava/lang/String;)Z`</dt><dd>a method: parameters in parentheses, then the return type. this one is `boolean m(int, String)`.</dd>
+</Defs>
+
+notice what's *not* in a descriptor: generic type arguments (`List<String>` is just `Ljava/util/List;`, see [type erasure](/learn/generics/type-erasure)) and parameter names. generics survive only in an optional `Signature` attribute, for reflection and the compiler.
+
+## versions
+
+bytes 6 and 7 are the major version. each java release bumps it by one, and a JVM refuses anything newer than itself.
+
+| java | major version |
+| --- | --- |
+| 1.1 | 45 |
+| 8 | 52 |
+| 11 | 55 |
+| 17 | 61 |
+| 21 | 65 |
+| 25 | 69 |
+| 27 | 71 |
+
+<Predict options={["it runs fine", "it runs with a warning", "UnsupportedClassVersionError", "VerifyError"]} answer={2}>
+```bash
+# Point.class from above, with byte 7 changed from 0x45 (69) to 0x46 (70)
+$ java -cp . Run
+```
+<Explain>
+the JVM checks the version before it parses anything else. this is the real message from jdk 25:
+
+`UnsupportedClassVersionError: Point has been compiled by a more recent version of the Java Runtime (class file version 70.0), this version of the Java Runtime only recognizes class file versions up to 69.0`
+
+you'll see this exact error when a library built for a newer java lands on an older runtime. the fix is a newer runtime, or compiling with `--release` set to the oldest java you need to support.
+</Explain>
+</Predict>
+
+## writing one without javac
+
+since java 24, the JDK can read and write class files itself: the Class-File API (`java.lang.classfile`, [JEP 484](https://openjdk.org/jeps/484)) <Since v={24} />. here's a class built from nothing, loaded and called, no source code involved:
+
+```java title="Main.java" run output="cafebabe\n42"
+void main() throws Throwable {
+    byte[] bytes = ClassFile.of().build(ClassDesc.of("Answer"), cls -> cls
+        .withMethodBody("get", MethodTypeDesc.of(ConstantDescs.CD_int),
+            ClassFile.ACC_PUBLIC | ClassFile.ACC_STATIC,
+            code -> code.bipush(42).ireturn()));
+
+    IO.println(HexFormat.of().formatHex(bytes, 0, 4));
+    Class<?> answer = MethodHandles.lookup().defineClass(bytes);
+    IO.println(answer.getMethod("get").invoke(null));
+}
+```
+
+on jdk 25 that's a 106-byte class: magic, version 69, a constant pool, one method whose code is `bipush 42, ireturn`. frameworks that generate classes at runtime (mocking libraries, proxies, ORMs) have always needed a library like ASM or ByteBuddy for this. the JDK itself has been moving its own class generation (lambdas, proxies, records) off an internal copy of ASM and onto this API.
+
+<Gotcha title="code too large">
+a method's bytecode is capped at 65,535 bytes: the spec requires `code_length` to be under 65536, and exception tables and line number tables store bytecode offsets in 2 bytes. you'll hit it in generated code, or with a big static table:
+
+```java title="Big.java"
+public class Big {
+    static int[] TABLE = {0, 7, 14, 21, /* ...10,000 numbers... */};
+}
+```
+
+`error: code too large`
+
+array initializers aren't data in a class file, they're code: `dup`, push the index, push the value, `iastore`, about 8 bytes per element, all inside `<clinit>`. 5,000 elements compiled to 39,606 bytes of bytecode. 10,000 don't fit. load big tables from a resource file instead.
+</Gotcha>
+
+<Deep title="attributes: the extension mechanism">
+everything optional in a class file is an attribute: a name (a pool index to a Utf8 like `Code`), a length, and bytes. `Code` holds a method's bytecode. `LineNumberTable` maps bytecode offsets to source lines (stack traces need it). `LocalVariableTable` keeps local names (`javac -g`). `StackMapTable` gives the verifier the type of every stack slot at every jump target, so verification is one linear pass. `Signature` keeps generics, `Record` lists record components, `NestMembers` lists inner classes allowed to touch each other's privates, `BootstrapMethods` holds the recipes for `invokedynamic`.
+
+the rule that makes this work: a JVM must silently skip attributes it doesn't recognize. that's how a 1996 format keeps absorbing lambdas, records, sealed types and modules without a redesign.
+</Deep>
+
+<Interview q="why does every class file start with CAFEBABE?">
+it's the magic number: a fixed 4-byte signature so the JVM can reject files that aren't class files before parsing anything. the value itself is a joke from the original java team at Sun. the real follow-up is "what comes next": the version, then the constant pool, which is where every name and type in the class lives. mentioning that nearly everything else is an index into the pool shows you've actually looked inside one.
+</Interview>
+
+<Keylines>
+- magic, version, constant pool, flags, this/super, interfaces, fields, methods, attributes. in that order, no padding.
+- the constant pool is most of the file. everything else mostly points into it.
+- names stay symbolic until first use. that's why linking can be lazy.
+- major 69 is java 25. a JVM refuses a newer one.
+- `javap -v` reads it for you. the Class-File API writes it for you.
+</Keylines>

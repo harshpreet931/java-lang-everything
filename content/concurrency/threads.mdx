@@ -1,0 +1,234 @@
+import { ThreadsShareHeap } from "@/components/figures/basics/ThreadsShareHeap";
+import { ThreadStates } from "@/components/figures/concurrency/ThreadStates";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const startVsRun = [
+  { ops: ["new Thread(task)", { t: "NEW", wait: true }], note: "a Thread object exists, on the heap, like any other object. no OS thread yet. nothing is running in that lane." },
+  { ops: ["t.run()", null], note: "run() is a plain method call. main jumps into the lambda itself, on its own stack." },
+  { ops: ["println → hi from main", null], note: "so the lambda prints main's name. the second lane is still empty: no new thread ever started." },
+  { ops: ["t.start()", { t: "RUNNABLE", k: "hot" }], note: "start() asks the OS for a brand new thread with its own stack, and schedules run() on it." },
+  { ops: ["main() returns", "run() → the lambda"], note: "both lanes are live now. main returning does not end the program: the JVM waits for every non-daemon thread." },
+  { ops: [null, "println → hi from Thread-0"], note: "same lambda, different thread. the name proves it." },
+  { ops: [null, { t: "TERMINATED", k: "mute" }], note: "the last non-daemon thread is done, so the JVM exits." },
+];
+
+export const joinTrace = [
+  { mem: { "result[0]": 0 }, note: "one int on the heap, reachable from both threads." },
+  { ops: ["worker.start()", { t: "RUNNABLE", k: "hot" }], note: "the worker starts. main keeps going." },
+  { ops: [{ t: "worker.join()", k: "hot" }, "sum 1..100"], note: "main calls join() and parks. it's WAITING until the worker's lane ends." },
+  { ops: [{ t: "WAITING", wait: true }, "result[0] = 5050"], mem: { "result[0]": 5050 }, note: "the worker writes its answer into the shared array." },
+  { ops: [{ t: "WAITING", wait: true }, { t: "TERMINATED", k: "mute" }], note: "run() returns. that wakes everyone joined on this thread." },
+  { ops: [{ t: "println(result[0]) → 5050", k: "live" }, null], mem: { "result[0]": { v: 5050, k: "live" } }, note: "main is guaranteed to see 5050. join() isn't just waiting: everything the worker did happens-before join returns." },
+];
+
+export const daemonTrace = [
+  { ops: ["start daemon", { t: "RUNNABLE", k: "hot" }], note: "a daemon thread is a background helper. same kind of thread, one flag different." },
+  { ops: ["sleep(100)", "sleep(10_000)"], note: "both sleep. the daemon plans to sleep for ten seconds, then print cleanup in its finally." },
+  { ops: ["println → main done", { t: "TIMED_WAITING", wait: true }], note: "main wakes first and prints." },
+  { ops: [{ t: "main() returns", k: "hot" }, { t: "TIMED_WAITING", wait: true }], note: "main was the last non-daemon thread alive." },
+  { ops: [{ t: "JVM exits", k: "meta" }, { t: "gone. finally never ran", k: "dead" }], note: "the JVM doesn't wait for daemons. it just stops. no exception, no finally, no cleanup." },
+];
+
+<InShort>
+a **thread** is an independent path of execution: its own stack, its own program counter, sharing one heap with every other thread. you create one with a task, and nothing happens until you call **start()**.
+
+from then on it moves through six **states**, from NEW to TERMINATED. this chapter is those six states and the handful of methods that move a thread between them.
+</InShort>
+
+## the picture
+
+think of a kitchen. the recipe book is your code. each cook is a thread, with their own notepad (the stack: where they are in the recipe, their local scribbles). the fridge and the counter are shared (the heap). two cooks can follow the same recipe at the same time, and that's fine, right up until they both reach for the same bowl.
+
+<Figure caption={<>each thread gets a private stack. the heap is shared, so the <C k="hot">ArrayList</C> reachable from both stacks can be touched by both threads at once. that one fact is the reason this whole part exists.</>}>
+<ThreadsShareHeap />
+</Figure>
+
+your program is never single-threaded, by the way. a JVM that runs nothing but `Thread.sleep(8000)` had 18 threads in its thread dump on my machine (jdk 25, G1): `main`, plus `Reference Handler`, `Finalizer`, `Signal Dispatcher`, two JIT compiler threads, a `VM Thread`, a handful of `G1` and `GC Thread`s and a few more. you only wrote one of them.
+
+## start() vs run()
+
+a `Thread` is just an object until you call `start()`. here are the ways to make one:
+
+```java title="Make.java"
+Runnable task = () -> IO.println("working on " + Thread.currentThread().getName());
+
+Thread a = new Thread(task);                                   // classic
+Thread b = Thread.ofPlatform().name("worker-1").start(task);  // builder, java 21+, starts it too
+Thread c = Thread.ofVirtual().start(task);                     // a virtual thread, java 21+
+a.start();
+```
+
+<Note title="don't extend Thread">
+you can subclass `Thread` and override `run()`, and lots of old code does. don't. a task (a `Runnable`) and the thing that runs it (a thread, a pool, a virtual thread) are separate ideas, and keeping them separate means you can hand the same task to an [executor](/learn/concurrency/executors) later.
+</Note>
+
+the classic mistake is calling `run()` instead of `start()`. it compiles, it runs, it prints, and it's single-threaded:
+
+```java title="Main.java" run output="hi from main\nhi from Thread-0"
+void main() {
+    Thread t = new Thread(() ->
+        IO.println("hi from " + Thread.currentThread().getName()));
+    t.run();
+    t.start();
+}
+```
+
+<Figure wide caption={<>step through it. <code>run()</code> never touches the second lane. only <code>start()</code> creates a thread, and the program only ends when its <C k="hot">last non-daemon thread</C> does.</>}>
+<Lanes threads={["main", "Thread-0"]} steps={startVsRun} />
+</Figure>
+
+<Predict options={["main", "Thread-0", "it depends on timing"]} answer={0}>
+```java
+Thread t = new Thread(() -> IO.println(Thread.currentThread().getName()));
+t.run();
+```
+<Explain>
+`run()` is an ordinary method. it executes on whatever thread called it, here `main`. the `Thread` object is still NEW afterwards, and you could still `start()` it (once).
+</Explain>
+</Predict>
+
+## the six states
+
+`Thread.State` is an enum with exactly six values. every thread is in exactly one of them at any moment, and `t.getState()` tells you which (a snapshot, already stale by the time you read it).
+
+<Figure wide caption={<>press play to follow one thread through its whole life, in the same order as the program below. click any numbered transition to see what causes it. the <C k="hot">amber</C> box is the state you land in.</>}>
+<ThreadStates />
+</Figure>
+
+you can watch a thread visit all six. this program pins `t` in each state on purpose (holding the lock it wants, then waiting on it, then sleeping) and spins until `getState()` agrees:
+
+```java title="Main.java" run output="NEW\nRUNNABLE\nBLOCKED\nWAITING\nTIMED_WAITING\nTERMINATED"
+void waitFor(Thread t, Thread.State s) {
+    while (t.getState() != s) Thread.onSpinWait();
+    IO.println(s);
+}
+
+void main() throws Exception {
+    Object lock = new Object();
+    Thread t = new Thread(() -> {
+        IO.println(Thread.currentThread().getState()); // its own state, while running
+        synchronized (lock) {                          // main holds it: BLOCKED
+            try {
+                lock.wait();                           // WAITING until notified
+                Thread.sleep(50);                      // TIMED_WAITING
+            } catch (InterruptedException e) { }
+        }
+    });
+
+    IO.println(t.getState());
+    synchronized (lock) {
+        t.start();
+        waitFor(t, Thread.State.BLOCKED);
+    }
+    waitFor(t, Thread.State.WAITING);
+    synchronized (lock) { lock.notify(); }
+    waitFor(t, Thread.State.TIMED_WAITING);
+    t.join();
+    IO.println(t.getState());
+}
+```
+
+the [monitor](/learn/concurrency/synchronized) and [wait/notify](/learn/concurrency/wait-and-notify) parts of that get their own chapters. for now, notice that the states are about *why a thread isn't making progress*, not about the CPU.
+
+<Gotcha title="RUNNABLE doesn't mean running">
+RUNNABLE covers "on a CPU right now", "ready, waiting for a core", and "stuck in a blocking socket read inside native code". the JVM can't see the difference, so a thread hung on a network call shows up as RUNNABLE in a thread dump. and the opposite surprise: a thread stuck on `ReentrantLock.lock()` is WAITING, not BLOCKED. BLOCKED is only ever about `synchronized`.
+</Gotcha>
+
+## join, daemons, and when the JVM exits
+
+`t.join()` parks the calling thread until `t` is TERMINATED. it's the simplest way to wait for a result:
+
+```java title="Main.java" run output="5050"
+void main() throws InterruptedException {
+    int[] result = new int[1];
+    Thread worker = Thread.ofPlatform().name("worker").start(() -> {
+        int sum = 0;
+        for (int i = 1; i <= 100; i++) sum += i;
+        result[0] = sum;
+    });
+    worker.join();
+    IO.println(result[0]);
+}
+```
+
+<Figure wide caption={<>main spends most of this <C k="mute">WAITING</C>. the last step is the important one: after <code>join()</code> returns, main is <C k="live">guaranteed</C> to see the worker's write.</>}>
+<Lanes threads={["main", "worker"]} cells={["result[0]"]} memLabel="heap" steps={joinTrace} />
+</Figure>
+
+that guarantee is not a given. without `join()` (or some other synchronization), main could read `result[0]` and see `0` even after the worker wrote 5050. the rule that makes `join()` safe is called happens-before, and it's the whole [java memory model](/learn/concurrency/java-memory-model) chapter.
+
+the JVM exits when the last **non-daemon** thread ends. `main` is non-daemon, threads you create inherit the flag from their creator, and daemon threads (the JVM's own helpers, or yours with `.daemon()`) don't keep the process alive. when the JVM leaves, it doesn't stop them politely. it just leaves:
+
+```java title="Main.java" run output="main done"
+void main() throws InterruptedException {
+    Thread t = Thread.ofPlatform().daemon().start(() -> {
+        try {
+            Thread.sleep(10_000);
+        } catch (InterruptedException e) {
+        } finally {
+            IO.println("cleanup");
+        }
+    });
+    Thread.sleep(100);
+    IO.println("main done");
+}
+```
+
+<Figure wide caption={<>the daemon never wakes up. its <code>finally</code> is <C k="dead">skipped</C>, which is why daemon threads must never own anything that needs closing (files, transactions, half-written output).</>}>
+<Lanes threads={["main", "daemon"]} steps={daemonTrace} />
+</Figure>
+
+## stopping a thread: interrupt, politely
+
+there's no safe way to kill a thread from outside. `Thread.stop()` could kill a thread halfway through updating an object (leaving it broken for everyone else), so it was deprecated in java 1.2, and on java 25 it just throws `UnsupportedOperationException`.
+
+what you get instead is **interruption**: a boolean flag on the thread that means "please stop when convenient". `t.interrupt()` sets it. blocking methods like `sleep`, `wait` and `join` notice it, clear it, and throw `InterruptedException`. long loops check `Thread.currentThread().isInterrupted()` themselves.
+
+```java title="Main.java" run output="interrupted! flag is now false\nsleeper is TERMINATED"
+void main() throws InterruptedException {
+    Thread sleeper = Thread.ofPlatform().name("sleeper").start(() -> {
+        try {
+            Thread.sleep(60_000);
+            IO.println("woke up normally");
+        } catch (InterruptedException e) {
+            IO.println("interrupted! flag is now " + Thread.currentThread().isInterrupted());
+        }
+    });
+    Thread.sleep(100);
+    sleeper.interrupt();
+    sleeper.join();
+    IO.println(sleeper.getName() + " is " + sleeper.getState());
+}
+```
+
+<Gotcha title="don't swallow InterruptedException">
+the exception clears the flag. if you catch it and do nothing, the interruption is gone, and whoever asked your thread to stop (an executor shutting down, a [structured scope](/learn/concurrency/structured-concurrency) cancelling) never finds out. either let it propagate, or put the flag back:
+
+```java
+catch (InterruptedException e) {
+    Thread.currentThread().interrupt(); // restore it for the code above you
+    return;
+}
+```
+</Gotcha>
+
+an uncaught exception, on the other hand, kills only the thread it was thrown in. the JVM prints `Exception in thread "Thread-0" ...` to stderr and the other threads carry on like nothing happened, which is exactly how background failures go unnoticed in prod. if it matters, set an `UncaughtExceptionHandler` or (better) run the task on an [executor](/learn/concurrency/executors) and check its `Future`.
+
+## why you won't create many of these
+
+every thread in this chapter (except `c` up there) is a **platform thread**: a thin wrapper around one OS thread, 1:1. the OS reserves a stack for each (2 MB by default on jdk 25 on an arm mac, `-Xss`), schedules it, and charges a context switch every time it swaps one out. a few thousand are fine. a hundred thousand is not.
+
+so real code mostly does one of two things: reuse a small, fixed set of platform threads through a [thread pool](/learn/concurrency/executors), or use [virtual threads](/learn/concurrency/virtual-threads), which are cheap enough to create one per task. the six states, `join`, interrupts and daemons all work the same way for both.
+
+<Interview q="what's the difference between calling start() and run() on a Thread?">
+`start()` creates a new OS thread and runs `run()` on it, concurrently with the caller. calling `run()` directly is an ordinary method call on the current thread, so nothing runs in parallel. a thread can be started only once: a second `start()` throws `IllegalThreadStateException`, even after it has terminated.
+</Interview>
+
+<Keylines>
+- a thread is a stack plus a program counter. the heap is shared by all of them.
+- nothing runs until `start()`. `run()` is just a method call.
+- six states: NEW, RUNNABLE, BLOCKED, WAITING, TIMED_WAITING, TERMINATED. BLOCKED is only for `synchronized`.
+- `join()` waits for a thread and makes its writes visible to you.
+- the JVM exits when the last non-daemon thread ends, and daemons die mid-sentence.
+- you can't kill a thread. you can only interrupt it and hope it listens.
+</Keylines>

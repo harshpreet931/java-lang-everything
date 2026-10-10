@@ -1,0 +1,127 @@
+import { SimdLanes } from "@/components/figures/performance/SimdLanes";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+modern CPUs have **SIMD** instructions: one instruction that adds, multiplies or compares several numbers at once, packed side by side in a wide register (**lanes**). the **Vector API** (`jdk.incubator.vector`) lets java code ask for that explicitly, portably: write it once with `FloatVector`, and the JIT emits NEON on ARM or AVX on x86.
+
+it's been incubating since java 16 and is still incubating in java 27 (the twelfth round, [JEP 537](https://openjdk.org/jeps/537)): it's waiting for [valhalla's](/learn/future/valhalla) value classes before it can be finalized.
+</InShort>
+
+## the picture
+
+a checkout with one cashier scanning one item at a time, versus a cashier with a scanner wide enough to read four items in one beep. the work per item is the same; the number of beeps drops by four. a 128-bit register holds four 32-bit floats, so one instruction does four multiply-adds. a 512-bit one (AVX-512 on some x86 servers) does sixteen.
+
+<Figure wide caption={<>step through <code>c = a × b + c</code> on 18 floats, then change the register width. <C k="hot">amber</C> lanes are one instruction; <C k="meta">purple</C> is the scalar tail left over when the array doesn't divide evenly. this mac's preferred shape is 128 bits.</>}>
+<SimdLanes />
+</Figure>
+
+## the code
+
+the element-wise loop, both ways. the vector version processes `SPECIES.length()` elements per iteration, then mops up the tail:
+
+```java title="Main.java"
+import jdk.incubator.vector.*;
+
+static final VectorSpecies<Float> SPECIES = FloatVector.SPECIES_PREFERRED;
+
+static void scalar(float[] a, float[] b, float[] c) {
+    for (int i = 0; i < a.length; i++) c[i] = a[i] * b[i] + c[i];
+}
+
+static void vector(float[] a, float[] b, float[] c) {
+    int i = 0;
+    int upper = SPECIES.loopBound(a.length);
+    for (; i < upper; i += SPECIES.length()) {
+        FloatVector va = FloatVector.fromArray(SPECIES, a, i);
+        FloatVector vb = FloatVector.fromArray(SPECIES, b, i);
+        FloatVector vc = FloatVector.fromArray(SPECIES, c, i);
+        va.fma(vb, vc).intoArray(c, i);              // c = a * b + c, one lane per element
+    }
+    for (; i < a.length; i++) c[i] = a[i] * b[i] + c[i];   // the tail that doesn't fill a vector
+}
+
+void main() {
+    IO.println(SPECIES + ": " + SPECIES.length() + " lanes of float, " + SPECIES.vectorBitSize() + " bits");
+    float[] a = new float[10], b = new float[10], c1 = new float[10], c2 = new float[10];
+    for (int i = 0; i < 10; i++) { a[i] = i; b[i] = 2; c1[i] = c2[i] = 1; }
+    scalar(a, b, c1);
+    vector(a, b, c2);
+    IO.println(java.util.Arrays.toString(c1));
+    IO.println(java.util.Arrays.toString(c2));
+}
+```
+
+an incubator module isn't resolved by default, so it needs a flag at compile time and at run time (which is also why there's no run button here):
+
+```bash
+$ java --add-modules jdk.incubator.vector Main.java
+WARNING: Using incubator modules: jdk.incubator.vector
+Species[float, 4, S_128_BIT]: 4 lanes of float, 128 bits
+[1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0]
+[1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0]
+```
+
+<Figure caption={<>the main types in <code>jdk.incubator.vector</code>. the <C k="meta">purple</C> ones describe or transform vectors rather than hold data.</>}>
+<Tree>{`
+jdk.incubator.vector
+    Vector<E>                        // a fixed-size sequence of lanes, value-based
+        ByteVector  ShortVector  IntVector  LongVector
+        FloatVector  DoubleVector    // fromArray, add, mul, fma, compare, reduceLanes...
+    VectorSpecies<E> #meta           // element type x shape: SPECIES_128, SPECIES_PREFERRED...
+    VectorShape #meta                // S_64_BIT .. S_512_BIT, S_Max_BIT
+    VectorMask<E> #meta              // one boolean per lane: results of compare, masked ops and tails
+    VectorShuffle<E> #meta           // lane rearrangements
+    VectorOperators #meta            // ADD, MUL, MAX, ABS, SQRT... as constants for lanewise and reduceLanes
+`}</Tree>
+</Figure>
+
+the pieces: a **species** is element type plus shape (`float` × 128 bits = 4 lanes). `SPECIES_PREFERRED` asks for the widest shape this CPU handles well, so the same code uses 4 lanes here and 8 or 16 on an AVX2 or AVX-512 machine. `fromArray`/`intoArray` load and store whole registers, `fma` is a fused multiply-add per lane, and `loopBound` rounds the length down to a multiple of the lane count. there are lane-wise operations for everything arithmetic, comparisons that produce **masks**, masked loads for tails, shuffles, and **reductions** that combine all lanes into one value.
+
+## does it actually help?
+
+measured with [JMH](/learn/performance/jmh) on the M4 Pro, 1024 floats, scalar vs Vector API:
+
+<Figure caption={<>ns per call (the whole 1024-element loop). element-wise, the plain loop was <C k="live">already faster</C>: C2 vectorized it by itself. for the dot product, the plain loop can't be vectorized automatically, and the Vector API is <C k="live">4.2× faster</C>.</>}>
+<Bench
+  unit="ns/op"
+  digits={1}
+  data={[
+    { label: "c = a*b + c, plain loop", value: 100.6, err: 1.05, tone: "live" },
+    { label: "c = a*b + c, Vector API", value: 122.1, err: 2.94 },
+    { label: "dot product, plain loop", value: 723.7, err: 58.2, tone: "dead" },
+    { label: "dot product, Vector API", value: 171.7, err: 2.89, tone: "live" },
+  ]}
+/>
+</Figure>
+
+that's the honest story of the Vector API. C2 has had an **auto-vectorizer** (SuperWord) for years: simple element-wise loops over arrays, like the first one, already turn into SIMD instructions with no help, and here the hand-written version was slightly slower.
+
+but the dot product (`sum += a[i] * b[i]`) is a *reduction*, and floating-point addition isn't associative: `(x + y) + z` can differ from `x + (y + z)` in the last bits ([floating point](/learn/basics/floating-point)). adding four partial sums in parallel changes the order of the additions, so the JIT isn't allowed to do it for you; it has to add one element at a time, each addition waiting on the last. `reduceLanes(ADD)` is you saying "i accept a different rounding order", and then four lanes run in parallel. same for code the auto-vectorizer just doesn't recognize: branches turned into masks, lookups through shuffles, mixed types.
+
+<Quiz question="why can't the JIT auto-vectorize sum += a[i] * b[i] over floats, when it vectorized c[i] = a[i] * b[i] + c[i]?" options={["reductions are too hard to detect", "it would change the order of floating-point additions, and so possibly the result", "float multiplication isn't supported in SIMD", "the loop has a data dependency on the array"]} answer={1}>
+<Explain>
+it would change the result. vectorizing means keeping several partial sums and adding them together at the end, which reorders the additions, and float addition isn't associative, so the answer could differ in the last bits. java guarantees the exact sequential result, so the JIT can't. for `int` sums it can (integer addition is associative, overflow and all), and C2 does vectorize integer reductions. the element-wise loop has no such problem: each `c[i]` is computed independently.
+</Explain>
+</Quiz>
+
+## why it's still incubating
+
+the API was ready years ago. what it's waiting for is [valhalla](/learn/future/valhalla). a `FloatVector` is a value: it has no meaningful identity, you never want to compare two with `==` or lock on one, and the JIT tries hard to keep it in a register and never allocate it. today it's an ordinary class marked *value-based*, and when the JIT can't keep a vector in a register (it escapes, or the code isn't compiled yet), it really does allocate an object per vector, and performance collapses. the plan in the JEP is to turn `Vector` and its subclasses into value classes once valhalla's are available as a preview, move the API from incubator to preview, and then finalize it.
+
+incubator status has practical consequences: the package is `jdk.incubator.vector`, it needs `--add-modules` everywhere, it prints that warning at startup, and the API can still change between releases (it's had small changes along the way). libraries that want SIMD today mostly use it behind a runtime check (Lucene does this for vector search), or rely on the auto-vectorizer.
+
+<Gotcha title="the slow path is very slow">
+the Vector API is fast only when C2 has compiled the code and every vector stays in a register. in the interpreter, in C1-compiled code, or when a `FloatVector` escapes into a field or a collection, each vector is a real heap object and each operation a real method call, often tens of times slower than the scalar loop. always benchmark the steady state with JMH, keep vector code in small hot methods, and never store vectors in fields or pass them around between methods that might not get inlined.
+</Gotcha>
+
+<Interview q="how can java code use SIMD instructions?">
+two ways. automatically: C2's auto-vectorizer turns simple loops over arrays (element-wise arithmetic, some integer reductions) into SIMD instructions on its own, so plain loops often already use NEON or AVX. explicitly: the Vector API, `jdk.incubator.vector`, where you write `FloatVector.fromArray(...).fma(...)` with a species like `SPECIES_PREFERRED`, and the JIT maps it to the best instructions for the CPU. it matters where auto-vectorization can't apply, like floating-point reductions, where reordering additions changes the result: on my M4 a dot product over 1024 floats went from 724 ns to 172 ns. it's still an incubator API in java 27, needs `--add-modules jdk.incubator.vector`, and is waiting on valhalla's value classes to be finalized.
+</Interview>
+
+<Keylines>
+- SIMD: one instruction, many lanes. 128-bit registers hold 4 floats, 512-bit hold 16.
+- the Vector API asks for it portably: species, `fromArray`, lane-wise ops, masks, `reduceLanes`.
+- C2 already auto-vectorizes simple loops. the API wins where it can't, like float reductions.
+- still incubating in java 27: `--add-modules jdk.incubator.vector`, waiting for valhalla.
+- fast only in hot, compiled code with vectors in registers. benchmark the steady state.
+</Keylines>

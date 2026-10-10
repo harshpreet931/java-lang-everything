@@ -1,0 +1,197 @@
+import { IndyLink } from "@/components/figures/meta/IndyLink";
+import { Bench } from "@/components/figures/meta/Bench";
+
+<InShort>
+the other four invoke instructions name the method they call. **`invokedynamic`** names a **bootstrap method** instead. the first time the instruction runs, the JVM calls that bootstrap, which returns a **`CallSite`** holding a [method handle](/learn/meta/method-handles-and-varhandles). the instruction is linked to it, and every later execution calls the handle directly.
+
+it's how java compiles lambdas, string `+`, records' `toString`/`equals`/`hashCode` and pattern `switch`, without baking the strategy into your class file.
+</InShort>
+
+## the picture
+
+you know how `"hi " + name` used to decompile to a `StringBuilder` chain, and on modern java it decompiles to... one weird instruction? that's this.
+
+think of a phone number that doesn't belong to anyone yet. the first time someone dials it, the call goes to an operator (the bootstrap method), who looks at what you're trying to do, figures out the best person to handle it, and wires that number straight to them, for good. every call after that rings through directly; the operator is never involved again.
+
+the point of the indirection: javac decides *what* the code means (concatenate these, implement `Supplier` with this method), but the *how* is decided at runtime, by JDK code that can get smarter in every release without you recompiling anything. the instruction was added in java 7, for dynamic languages on the JVM. java itself started using it in java 8. the [five invoke instructions](/learn/jvm/invoke-instructions) chapter has the comparison with the other four.
+
+## four call sites javac writes today
+
+all four of these came out of one file compiled with javac 25.
+
+<Figure wide caption={<>pick a call site and step through its first execution. the instruction and the bootstrap arguments are real <code>javap -v</code> output. watch step 5: once linked, the <C k="meta">bootstrap</C> is never called again.</>}>
+<IndyLink />
+</Figure>
+
+notice what's *in* the bootstrap arguments. for the lambda: a handle to the private method javac moved your lambda body into. for concatenation: a recipe string with `\u0001` where each argument goes. for the record: the component names and getters for its fields. for the switch: the case types, in order. javac hands over the facts and the JDK writes the code. the full story of each lives in its own chapter: [lambda internals](/learn/deep-dives/lambda-internals), [string concatenation](/learn/deep-dives/string-concatenation), [records](/learn/modern/records), [pattern matching](/learn/modern/pattern-matching).
+
+| feature | since | bootstrap |
+| --- | --- | --- |
+| lambdas and method refs | java 8 | `LambdaMetafactory.metafactory` |
+| string `+` | java 9 ([JEP 280](https://openjdk.org/jeps/280)) | `StringConcatFactory.makeConcatWithConstants` |
+| records' `toString`, `equals`, `hashCode` | java 16 | `ObjectMethods.bootstrap` |
+| pattern `switch` | java 21 | `SwitchBootstraps.typeSwitch` |
+| `switch` on an enum with patterns | java 21 | `SwitchBootstraps.enumSwitch` |
+
+## doing the JVM's job by hand
+
+a bootstrap method is a plain static method. nothing stops you calling one yourself, with the same arguments the JVM would pass, and looking at what comes back:
+
+```java title="Main.java" run output="ConstantCallSite\n(String,int)String\nhi ada #7"
+import java.lang.invoke.*;
+
+void main() throws Throwable {
+    // what the JVM does the first time it hits: "hi " + name + " #" + n
+    CallSite site = StringConcatFactory.makeConcatWithConstants(
+        MethodHandles.lookup(),
+        "makeConcatWithConstants",
+        MethodType.methodType(String.class, String.class, int.class),
+        "hi \u0001 #\u0001");
+
+    MethodHandle target = site.getTarget();
+    IO.println(site.getClass().getSimpleName());
+    IO.println(target.type());
+    IO.println((String) target.invokeExact("ada", 7));
+}
+```
+
+that's the whole protocol: a `Lookup` (so the bootstrap acts with your class's access rights), the name and type from the instruction, then the static arguments. out comes a `CallSite` whose target has *exactly* the type of the call site, so the JVM can call it with no adaptation.
+
+## write your own call site
+
+javac never lets you write `invokedynamic` yourself. but the [Class-File API](/learn/meta/class-file-api) does. here's a class, generated at runtime, whose method is one `invokedynamic` pointing at a bootstrap *we* wrote:
+
+```java title="Main.java" run output="bootstrap: linking 'greet' as ()String\nhello from a call site\nhello from a call site\nhello from a call site\nbootstrap ran 1 time(s)"
+import java.lang.classfile.ClassFile;
+import java.lang.constant.*;
+import java.lang.invoke.*;
+import static java.lang.constant.ConstantDescs.*;
+
+static int boots = 0;
+
+// the bootstrap method. the JVM calls this once per call site.
+static CallSite bsm(MethodHandles.Lookup caller, String name, MethodType type) {
+    boots++;
+    IO.println("bootstrap: linking '" + name + "' as " + type);
+    return new ConstantCallSite(MethodHandles.constant(String.class, "hello from a call site"));
+}
+
+void main() throws Throwable {
+    var bootstrap = MethodHandleDesc.ofMethod(DirectMethodHandleDesc.Kind.STATIC,
+        ClassDesc.of("Main"), "bsm",
+        MethodTypeDesc.of(CD_CallSite, CD_MethodHandles_Lookup, CD_String, CD_MethodType));
+    var greet = DynamicCallSiteDesc.of(bootstrap, "greet", MethodTypeDesc.of(CD_String));
+
+    byte[] bytes = ClassFile.of().build(ClassDesc.of("Hello"), cls -> cls
+        .withMethodBody("run", MethodTypeDesc.of(CD_String), ClassFile.ACC_PUBLIC | ClassFile.ACC_STATIC,
+            code -> code.invokedynamic(greet).areturn()));
+
+    Class<?> hello = MethodHandles.lookup().defineClass(bytes);
+    MethodHandle run = MethodHandles.lookup().findStatic(hello, "run", MethodType.methodType(String.class));
+    for (int i = 0; i < 3; i++) IO.println((String) run.invokeExact());
+    IO.println("bootstrap ran " + boots + " time(s)");
+}
+```
+
+three calls, one bootstrap. the instruction asked for a call named `greet` of type `()String`; our bootstrap answered with a constant handle, and from then on `Hello.run()` just returns the string.
+
+<Quiz question="the loop above calls Hello.run() three times. now imagine Hello had two separate invokedynamic instructions, both naming the same bootstrap, name and type. how many times would bsm run?" options={["once, it's the same bootstrap", "twice, once per instruction", "on every call"]} answer={1}>
+<Explain>
+twice. linking is per call site, which means per instruction in the bytecode, not per bootstrap method. that's why a program with a hundred lambdas pays the bootstrap cost a hundred times, once each, the first time each one runs. (the JDK caches a lot of the machinery underneath, so later sites are much cheaper than the first.)
+</Explain>
+</Quiz>
+
+## what linking costs
+
+the price of deciding at runtime is paid at runtime, once per call site. i timed first executions with `System.nanoTime()` in fresh JVMs (jdk 25, apple M4 Pro, five runs each, typical values):
+
+<Figure caption={<>log scale, microseconds. the very first lambda and the first concatenation pay for loading the whole <C k="meta">java.lang.invoke</C> machinery. later sites are cheaper, and a linked site costs <C k="live">well under a microsecond</C> even before the JIT touches it.</>}>
+<Bench
+  log
+  unit="µs"
+  digits={1}
+  data={[
+    { label: "first lambda in the JVM", value: 2160, tone: "hot" },
+    { label: "first string concat in the JVM", value: 410, tone: "hot" },
+    { label: "a concat with a new shape (String, int)", value: 830 },
+    { label: "another lambda site", value: 190 },
+    { label: "another concat site, same shape", value: 65 },
+    { label: "a linked lambda site, second execution", value: 0.7, tone: "live" },
+  ]}
+/>
+</Figure>
+
+a couple of milliseconds, once. it matters for startup (a big app links thousands of sites), and it's one of the things [CDS and the AOT cache](/learn/jvm/aot-and-leyden) chip away at. it doesn't matter at all for throughput: once linked and JIT-compiled, a lambda call is as fast as a call through an anonymous class, and a concatenation is usually faster than the `StringBuilder` code javac used to write.
+
+## call sites that change
+
+a `ConstantCallSite` is linked forever. that's what java's own features use, and it's what lets the JIT treat the target as a constant. but there are two more kinds, `MutableCallSite` and `VolatileCallSite`, whose target can be swapped at any time:
+
+```java title="Main.java" run output="[  ADA  ]\n[ada]"
+import java.lang.invoke.*;
+import static java.lang.invoke.MethodType.methodType;
+
+void main() throws Throwable {
+    var lookup = MethodHandles.lookup();
+    MethodHandle upper = lookup.findVirtual(String.class, "toUpperCase", methodType(String.class));
+    MethodHandle strip = lookup.findVirtual(String.class, "strip", methodType(String.class));
+
+    MutableCallSite site = new MutableCallSite(methodType(String.class, String.class));
+    MethodHandle call = site.dynamicInvoker();   // what an indy instruction would be bound to
+
+    site.setTarget(upper);
+    IO.println("[" + (String) call.invokeExact("  ada  ") + "]");
+    site.setTarget(strip);                       // relink: same call site, new behaviour
+    IO.println("[" + (String) call.invokeExact("  ada  ") + "]");
+}
+```
+
+this is what invokedynamic was originally built for. in a dynamic language, `a.foo()` can't be resolved at compile time: it depends on what `a` turns out to be. JRuby's bootstrap returns a mutable call site whose target is a guard: "if the receiver is the class i saw last time, call that method directly, else relink". that's an inline cache, the same trick HotSpot uses internally for virtual calls ([JIT optimizations](/learn/jvm/jit-optimizations)), built out of [method handle combinators](/learn/meta/method-handles-and-varhandles). when the target changes, the JIT throws away code that inlined the old one and recompiles.
+
+<Figure caption={<>an inline cache built from a mutable call site, the way a dynamic language uses it. step through: the <C k="meta">guard</C> is a method handle, and every relink swaps the call site's target.</>}>
+<Slides>
+<Slide note="a.foo() in a dynamic language. javac (or the JRuby compiler) can't know what a is, so it emits invokedynamic with a bootstrap that returns a MutableCallSite whose first target is 'look it up and relink'.">
+<div className="flex flex-col gap-2 text-12">
+<div className="rounded-md bg-well px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-2)]">call site <span className="text-faint">a.foo()</span> → target: <span className="text-meta">lookupAndRelink</span></div>
+</div>
+</Slide>
+<Slide note="first call: a is a String. the fallback finds String's foo, builds guardWithTest(isString, String.foo, lookupAndRelink) and setTarget()s it. next time, a String goes straight through.">
+<div className="flex flex-col gap-2 text-12">
+<div className="rounded-md bg-well px-3 py-2 shadow-[inset_0_0_0_1px_var(--hot)]">call site <span className="text-faint">a.foo()</span> → target: <span className="text-meta">guard</span></div>
+<div className="ml-6 rounded-md px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-2)]"><span className="text-meta">a is String?</span> <span className="text-live">yes → String.foo</span> · <span className="text-faint">no → lookupAndRelink</span></div>
+</div>
+</Slide>
+<Slide note="an Array shows up. the guard fails, the fallback runs again and chains a second guard in front. two types, still a direct call either way, and the JIT can inline both.">
+<div className="flex flex-col gap-2 text-12">
+<div className="rounded-md bg-well px-3 py-2 shadow-[inset_0_0_0_1px_var(--hot)]">call site <span className="text-faint">a.foo()</span> → target: <span className="text-meta">guard chain</span></div>
+<div className="ml-6 rounded-md px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-2)]"><span className="text-meta">a is Array?</span> <span className="text-live">yes → Array.foo</span></div>
+<div className="ml-6 rounded-md px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-2)]"><span className="text-meta">a is String?</span> <span className="text-live">yes → String.foo</span> · <span className="text-faint">no → lookupAndRelink</span></div>
+</div>
+</Slide>
+<Slide note="too many types at one site and the chain stops paying off. the runtime gives up and links a generic 'look up the method every time' target: the megamorphic case, same as in HotSpot's own inline caches.">
+<div className="flex flex-col gap-2 text-12">
+<div className="rounded-md bg-well px-3 py-2 shadow-[inset_0_0_0_1px_var(--dead)]">call site <span className="text-faint">a.foo()</span> → target: <span className="text-dead">genericLookup</span> <span className="text-faint">(megamorphic)</span></div>
+</div>
+</Slide>
+</Slides>
+</Figure>
+
+<Gotcha title="stack traces through generated code">
+when a lambda throws, the stack trace shows your `lambda$main$0` method and the frames around it, but the generated class's own frame (`C$$Lambda/0x00003fc001049000.run`) is hidden by default, and so are most `java.lang.invoke` frames. that's deliberate (they'd be noise), but it can make a trace look like your lambda was called from nowhere. `-XX:+UnlockDiagnosticVMOptions -XX:+ShowHiddenFrames` puts them back when you need to see the plumbing.
+</Gotcha>
+
+<Deep title="the constant-pool cousin: dynamic constants">
+java 11 added the same idea for constants: a `CONSTANT_Dynamic` entry in the constant pool ([JEP 309](https://openjdk.org/jeps/309)), "condy" for short. instead of a literal, the entry names a bootstrap method; the first `ldc` of that entry calls the bootstrap and caches whatever it returns as the constant, forever. it's a lazily computed `static final` that doesn't need a class initializer. javac uses it in at least one place you can see: put enum constants as case labels in a pattern `switch` over a sealed interface, and `javap -v` shows entries like `Dynamic #2:invoke:Ljava/lang/Enum$EnumDesc;`, whose bootstrap is `ConstantBootstraps.invoke` calling `EnumDesc.of`. those constants are then passed as static arguments to `SwitchBootstraps.typeSwitch`. the Class-File API can emit them with `DynamicConstantDesc`. frameworks that generate bytecode use it to embed objects that can't be written as literals.
+</Deep>
+
+<Interview q="how are lambdas compiled? are they anonymous inner classes?">
+no. javac moves the lambda's body into a private synthetic method (like `lambda$main$0`) and replaces the lambda expression with an `invokedynamic` instruction whose bootstrap is `LambdaMetafactory.metafactory`. the first time that instruction runs, the metafactory generates a small hidden class implementing the functional interface, whose method calls the synthetic one, and links the call site to a factory for it. a non-capturing lambda returns the same instance every time; a capturing one allocates an object holding the captured values. no class files on disk, and the JDK can change the strategy without recompiling your code. the same instruction powers string concatenation, records' `equals`/`hashCode`/`toString`, and pattern `switch`.
+</Interview>
+
+<Keylines>
+- `invokedynamic` names a bootstrap method, not a target.
+- first execution: the JVM calls the bootstrap, which returns a `CallSite`. linked once, per instruction.
+- javac describes *what*; JDK code decides *how*, and can improve without recompiling you.
+- lambdas, string `+`, record methods and pattern `switch` all compile to it.
+- linking costs microseconds to milliseconds once. a linked site is as cheap as a direct call.
+</Keylines>

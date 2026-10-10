@@ -1,0 +1,136 @@
+import { WideningMap } from "@/components/figures/basics/WideningMap";
+import { NarrowingChop } from "@/components/figures/basics/NarrowingChop";
+import { OverflowDial } from "@/components/figures/basics/OverflowDial";
+
+<InShort>
+java converts a smaller type to a bigger one for you (**widening**), and makes you write a **cast** to go the other way (**narrowing**), because narrowing can lose information. integer math that doesn't fit doesn't fail, it **wraps around**: `Integer.MAX_VALUE + 1` is `Integer.MIN_VALUE`, silently.
+</InShort>
+
+## the picture
+
+pouring water between glasses. a small glass into a big one always fits, so nobody needs to ask (widening). a big glass into a small one might spill, so java makes you say "yes, i know, pour anyway" out loud, and that's what a cast is (narrowing). whatever doesn't fit is gone.
+
+<Figure caption={<>arrows point the way java converts automatically. going against an arrow needs a cast. the <C k="hot">dashed</C> ones are allowed without a cast but can round: pick one to see it happen.</>}>
+<WideningMap />
+</Figure>
+
+## widening: automatic
+
+any arrow in that chain happens on its own: in assignments, method calls, and mixed arithmetic.
+
+```java
+int count = 42;
+long big = count;          // int → long, fine
+double avg = count / 5.0;  // count is widened to double before dividing: 8.4
+int code = 'A' + 1;        // char → int: 66
+```
+
+it's called "widening" because the target can hold every value of the source. well, almost: a `float` has only 24 bits of precision and an `int` has 32, so big ints get rounded on the way into a float, and big longs on the way into a float or double. no cast, no warning. that's the dashed arrows above.
+
+## narrowing: you have to ask
+
+```java title="Main.java" run output="3 -3 2147483647 0\n-56 44 A 4464 -1294967296"
+void main() {
+    IO.println((int) 3.99 + " " + (int) -3.99 + " " + (int) 1e20 + " " + (int) Double.NaN);
+    IO.println((byte) 200 + " " + (byte) 300 + " " + (char) 65 + " " + (short) 70000 + " " + (int) 3_000_000_000L);
+}
+```
+
+two completely different rules hiding in there:
+
+- **decimal → whole number** truncates toward zero (3.99 → 3, -3.99 → -3), and if the value is too big it **saturates** at the type's max or min: `(int) 1e20` is 2,147,483,647. `NaN` becomes 0. if you wanted rounding, use `Math.round`.
+- **whole number → smaller whole number** just keeps the low bits and throws the rest away. no saturation, no rounding. that's how 200 turns into -56.
+
+<Figure wide caption={<>type an int (or pick one), choose the target type. the <C k="dead">struck-out</C> bits are dropped. the <C k="hot">amber</C> bit is the one that becomes the sign bit of the smaller type, which is why 200 comes out negative.</>}>
+<NarrowingChop />
+</Figure>
+
+<Predict options={["300", "44", "-56", "ClassCastException"]} answer={1}>
+```java
+int x = 300;
+byte b = (byte) x;
+IO.println(b);
+```
+<Explain>
+300 is `1 0010 1100` in binary: 9 bits. a byte keeps the low 8, `0010 1100`, which is 44. the leading 1 (worth 256) just falls off. (and casts between primitives never throw. `ClassCastException` is for objects.)
+</Explain>
+</Predict>
+
+## overflow: the odometer
+
+an `int` isn't a number line that goes on forever. it's a circle of 2³² values. counting up from 0 you go clockwise through the positives to `MAX_VALUE`, and one more step lands on `MIN_VALUE`, the most negative int, and you keep counting up from there through the negatives back to 0. like a car's odometer rolling over from 99999 to 00000, except the other side of the dial is negative.
+
+<Figure wide caption={<>press + 1 near the bottom of the dial. the needle crosses the <C k="dead">red line</C> between MAX and MIN and just keeps going. start with byte (256 values, you can see every tick), then try int. the bits below are the real ones.</>}>
+<OverflowDial />
+</Figure>
+
+```java title="Main.java" run output="-2147483648\n-294967296\nfalse"
+void main() {
+    IO.println(Integer.MAX_VALUE + 1);
+    int big = 2_000_000_000;
+    IO.println(big + big);
+    IO.println(big + big > 0);
+}
+```
+
+no exception, no warning, no NaN. the CPU adds the bits and drops the carry, and java defines that as correct. it's fast, and it's also how you get a negative account balance after a big deposit.
+
+the circle is lopsided: there's one more negative value than positive, because 0 takes a spot on the positive side. so `-Integer.MIN_VALUE` has nowhere to go and wraps back to itself.
+
+<Gotcha title="the math overflows before it's widened">
+```java title="Main.java" run output="500654080 86400000000"
+void main() {
+    long microsPerDay = 24 * 60 * 60 * 1000 * 1000;   // [!code error]
+    long fixed = 24L * 60 * 60 * 1000 * 1000;
+    IO.println(microsPerDay + " " + fixed);
+}
+```
+
+the variable is a `long`, but the right side is all `int` literals, so it's computed in `int`, overflows, and only the wrapped result gets widened to `long`. the `L` on the first literal makes the whole chain `long` math. this exact bug is a classic java puzzler, and it ships to production regularly.
+</Gotcha>
+
+## catching it when it matters
+
+when an overflow would be a bug (money, sizes, counters that must never go negative), ask for an exception instead of a wrap. `Math` has exact versions of the risky operations:
+
+```java title="Main.java" run output="adding...\nException in thread \"main\" java.lang.ArithmeticException: integer overflow"
+void main() {
+    IO.println("adding...");
+    int total = Math.addExact(Integer.MAX_VALUE, 1);
+    IO.println(total);
+}
+```
+
+`addExact`, `subtractExact`, `multiplyExact`, `incrementExact`, `negateExact` (for `int` and `long`), and `toIntExact` for a `long` that has to fit in an `int`. they cost about nothing, and they turn a silent wrong number into a loud stack trace. for numbers with no upper limit at all, there's `BigInteger` (see [math and random numbers](/learn/core-api/math-and-random)).
+
+## the sneaky cast in +=
+
+compound assignment casts the result back to the variable's type for you. the plain version doesn't:
+
+```java title="Main.java" run output="54 b"
+void main() {
+    byte b = 10;
+    b += 300;          // b = (byte) (b + 300)
+    char c = 'a';
+    c += 1;            // c = (char) (c + 1)
+    IO.println(b + " " + c);
+}
+```
+
+`b = b + 300` wouldn't even compile (`error: incompatible types: possible lossy conversion from int to byte`), because `b + 300` is an `int`. but `b += 300` quietly narrows 310 to 54. convenient for `char`s and counters, surprising everywhere else.
+
+<Deep title="why two's complement">
+to negate a number: flip every bit, then add 1. so `-1` is all 32 bits set, and `-2147483648` is a 1 followed by 31 zeros. the payoff is that the CPU doesn't need separate circuits for signed and unsigned addition: it adds the bit patterns the same way either way, and the wrap-around falls out for free. the cost is the lopsided range (−2³¹ to 2³¹ − 1) and the fact that the top bit doubles as the sign. flip the leftmost bit in any of the bit figures on this page and watch the number jump by 2³¹. more about how the integer types are stored in [variables and primitives](/learn/basics/variables-and-primitives).
+</Deep>
+
+<Interview q="why can Math.abs return a negative number?">
+because `Math.abs(Integer.MIN_VALUE)` has to return +2,147,483,648, and that doesn't fit in an `int`: the max is 2,147,483,647. negating `MIN_VALUE` wraps around to `MIN_VALUE` itself, so `Math.abs` returns -2,147,483,648. it bites code like `bucket = Math.abs(hash) % n`, which goes negative for exactly one hash value in four billion. the fix is `Math.floorMod(hash, n)`, or `Math.absExact`, which throws instead.
+</Interview>
+
+<Keylines>
+- small → big is automatic (widening). big → small needs a cast (narrowing).
+- narrowing a whole number keeps the low bits. decimal → int truncates, and saturates when too big.
+- int and long math wraps around silently. `MAX_VALUE + 1 == MIN_VALUE`.
+- a `long` on the left doesn't make the right side `long` math. put an `L` on the first literal.
+- when overflow would be a bug, use `Math.addExact` and friends. they throw instead of lying.
+</Keylines>

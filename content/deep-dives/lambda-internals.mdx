@@ -1,0 +1,140 @@
+import { LambdaAnatomy } from "@/components/figures/deep-dives/LambdaAnatomy";
+
+<InShort>
+a lambda is **not** an anonymous class in disguise. javac moves its body into a **private synthetic method** (`lambda$main$0`) and leaves one **`invokedynamic`** where the lambda was. the first time that instruction runs, **`LambdaMetafactory`** generates a small **hidden class** implementing your interface and links the call site. a lambda that captures nothing then returns the **same object** forever; a capturing one allocates a new object per evaluation.
+</InShort>
+
+## the picture
+
+the [lambdas chapter](/learn/functional/lambdas) covers the syntax and the effectively-final rule. this one compiles a lambda and looks at every byte.
+
+here's the experiment: one file, two lambdas and an anonymous class, compiled with javac 25:
+
+```bash
+$ javac -d out Shout.java && ls out
+Shout$1.class   Shout.class
+```
+
+the anonymous `Runnable` became `Shout$1.class`, a real file, the way java has always compiled inner classes. the two lambdas left no files behind at all. so where did they go?
+
+think of it as a recipe versus a kitchen. an anonymous class ships you a whole kitchen (a class file) per recipe. a lambda ships only the recipe (a method) and a note saying "build a kitchen for this when someone first asks". the JVM builds it at run time, in memory, and can decide how.
+
+<Figure caption={<>pick one. left: what javac writes into <code>Shout.class</code> (real <code>javap -c -p</code>). right: the class that exists at run time (for the lambdas, the real hidden class, dumped from a live JVM). the <C k="hot">amber</C> lines are where the lambda went.</>}>
+<LambdaAnatomy />
+</Figure>
+
+## invokedynamic and the bootstrap
+
+the `invokedynamic` instruction for `s -> s.toUpperCase()` points at a bootstrap method plus three static arguments. here they are, straight from `javap -v`:
+
+```bash
+$ javap -v Shout | grep -A5 BootstrapMethods
+BootstrapMethods:
+  0: #80 REF_invokeStatic java/lang/invoke/LambdaMetafactory.metafactory:(...)Ljava/lang/invoke/CallSite;
+    Method arguments:
+      #68 (Ljava/lang/Object;)Ljava/lang/Object;
+      #69 REF_invokeStatic Shout.lambda$main$0:(Ljava/lang/String;)Ljava/lang/String;
+      #72 (Ljava/lang/String;)Ljava/lang/String;
+```
+
+read them as: "implement a method whose erased signature is `Object → Object` (that's `Function.apply`), by calling `Shout.lambda$main$0`, and the specialized signature is `String → String`". the indy instruction itself says `apply:()Ljava/util/function/Function;`, meaning "a factory that takes no captured values and returns a `Function`". for the capturing lambda it's `apply:(Ljava/lang/String;)...`: the captured `bang` is an argument to the factory.
+
+<Figure caption="hover a stage. everything up to the call site happens once per lambda expression in your code, the first time it runs. after that, the indy instruction is as cheap as a field load (non-capturing) or a new (capturing).">
+<Flow
+  stages={[
+    { label: "invokedynamic", sub: "unlinked", note: "first execution of this lambda expression. the JVM calls the bootstrap method named in BootstrapMethods." },
+    { label: "metafactory", sub: "LambdaMetafactory", note: "gets a Lookup into your class, the interface method to implement, a MethodHandle to lambda$main$0 and the specialized type." },
+    { label: "spin a class", sub: "Shout$$Lambda", note: "InnerClassLambdaMetafactory writes bytecode for a final class implementing Function, with one field per captured value, using the ClassFile API." },
+    { label: "define it hidden", sub: "nestmate of Shout", note: "defined with Lookup.defineHiddenClass as a nestmate, so it may call your private lambda$ method. no name in any class loader, unloadable with its host." },
+    { label: "ConstantCallSite", sub: "linked for good", note: "non-capturing: the target is a constant, one pre-built instance. capturing: the target is the constructor." },
+  ]}
+/>
+</Figure>
+
+you can watch the classes being generated with the property named in `InnerClassLambdaMetafactory`:
+
+```bash
+$ java -Djdk.invoke.LambdaMetafactory.dumpProxyClassFiles=true Shout
+HI HI!
+anon
+$ ls DUMP_LAMBDA_PROXY_CLASS_FILES
+Shout$$Lambda.0x00001f0001040210.class   Shout$$Lambda.0x00001f0001040458.class
+```
+
+(older guides say `-Djdk.internal.lambda.dumpProxyClasses=<dir>`. that property is gone: the jdk 21 and jdk 25 sources both read the one above, and the directory name is fixed.)
+
+## the same object, or a new one
+
+the last stage of that flow is the part interviewers love. when there is nothing to capture, the metafactory builds one instance up front and links the call site to a *constant*. when there is, it links to the constructor:
+
+<Predict options={["true true, then true true", "true true, then false false", "false false, then false false"]} answer={1}>
+```java
+var plain = new ArrayList<Supplier<String>>();
+var capturing = new ArrayList<Supplier<String>>();
+for (int i = 0; i < 3; i++) {
+    plain.add(() -> "same");      // captures nothing
+    int n = i;
+    capturing.add(() -> "n=" + n); // captures n
+}
+IO.println((plain.get(0) == plain.get(1)) + " " + (plain.get(1) == plain.get(2)));
+IO.println((capturing.get(0) == capturing.get(1)) + " " + (capturing.get(1) == capturing.get(2)));
+```
+<Explain>
+same expression, evaluated three times. the non-capturing one is linked to a constant, so you get the identical object back every time: `true true`. the capturing one runs the generated constructor each time with a different `n`: three objects, `false false`. that's an implementation detail (the JLS only says a lambda evaluation produces "an instance", maybe new, maybe not), so never use `==` on lambdas, but it's how HotSpot behaves.
+</Explain>
+</Predict>
+
+```java run output="true true\nfalse false\ntrue true"
+void main() {
+    var plain = new ArrayList<Supplier<String>>();
+    var capturing = new ArrayList<Supplier<String>>();
+    for (int i = 0; i < 3; i++) {
+        plain.add(() -> "same");      // captures nothing
+        int n = i;
+        capturing.add(() -> "n=" + n); // captures n
+    }
+    IO.println((plain.get(0) == plain.get(1)) + " " + (plain.get(1) == plain.get(2)));
+    IO.println((capturing.get(0) == capturing.get(1)) + " " + (capturing.get(1) == capturing.get(2)));
+    IO.println(plain.get(0).getClass().isHidden() + " " + plain.get(0).getClass().isSynthetic());
+}
+```
+
+the last line confirms the class is hidden (no class loader can find it by name) and synthetic.
+
+## what counts as capturing
+
+| you write | javac generates | captures |
+| --- | --- | --- |
+| `s -> s.length()` | `private static` lambda method | nothing: one shared instance |
+| `String::length` | no method at all, the handle points at `String.length` | nothing |
+| `s -> s + bang` (a local) | `private static`, `bang` becomes a parameter | the value of `bang`, copied into a final field |
+| `s -> s + this.prefix`, or any instance field or method | `private` *instance* lambda method | `this`, the whole enclosing object |
+| `prefix::concat` (a bound reference) | nothing | the receiver object `prefix` |
+
+we checked the first and fourth rows with `javap -p` on a class with both: a lambda that touches nothing compiled to `private static void lambda$...`, one that reads a field compiled to `private void lambda$...` (no `static`), which means the generated class keeps a reference to `this`.
+
+<Gotcha title="a lambda that mentions a field keeps the whole object alive">
+using an instance field inside a lambda captures `this`, not the field. register that lambda as a listener somewhere long-lived and the entire enclosing object (and everything it references) can't be collected. if you only need the value, copy it to a local first: `var p = prefix; return s -> p + s;`. anonymous classes used to be worse: they held `this` even when they never used it. since jdk 18, javac drops that field when the body doesn't need it (the constructor still receives it; there's just no `this$0` to keep). we checked: javac 25's `Outer$1` has no fields at all.
+</Gotcha>
+
+## why bother with all this?
+
+because "how to turn a lambda into an object" is now a decision the JDK makes at run time instead of a decision javac baked into your jar in 2014:
+
+- **no class file per lambda.** a big codebase has thousands of lambdas. with inner classes that's thousands of files to load, verify and keep in metaspace whether or not they ever run. with indy, nothing exists until a lambda is first evaluated.
+- **free singletons.** the non-capturing case allocates nothing, ever. an anonymous class can't do that without you writing a static field by hand.
+- **the strategy can change.** jdk 21 generated these classes with an internal copy of ASM; jdk 25 writes them with the ClassFile API (we diffed the two sources). code compiled years ago didn't notice and didn't need to. [string concatenation](/learn/deep-dives/string-concatenation) uses the same trick, and so do records' `toString`/`equals`/`hashCode` (see [invokedynamic](/learn/meta/invokedynamic)).
+
+the cost is paid once per lambda expression, on first use: running the bootstrap, generating and defining a class. that's measurable at startup (thousands of lambdas, thousands of tiny classes), and it's exactly what [CDS and the AOT cache](/learn/jvm/aot-and-leyden) can archive ahead of time: the `CDS.isDumpingArchive()` check in the metafactory is there for that.
+
+<Interview q="how are lambdas implemented in the JVM? are they anonymous inner classes?">
+no. javac compiles the lambda body into a private synthetic method in the same class (static if it doesn't use `this`) and replaces the expression with an `invokedynamic` whose bootstrap is `LambdaMetafactory.metafactory`. on first execution the metafactory spins a hidden class that implements the functional interface, stores captured values in final fields, and forwards the interface method to the synthetic method; the call site is then linked permanently. if nothing is captured, the call site returns one pre-built instance, so every evaluation is the same object; capturing lambdas allocate per evaluation (unless escape analysis removes it). no `.class` file is produced per lambda, unlike anonymous classes, and you can dump the generated classes with `-Djdk.invoke.LambdaMetafactory.dumpProxyClassFiles`.
+</Interview>
+
+<Keylines>
+- a lambda body becomes a private method (`lambda$main$0`). the expression becomes one `invokedynamic`.
+- on first use, `LambdaMetafactory` generates a hidden class implementing the interface and links the call site for good.
+- no captures: one shared instance, zero allocation. captures: a new object per evaluation, fields hold the copies.
+- touching a field captures `this`. that's how lambdas leak whole objects.
+- no class file per lambda. dump the generated ones with `-Djdk.invoke.LambdaMetafactory.dumpProxyClassFiles`.
+</Keylines>

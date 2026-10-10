@@ -1,0 +1,203 @@
+import { RaceOdds } from "@/components/figures/concurrency/RaceOdds";
+import { Outcomes } from "@/components/figures/concurrency/Outcomes";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const counter = [
+  {
+    name: "int count; count++ twice",
+    rows: [
+      { id: "2", samples: 562821068, expect: "ACCEPTABLE", desc: "both increments landed" },
+      { id: "1", samples: 161958206, expect: "ACCEPTABLE_INTERESTING", desc: "lost update" },
+    ],
+  },
+];
+
+export const forced = [
+  { mem: { balance: 100 }, note: "the overdraft race from the race conditions chapter, but this time the test decides the interleaving." },
+  { ops: ["start t1", "check: yes", null], note: "t1 passes the check (100 >= 100)..." },
+  { ops: [null, { t: "parks in the gap", wait: true }, null], note: "...and the seam hook makes it count down t1InGap and park on t2Done, right between the check and the act." },
+  { ops: ["t1InGap.await()", { t: "WAITING", wait: true }, null], note: "the test now knows t1 is exactly where it wants it." },
+  { ops: ["start t2", { t: "WAITING", wait: true }, "check: yes"], note: "t2 runs the whole withdraw. its check still sees 100." },
+  { ops: [null, { t: "WAITING", wait: true }, "balance -= 100"], mem: { balance: 0 } },
+  { ops: [null, { t: "WAITING", wait: true }, "signal t2Done"], note: "t2 is done, and counts down t2Done." },
+  { ops: [null, { t: "balance -= 100", k: "dead" }, null], mem: { balance: { v: -100, k: "dead" } }, note: "t1 resumes and acts on its stale check. -100." },
+  { ops: [{ t: "balance = -100", k: "dead" }, null, null], note: "the bug, reproduced on the first run and on every run after it. now fix withdraw() and keep this test forever." },
+];
+
+<InShort>
+a concurrency bug only fires under a particular **interleaving**, so a test that runs the code once (or a thousand times) usually sees green and proves nothing. three things actually help: **stress tests** that maximize overlap (many threads, a starting gun, many rounds), **forcing the interleaving** deterministically with latches, and **jcstress**, OpenJDK's harness for running tiny concurrent programs billions of times and tallying every outcome.
+</InShort>
+
+## the picture
+
+you're trying to photograph lightning with a camera that takes one picture per second. most pictures are just sky. you can take more pictures, stand where storms are more likely, or (if you're lucky enough to control the weather) make the lightning strike on cue. those are the three strategies, in order: stress, provoke, force.
+
+## why it passed 1000 times
+
+remember the [racy counter](/learn/concurrency/race-conditions)? it lost hundreds of thousands of updates in a single run. so a test for it should be easy. here's how often it actually failed, 200 runs per configuration, on jdk 25 on a 14-core arm mac:
+
+<Figure caption={<>rounds, out of 200, where threads doing <code>count++</code> lost at least one update. the label is increments per thread; two threads unless it says 8. "gun" means all threads were released together by a latch, and -Xint means interpreter only, no JIT. same bug in every row: what changed is how much the threads overlapped.</>}>
+<Bars
+  unit="of 200 failed"
+  data={[
+    { label: "1k, plain start", value: 0 },
+    { label: "1k, starting gun", value: 6, tone: "dead" },
+    { label: "1k, 8 threads, gun", value: 19, tone: "dead" },
+    { label: "1M, warm JIT", value: 2, tone: "dead" },
+    { label: "10k, -Xint", value: 187, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+look at the first row: zero failures in 200 runs. starting a thread takes longer than 1,000 increments, so the first thread is done before the second one begins. the bug is in the code every single time; the test just never lets the threads meet. and in the fourth row, a warmed-up JIT compiles each thread's whole loop into something so fast that the threads barely overlap either, even at a million increments. it's the interpreter, slow and steady, that collides 187 times out of 200.
+
+so a green concurrency test mostly measures how unlucky the timing was:
+
+<Figure caption={<>if a race shows up once every N runs, the chance that k runs catch it at least once is 1 − (1 − 1/N)<sup>k</sup>. pick numbers and see how many runs "it passed in CI" is really worth.</>}>
+<RaceOdds />
+</Figure>
+
+## stress: make the threads actually meet
+
+the cheap improvements, all visible in that chart:
+
+- **a starting gun.** park every thread on a `CountDownLatch(1)` and release them together, so they start in the same instant instead of one at a time ([synchronizers](/learn/concurrency/synchronizers)).
+- **more threads than cores**, so the OS has to preempt threads at awkward moments.
+- **many short rounds** instead of one long one: each round is a fresh chance to collide, and the JIT doesn't get to optimize one huge loop.
+- **vary the machine.** a race that never shows on a 4-core laptop can be daily on a 64-core server, and ARM reorders more than x86.
+
+```java title="Main.java" run
+import java.util.concurrent.CountDownLatch;
+
+static int count;
+
+void main() throws InterruptedException {
+    int threads = 8, rounds = 200, failures = 0;
+    for (int r = 0; r < rounds; r++) {
+        count = 0;
+        CountDownLatch start = new CountDownLatch(1);      // the starting gun
+        Thread[] ts = new Thread[threads];
+        for (int i = 0; i < threads; i++) {
+            ts[i] = Thread.ofPlatform().start(() -> {
+                try { start.await(); } catch (InterruptedException e) { return; }
+                for (int k = 0; k < 1_000; k++) count++;
+            });
+        }
+        start.countDown();                                  // everyone goes at once
+        for (Thread t : ts) t.join();
+        if (count != threads * 1_000) failures++;
+    }
+    IO.println("lost updates in " + failures + " of " + rounds + " rounds");
+}
+```
+
+three runs printed 21, 19 and 18. better than zero. still nowhere near "every time", and that's the honest ceiling of stress testing: it raises the odds, it never makes them one.
+
+## force the interleaving
+
+when you know which interleaving breaks the code, don't wait for luck. make it happen. give the code a seam (a hook, a callback, a strategy object) at the point where the race lives, and in the test, use latches to park one thread there while the other one runs:
+
+```java title="Main.java" run output="balance = -100"
+import java.util.concurrent.CountDownLatch;
+
+class Account {
+    private int balance = 100;
+    Runnable betweenCheckAndAct = () -> {};    // a seam: does nothing in production
+
+    boolean withdraw(int amount) {
+        if (balance >= amount) {
+            betweenCheckAndAct.run();          // the gap where the race lives
+            balance -= amount;
+            return true;
+        }
+        return false;
+    }
+
+    int balance() { return balance; }
+}
+
+void main() throws InterruptedException {
+    Account account = new Account();
+    CountDownLatch t1InGap = new CountDownLatch(1);
+    CountDownLatch t2Done = new CountDownLatch(1);
+    account.betweenCheckAndAct = () -> {
+        if (Thread.currentThread().getName().equals("t1")) {
+            t1InGap.countDown();                                 // "I've passed the check"
+            try { t2Done.await(); } catch (InterruptedException e) { }   // hold t1 in the gap
+        }
+    };
+
+    Thread t1 = Thread.ofPlatform().name("t1").start(() -> account.withdraw(100));
+    t1InGap.await();                                             // wait until t1 is in the gap
+    Thread t2 = Thread.ofPlatform().name("t2").start(() -> {
+        account.withdraw(100);
+        t2Done.countDown();                                      // let t1 continue
+    });
+    t1.join();
+    t2.join();
+    IO.println("balance = " + account.balance());
+}
+```
+
+<Figure wide caption={<>the test is a third thread that conducts the other two. the latches pin t1 inside the race window while t2 runs, so the <C k="dead">bad interleaving</C> happens on every run, not once in a thousand.</>}>
+<Lanes threads={["test", "t1", "t2"]} cells={["balance"]} steps={forced} />
+</Figure>
+
+now make `withdraw` synchronized and run the same test: t1 parks in the gap while holding the monitor, t2 can't even get to the check, and the test deadlocks. that's the test telling you the race window is closed; give the `await` in the hook a timeout (`t2Done.await(200, MILLISECONDS)`) and the fixed version ends with `balance = 0` every time. this style of test is precise and fast, but it only finds the interleavings you already thought of.
+
+<Gotcha title="Thread.sleep is not synchronization">
+"sleep 100 ms so the other thread gets there first" is the most common flaky test in existence. on a loaded CI machine, 100 ms is sometimes not enough, and when it is, it's slow. coordinate with latches, barriers or futures, which wait exactly as long as needed, and give every wait a timeout so a broken test fails instead of hanging the build.
+</Gotcha>
+
+## jcstress: the memory model's test harness
+
+stress tests and forced interleavings test your logic. they're terrible at finding memory-model bugs (reordering, visibility), which need the threads to overlap at the scale of nanoseconds, millions of times, with the JIT in every possible mood. that's what [jcstress](https://github.com/openjdk/jcstress) is for. it's what the OpenJDK developers use to test the JVM itself.
+
+you write the smallest possible concurrent program: some state, two or more `@Actor` methods that run concurrently on it, and the outcomes you expect. jcstress runs it billions of times across different JIT modes, thread placements and stress options, and counts every result:
+
+```java title="RacyCounter.java"
+@JCStressTest
+@Outcome(id = "2", expect = Expect.ACCEPTABLE, desc = "both increments landed")
+@Outcome(id = "1", expect = Expect.ACCEPTABLE_INTERESTING, desc = "lost update")
+@State
+public class RacyCounter {
+    int count;
+
+    @Actor public void actor1() { count++; }
+    @Actor public void actor2() { count++; }
+
+    @Arbiter                       // runs after both actors are done
+    public void arbiter(I_Result r) { r.r1 = count; }
+}
+```
+
+each outcome is labelled: **ACCEPTABLE** (fine), **ACCEPTABLE_INTERESTING** (allowed, but worth seeing: usually the bug you're demonstrating), or **FORBIDDEN** (if this shows up even once, the test fails). here's what it reported for that test, jcstress 0.16 on jdk 25:
+
+<Figure caption={<>724 million runs of two concurrent <code>count++</code>. more than one in five <C k="hot">lost an update</C>. a hand-written test of the same two lines usually sees zero.</>}>
+<Outcomes tests={counter} head="count" />
+</Figure>
+
+the [memory model](/learn/concurrency/java-memory-model) chapter shows two more real jcstress runs: the store-buffering test, where the "impossible" outcome was the most common one, and the message-passing test, where volatile took a bad outcome from 55,084 to zero. when you want to know whether a piece of lock-free code is correct under the JMM, that's how you find out.
+
+## think like a race detector
+
+C and Go programmers can turn on ThreadSanitizer, which instruments every memory access and reports data races as they happen. the JDK you download doesn't have one: an OpenJDK project called Tsan is exploring it, but jdk 25 has no such flag. so you do it in your head, in review:
+
+- for every field: **which threads touch it, and what orders their accesses?** if the answer is "nothing", it's a data race.
+- for every check-then-act and read-modify-write: **what lock or atomic makes the pair one step?**
+- for every object handed to another thread: **how is it published?** (`final`, `volatile`, a lock, a concurrent collection, a `start()` or `join()`)
+- for every lock: **what's the order**, and does anything call out to unknown code while holding it?
+
+static analyzers help with some of this: [Error Prone and SpotBugs](/learn/tooling/code-quality) flag inconsistent synchronization and fields annotated `@GuardedBy` that are touched without their lock.
+
+<Interview q="how do you test that a class is thread-safe?">
+you can't prove it with tests, only increase confidence. combine: a stress test that starts many threads together with a latch, runs many short rounds, and checks invariants afterwards; deterministic tests that force specific interleavings using latches at seams in the code; and for lock-free or memory-model-sensitive code, jcstress, which runs tiny concurrent programs billions of times and reports every observed outcome. and design so less needs testing: immutability, confinement, and well-tested java.util.concurrent classes instead of hand-rolled synchronization.
+</Interview>
+
+<Keylines>
+- a race needs the threads to overlap at the wrong moment. most test runs never do.
+- a green run is weak evidence: you need about 3N runs to catch a 1-in-N bug.
+- stress tests: a starting gun, more threads than cores, many short rounds. better odds, never certainty.
+- force known interleavings with latches at a seam. deterministic, every run.
+- jcstress tests the memory model itself: billions of runs, every outcome counted.
+</Keylines>

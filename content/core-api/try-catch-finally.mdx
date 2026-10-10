@@ -1,0 +1,238 @@
+import { TryPaths } from "@/components/figures/core-api/TryPaths";
+
+export const unwind = {
+  file: "Main.java",
+  source: `static int c(int n) {
+    if (n > 2)
+        throw new IllegalStateException("big");
+    return n * 10;
+}
+
+static int b(int n) {
+    int r = c(n + 1);
+    IO.println("b got " + r);
+    return r;
+}
+
+static int a(int n) {
+    try {
+        return b(n + 1);
+    } finally {
+        IO.println("a's finally");
+    }
+}
+
+void main() {
+    try {
+        IO.println(a(1));
+    } catch (IllegalStateException e) {
+        IO.println("caught: " + e.getMessage());
+    }
+    IO.println("done");
+}`,
+  steps: [
+    { line: 23, frames: [{ name: "main", locals: {} }], heap: {}, note: "main enters its try and calls a(1)." },
+    { line: 15, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }], heap: {}, note: "a calls b from inside its own try. that try has no catch, only a finally." },
+    { line: 8, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }, { name: "b", locals: { n: 2 } }], heap: {}, note: "b calls c. b has no try at all." },
+    { line: 2, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }, { name: "b", locals: { n: 2 } }, { name: "c", locals: { n: 3 } }], heap: {}, note: "n is 3, so the if is true." },
+    { line: 3, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }, { name: "b", locals: { n: 2 } }, { name: "c", locals: { n: 3 } }], heap: { x: { type: "IllegalStateException", value: '"big"', tag: "thrown", state: "dead" } }, note: "new builds the exception (the stack trace is captured right now), then throw sends it. c has no catch, so c is over." },
+    { line: 8, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }, { name: "b", locals: { n: 2 } }], heap: { x: { type: "IllegalStateException", value: '"big"', state: "dead" } }, note: "c's frame is popped. the exception lands in b, at the call on line 8. no try here either, so b is popped too. line 9 never runs." },
+    { line: 17, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }], heap: { x: { type: "IllegalStateException", value: '"big"', state: "dead" } }, note: "back in a. nothing here catches it, but there's a finally, and finally runs on every way out of a try. including this one." },
+    { line: 18, frames: [{ name: "main", locals: {} }, { name: "a", locals: { n: 1 } }], heap: { x: { type: "IllegalStateException", value: '"big"', state: "dead" } }, stdout: "a's finally\n", note: "finally is done, and the exception carries on. a is popped. its return never happened." },
+    { line: 24, frames: [{ name: "main", locals: {} }], heap: { x: { type: "IllegalStateException", value: '"big"', state: "dead" } }, stdout: "a's finally\n", note: "main's try has catch (IllegalStateException e). the type matches, so the unwinding stops here." },
+    { line: 25, frames: [{ name: "main", locals: { e: { ref: "x" } } }], heap: { x: { type: "IllegalStateException", value: '"big"', tag: "caught" } }, stdout: "a's finally\n", note: "e is the very object c threw. from here on it's just a local variable pointing at an object." },
+    { line: 27, frames: [{ name: "main", locals: {} }], heap: {}, stdout: "a's finally\ncaught: big\n", note: "the catch block ends, e goes out of scope, and the exception is garbage like any other unreachable object." },
+    { line: 28, frames: [{ name: "main", locals: {} }], heap: {}, stdout: "a's finally\ncaught: big\ndone\n", note: "and the program carries on as if nothing happened. that's what catching means." },
+    { line: 28, frames: [], heap: {}, stdout: "a's finally\ncaught: big\ndone\n", note: "main returns. the program ends normally." },
+  ],
+};
+
+<InShort>
+when something throws, the JVM **unwinds** the stack: it abandons the current method, pops frames one by one, runs any **finally** blocks it passes, and stops at the first `catch` whose type matches. if nothing matches, the thread dies and prints the stack trace.
+
+`finally` runs on every way out of a `try`: normal end, `return`, `break`, or an exception. (almost every way. there's a short list.)
+</InShort>
+
+## the picture
+
+an exception is a hot potato handed back down the line of people who called you. each person either catches it, or steps out of the line and passes it on. anyone holding a `finally` gets to tidy their desk on the way out, whether they caught the potato or not.
+
+no frame "returns" during this. nobody gets a return value, no line after the call runs. frames are just thrown away, newest first, until someone has a matching `catch`.
+
+## watch it unwind
+
+`main` calls `a`, which calls `b`, which calls `c`. `c` throws. the frames come from a real run under the site's JDI tracer. the exception object is drawn in by hand, because no variable holds it while it's in flight, and you should see it travel.
+
+<Figure wide caption={<>step through it. the <C k="dead">exception</C> is an ordinary object: it's created in <code>c</code>, rides down the stack while <code>c</code> and <code>b</code> are popped (line 9 never runs), waits for <code>a</code>'s finally, and stops at <code>main</code>'s catch.</>}>
+<MemoryStepper trace={unwind} />
+</Figure>
+
+notice what didn't happen: `b` never printed, `a` never returned, `main` never printed a number. the only code that ran between the `throw` and the `catch` was a `finally`.
+
+## catch: the first match wins
+
+a `try` can have several `catch` clauses. the JVM checks them top to bottom and runs the first one where the exception `instanceof` the declared type. the rest are skipped.
+
+```java title="Main.java" run output="no such file: missing.txt\nother I/O: IOException\nbad path: InvalidPathException"
+import java.io.IOException;
+import java.nio.file.*;
+
+void main() {
+    for (String name : new String[] {"missing.txt", "", "x\0y"}) {
+        try {
+            Files.readString(Path.of(name));
+        } catch (NoSuchFileException e) {                         // the specific one first
+            IO.println("no such file: " + e.getMessage());
+        } catch (IOException e) {                                 // then its parent
+            IO.println("other I/O: " + e.getClass().getSimpleName());
+        } catch (InvalidPathException | UnsupportedOperationException e) {   // multi-catch
+            IO.println("bad path: " + e.getClass().getSimpleName());
+        }
+    }
+}
+```
+
+(`""` is the current directory, which you can't read as a file. `"x\0y"` has a NUL byte, which no path can contain.)
+
+two compile-time rules come out of "first match wins":
+
+- **specific before general.** put `catch (IOException e)` above `catch (NoSuchFileException e)` and javac refuses, because the second clause could never run.
+- **multi-catch alternatives can't be related.** `FileNotFoundException | IOException` is an error too: the parent already covers the child.
+
+```text
+error: exception NoSuchFileException has already been caught
+error: Alternatives in a multi-catch statement cannot be related by subclassing
+```
+
+in a multi-catch, `e` is implicitly `final` and its static type is the closest common supertype (here `RuntimeException`).
+
+## finally: on every way out
+
+<Figure caption={<>pick how <code>risky()</code> ends and step through. the <C k="hot">current line</C> moves; lines that never ran fade at the end. <code>close()</code> on line 8 runs in all four.</>}>
+<TryPaths />
+</Figure>
+
+that's why `finally` is where cleanup goes: releasing a lock, closing a file, restoring some state. (for anything `AutoCloseable` there's something better, [try-with-resources](/learn/core-api/try-with-resources).)
+
+the list of ways `finally` *doesn't* run is short: `System.exit()` (or `Runtime.halt()`) inside the `try`, the JVM crashing or being killed (`kill -9`, the container's OOM killer, power), the `try` never finishing (an infinite loop, a deadlock), and daemon threads, which are simply abandoned when the JVM exits.
+
+<Predict options={["1", "2", "compile error"]} answer={1}>
+```java
+static int f() {
+    try {
+        return 1;
+    } finally {
+        return 2;
+    }
+}
+```
+<Explain>
+`return 1` evaluates the value and gets ready to leave, but leaving the `try` runs the `finally`, and the `finally` does its own `return 2`. the later return wins. it compiles fine (only `-Xlint` warns: `finally clause cannot complete normally`).
+</Explain>
+</Predict>
+
+<Predict options={["1", "2"]} answer={0}>
+```java
+static int g() {
+    int x = 1;
+    try {
+        return x;
+    } finally {
+        x = 2;
+    }
+}
+```
+<Explain>
+`return x` copies the *value* of `x` (1) aside before the `finally` runs. changing the variable afterwards doesn't touch the copy. (if `x` were a reference to a mutable object, the `finally` could still change the object it points at. same rule as everywhere in java: [the slot is copied](/learn/basics/pass-by-value).)
+</Explain>
+</Predict>
+
+<Gotcha title="return in finally eats exceptions">
+```java
+try {
+    throw new IllegalStateException("important");
+} finally {
+    return -1;   // the exception is gone. no trace, no log, nothing.
+}
+```
+a `return` (or `break`, or `continue`) in a `finally` replaces whatever was in flight, including an exception. the same happens if the `finally` throws: its exception replaces the original one. keep `finally` blocks small, never `return` from them, and don't let them throw.
+</Gotcha>
+
+## don't swallow
+
+<Compare>
+<Bad label="the silent catch">
+```java
+try {
+    config = load(path);
+} catch (Exception e) {
+    // TODO
+}
+```
+the program keeps going with `config == null`, and the NPE shows up an hour later, in some other class, with no hint of the real cause.
+</Bad>
+<Good label="handle it, or let it go">
+```java
+try {
+    config = load(path);
+} catch (NoSuchFileException e) {
+    config = Config.defaults();   // a real decision
+}
+// anything else: don't catch it here.
+```
+catch what you can actually do something about. everything else should keep unwinding to a level that can (and usually that's the top, which logs it).
+</Good>
+</Compare>
+
+<Deep title="how the JVM finds the catch: the exception table">
+there's no "try" instruction in bytecode. instead each method has an **exception table**: rows of "if something is thrown between instruction `from` and `to`, and it's an instance of `type`, jump to `target`". here's `javap -c` (javac 25) for this method:
+
+```java
+static void h() {
+    try {
+        work();
+    } catch (IllegalStateException e) {
+        log(e);
+    } finally {
+        cleanup();
+    }
+}
+```
+
+and what's in the `.class` file:
+
+```text
+ 0: invokestatic  #7    // Method work:()V
+ 3: invokestatic  #12   // Method cleanup:()V        ← finally, copy 1 (normal path)
+ 6: goto          26
+ 9: astore_0                                         ← the catch block
+10: aload_0
+11: invokestatic  #17   // Method log:(Ljava/lang/Exception;)V
+14: invokestatic  #12   // Method cleanup:()V        ← finally, copy 2 (after the catch)
+17: goto          26
+20: astore_1                                         ← "any": everything else
+21: invokestatic  #12   // Method cleanup:()V        ← finally, copy 3
+24: aload_1
+25: athrow                                           ← rethrow it
+26: return
+Exception table:
+   from    to  target type
+       0     3     9   Class java/lang/IllegalStateException
+       0     3    20   any
+       9    14    20   any
+```
+
+two things to see. `finally` isn't a jump target, it's **copied** onto every exit path (three times here). and when a method throws, the JVM searches *that method's* table for a matching row. no match: pop the frame, and search the caller's table at the call site. that's the unwinding from the stepper above, one table lookup per frame. it costs nothing when nothing is thrown.
+</Deep>
+
+<Interview q="does finally run if the try block returns?">
+yes. `return` evaluates its value first, then the `finally` runs, then the method returns that saved value. a `return` inside the `finally` would override it (and would also swallow an in-flight exception), which is why you never put one there. finally doesn't run after `System.exit()`, if the JVM dies, if the try never completes, or for daemon threads at shutdown.
+</Interview>
+
+<Keylines>
+- a throw abandons the method. frames are popped until a catch matches.
+- catches are checked top to bottom. specific before general, or javac complains.
+- finally runs on every way out: normal, return, break, exception.
+- never return or throw from a finally. it replaces whatever was in flight.
+- catch what you can handle. let the rest unwind.
+</Keylines>

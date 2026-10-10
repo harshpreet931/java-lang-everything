@@ -1,0 +1,141 @@
+import { OpsLab } from "@/components/figures/functional/OpsLab";
+
+<InShort>
+intermediate operations come in two kinds. **stateless** ones (`filter`, `map`, `flatMap`) judge each element on its own. **stateful** ones (`distinct`, `sorted`, `limit`, `skip`) have to remember something about the elements they've already seen.
+
+some are also **short-circuiting** (`limit`, `takeWhile`): they can stop the pipeline before the source runs dry. and one of them, `sorted`, is a wall: nothing gets past it until everything has arrived.
+</InShort>
+
+## the picture
+
+you know how `filter` and `sorted` sit next to each other in a pipeline like they're the same kind of thing? they're not. `filter` can decide about element 3 the moment it sees it. `sorted` can't output anything until it has seen the last element, because the last one might be the smallest.
+
+think of an airport. passport control is stateless: each traveller is checked on their own and walks on. the boarding queue sorted by zone is stateful: nobody boards until the queue has formed. same airport, very different flow.
+
+<Figure wide caption={<>pick an operation. the top row goes in, the bottom row comes out, and each line shows which input an output came from. <C k="dead">red</C> inputs were pulled and dropped, dashed ones were never pulled at all. the <C k="meta">purple band</C> is the state a stateful operation has to keep. every output is the real one from jdk 25.</>}>
+<OpsLab />
+</Figure>
+
+## the cheat sheet
+
+| operation | what it does | kind |
+| --- | --- | --- |
+| `filter(p)` | keeps elements where `p` is true | stateless |
+| `map(f)` | replaces each element with `f(element)` | stateless |
+| `flatMap(f)` | replaces each element with all the elements of the stream `f` returns | stateless |
+| `mapMulti(f)` | like flatMap, but you push results into a consumer instead of building a stream (java 16) | stateless |
+| `peek(c)` | runs `c` on each element as it passes. for debugging | stateless |
+| `distinct()` | drops repeats, by `equals`/`hashCode` | stateful |
+| `sorted()` | sorts. natural order, or `sorted(comparator)` | stateful, a barrier |
+| `limit(n)` / `skip(n)` | keeps the first n / drops the first n | stateful. limit short-circuits |
+| `takeWhile(p)` / `dropWhile(p)` | keeps / drops the leading run where `p` holds (java 9) | stateful. takeWhile short-circuits |
+
+## flatMap: one to many
+
+`map` is one in, one out. `flatMap` is one in, **any number** out: each element becomes a little stream of its own, and those streams are poured into the main one. the classic use is "a list of things that each have a list":
+
+```java title="Main.java" run output="[tea, scone, tea, cake, tea]\n[cake, scone, tea]\n[ada:tea, ada:scone, cy:tea, cy:cake, cy:tea]"
+import java.util.*;
+
+record Order(String customer, List<String> items) {}
+
+void main() {
+    List<Order> orders = List.of(
+            new Order("ada", List.of("tea", "scone")),
+            new Order("bob", List.of()),
+            new Order("cy", List.of("tea", "cake", "tea")));
+
+    IO.println(orders.stream()
+            .flatMap(o -> o.items().stream())     // 3 orders in, 5 items out
+            .toList());
+
+    IO.println(orders.stream()
+            .flatMap(o -> o.items().stream())
+            .distinct()        // stateful: remembers what it's seen
+            .sorted()          // stateful: waits for everything
+            .toList());
+
+    IO.println(orders.stream()
+            // flatMap without building the inner streams
+            .<String>mapMulti((o, out) -> {
+                for (String item : o.items()) {
+                    out.accept(o.customer() + ":" + item);
+                }
+            })
+            .toList());
+}
+```
+
+bob's empty order just disappears: an empty inner stream contributes nothing. `mapMulti` does the same job by handing you a `Consumer` to push results into. it's handy when each element produces zero or one or two results, where building a tiny stream for each would be wasteful.
+
+## sorted is a barrier
+
+every stateless operation passes elements along one at a time, like the [previous chapter](/learn/functional/stream-pipeline) showed. `sorted` breaks that. it swallows everything, sorts, and only then lets the elements continue:
+
+```java title="Main.java" run output="before 3\nbefore 1\nbefore 2\nafter  1\nafter  2\nafter  3"
+import java.util.stream.*;
+
+void main() {
+    Stream.of(3, 1, 2)
+            .peek(n -> IO.println("before " + n))
+            .sorted()
+            .forEach(n -> IO.println("after  " + n));
+}
+```
+
+swap `sorted()` for `map(n -> n)` and the output interleaves: before 3, after 3, before 1, after 1... that's the difference between a pipe and a wall.
+
+<Gotcha title="sorted() on an infinite stream never finishes">
+`Stream.iterate(1, n -> n + 1).sorted().limit(3).toList()` looks reasonable: sort, take three. but `sorted` waits for the end of a stream that has no end. it keeps buffering until the heap is gone. with `-Xmx64m` on jdk 25 that's an `OutOfMemoryError: Java heap space` after a couple of seconds. put `limit` before `sorted`, not after.
+</Gotcha>
+
+## takeWhile isn't filter
+
+<Predict options={["[3, 1, 4, 1, 2]", "[3, 1, 4, 1]", "[5, 9, 6]"]} answer={1}>
+```java
+List.of(3, 1, 4, 1, 5, 9, 2, 6).stream()
+        .takeWhile(n -> n < 5)
+        .toList()
+```
+<Explain>
+`takeWhile` keeps the leading run that passes and stops at the first failure for good. 5 fails, so the stream ends there: `[3, 1, 4, 1]`. the 2 at the end is never even looked at. `filter(n -> n < 5)` would have given `[3, 1, 4, 1, 2]`. on sorted data they agree, and `takeWhile` gets to stop early.
+</Explain>
+</Predict>
+
+## peek is for looking, not doing
+
+`peek` runs a side effect as elements pass. it's great for the print statements in this chapter. it's a trap for anything that matters, because the JDK is allowed to skip it:
+
+```java title="Main.java" run output="3\nfilter 1\nfilter 2\nfilter 3\n3"
+import java.util.stream.*;
+
+void main() {
+    long a = Stream.of(1, 2, 3)
+            .peek(x -> IO.println("peek " + x))
+            .count();
+    IO.println(a);
+
+    long b = Stream.of(1, 2, 3)
+            .filter(x -> { IO.println("filter " + x); return true; })
+            .count();
+    IO.println(b);
+}
+```
+
+no "peek" lines at all. the source knows it has 3 elements and nothing in the pipeline can change that, so since java 9 `count()` just returns 3 without running anything. the `filter` version has to run, because a filter might drop things. if you need a side effect, put it in `forEach`, or better, collect a result and act on that.
+
+<Gotcha title="distinct and sorted use your equals, hashCode and compareTo">
+`distinct()` keeps a set of what it has seen, so it's only as good as your `equals` and `hashCode`. two arrays with the same contents are "different" (arrays use identity), and a class that forgot to override `hashCode` will sail through `distinct` as duplicates. records get both for free. `sorted()` with no comparator needs `Comparable` elements, or you get a `ClassCastException` at runtime, not a compile error. see [equals and hashCode](/learn/oop/object-methods).
+</Gotcha>
+
+<Interview q="what's the difference between map and flatMap?">
+`map` turns each element into exactly one new element. `flatMap` turns each element into a stream of zero or more elements and splices them all into one stream. if your function returns a `Stream` (or a list you'd stream), `map` gives you a `Stream<Stream<T>>`, and `flatMap` flattens it to `Stream<T>`. bonus point: `Optional.flatMap` is the same idea for an `Optional`-returning function, and java 16's `mapMulti` is the imperative version that skips building the inner streams.
+</Interview>
+
+<Keylines>
+- stateless ops look at one element at a time. stateful ops remember something.
+- `flatMap` is one-to-many. empty inner streams just vanish.
+- `sorted` is a barrier: everything in before anything out. never after an infinite source.
+- `takeWhile` stops at the first failure. `filter` checks everyone.
+- `peek` can be skipped (hello, `count()`). don't put real work in it.
+</Keylines>

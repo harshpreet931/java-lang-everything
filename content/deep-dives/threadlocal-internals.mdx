@@ -1,0 +1,193 @@
+import { WeakEntries } from "@/components/figures/deep-dives/WeakEntries";
+
+<InShort>
+a `ThreadLocal` doesn't store anything. each `Thread` has a field, **`threadLocals`**, pointing at a small hash map; the `ThreadLocal` object is just the **key**. the key is held by a **weak reference** and the value by a **strong** one, so when you drop a `ThreadLocal` without calling `remove()`, its value stays pinned to the thread. on a thread pool, threads live forever, and so do those values.
+</InShort>
+
+## the picture
+
+the name suggests a variable with a copy per thread living inside it. turns out it's the other way round: the copies live inside the threads.
+
+think of a gym. every member (thread) gets their own locker room (`threadLocals`). a `ThreadLocal` is a locker number printed on a tag. `get()` means "go to *my* locker room, open the locker with this number". two members with the same tag open two different lockers. throw the tag away and the locker's contents don't disappear, you just can't find them anymore.
+
+<Figure wide caption={<>step through a real dump of <code>Thread.threadLocals</code> (read with reflection on jdk 25, slot numbers and all). <C k="ref">dashed</C> arrows are weak references. watch step 3: the key is gone, the value is <C k="dead">still pinned</C> by the thread, and nothing in the next three steps cleans it up.</>}>
+<WeakEntries />
+</Figure>
+
+so `get()` is: `Thread.currentThread()`, read its `threadLocals`, look up `this`. no synchronization anywhere, because only the owning thread ever touches its own map. that's the whole reason `ThreadLocal` is fast.
+
+## the map inside every thread
+
+`ThreadLocalMap` isn't a `HashMap`. it's a tiny custom table, tuned for a handful of keys:
+
+<Defs>
+<dt>table</dt><dd>`Entry[]`, created lazily on the first `set` (a thread that never uses a ThreadLocal has `threadLocals == null`). starts at 16, power of two, doubles.</dd>
+<dt>collisions</dt><dd>open addressing with linear probing: on a collision, try the next slot. no chains, no trees.</dd>
+<dt>load</dt><dd>the resize threshold is 2/3 of the length. before growing, it first sweeps out stale entries and only doubles if that didn't free enough.</dd>
+<dt>Entry</dt><dd>`extends WeakReference<ThreadLocal<?>>`. the weak referent is the key. the value is a plain `Object` field.</dd>
+</Defs>
+
+the hash is the cute part. each `ThreadLocal` gets `threadLocalHashCode` from a global counter that goes up by `0x61c88647` per new instance. that constant is the classic golden-ratio number 2³²/φ (`0x9e3779b9`) negated, a trick called Fibonacci hashing, and its multiples are spread so evenly that consecutive ThreadLocals land in different slots of any power-of-two table:
+
+```java run output="0 7 14 5 12 3 10 1 8 15 6 13 4 11 2 9"
+void main() {
+    int h = 0;
+    var sb = new StringBuilder();
+    for (int i = 0; i < 16; i++) {
+        sb.append(h & 15).append(' ');
+        h += 0x61c88647;
+    }
+    IO.println(sb.toString().trim());
+}
+```
+
+sixteen ThreadLocals, sixteen different slots of a 16-slot table, no collisions. (look at the figure again: our three ThreadLocals, created back to back, landed in 7, 14 and 5. three consecutive numbers from that exact sequence.)
+
+## weak keys, strong values
+
+why is only the key weak?
+
+- **the key is weak** so that dropping your last reference to a `ThreadLocal` doesn't leave the `ThreadLocal` object itself alive forever inside every thread that ever used it.
+- **the value can't be weak**, because the map is often the *only* thing holding it. a weak value could be collected while you still expect `get()` to return it.
+
+the price is the **stale entry**: key collected, value still there. `ThreadLocalMap` cleans them up opportunistically: when a lookup *probes past* one, when `set` runs a short scan after inserting (about log₂(size) slots), when `remove()` is called, or when the table is rehashed. a direct hit cleans nothing. the source's own comment admits stale entries are only guaranteed to go when the table starts running out of space. as you saw in the figure, that can be never.
+
+<Predict options={["the 1 MB is collected at the next GC", "it stays until the thread dies (or a probe or rehash happens to hit it)", "it's collected when buffer goes out of scope"]} answer={1}>
+```java
+ThreadLocal<byte[]> buffer = new ThreadLocal<>();
+buffer.set(new byte[1 << 20]);
+buffer = null;
+System.gc();
+// what happens to the 1 MB array?
+```
+<Explain>
+the GC clears the entry's weak key (the `ThreadLocal`), but the entry's value is a strong reference from an object the thread owns: `Thread → threadLocals → table → Entry → value`. that's what we saw in the reflection dump: the key read `null`, the `byte[1048576]` was still there after a `get`, a `set`, and a `set` from a brand new `ThreadLocal`. call `remove()` before you drop a `ThreadLocal`.
+</Explain>
+</Predict>
+
+## the thread pool problem
+
+a stale entry on a short-lived thread is harmless: the thread dies, its map dies, done. the trouble is that servers don't have short-lived threads. a request runs on a pool thread, and pool threads live as long as the pool. two things go wrong.
+
+**one: memory.** a `static final ThreadLocal` used as per-thread scratch space never becomes stale (the key is always reachable), so each pool thread keeps its value until it dies. we ran 64 tasks on an 8-thread pool, each setting a 16 MB scratch buffer, then measured the heap after a few forced GCs:
+
+| after 64 tasks, pool idle | heap in use |
+| --- | --- |
+| no `remove()` | **137 MB** (8 threads × 16 MB, held) |
+| `remove()` in `finally` | 1 MB |
+| either version, after `pool.shutdown()` | 1 MB |
+
+**two: data from the last request.** the next task on the same thread sees whatever the last one left behind:
+
+```java title="Main.java" run output="request served for alice\nrequest served for alice"
+import java.util.concurrent.*;
+
+public class Main {
+    static final ThreadLocal<String> USER = new ThreadLocal<>();
+
+    static String handle(String loggedInAs) {
+        if (loggedInAs != null) USER.set(loggedInAs);   // set, but never removed
+        return "request served for " + USER.get();
+    }
+
+    public static void main(String[] args) throws Exception {
+        try (var pool = Executors.newFixedThreadPool(1)) {
+            System.out.println(pool.submit(() -> handle("alice")).get());
+            System.out.println(pool.submit(() -> handle(null)).get());   // an anonymous request
+        }
+    }
+}
+```
+
+the anonymous request was served as alice. in a real app that's a security incident. the fix is boring and mandatory:
+
+<Compare>
+<Bad label="set and forget">
+```java
+USER.set(principal);
+handle(request);
+```
+</Bad>
+<Good label="always clean up">
+```java
+USER.set(principal);
+try {
+    handle(request);
+} finally {
+    USER.remove();
+}
+```
+</Good>
+</Compare>
+
+and there's a third, nastier version: if the value (or its class) comes from a web app's class loader, the pool thread now holds a reference into that app, and redeploying it leaks the whole old copy. that's its own chapter: [class loader leaks](/learn/deep-dives/classloader-leaks).
+
+## InheritableThreadLocal
+
+`InheritableThreadLocal` copies values from parent to child. the copy happens in the `Thread` constructor (`ThreadLocal.createInheritedMap`), exactly once. it's a snapshot of whatever the creating thread had at that moment, which is useless with pools:
+
+```java title="Main.java" run output="child thread sees acme\npool thread sees acme"
+import java.util.concurrent.*;
+
+public class Main {
+    static final InheritableThreadLocal<String> TENANT = new InheritableThreadLocal<>();
+
+    public static void main(String[] args) throws Exception {
+        TENANT.set("acme");
+        Thread child = new Thread(() -> System.out.println("child thread sees " + TENANT.get()));
+        child.start(); child.join();
+
+        try (var pool = Executors.newFixedThreadPool(1)) {
+            pool.submit(() -> {}).get();          // the pool thread is created now, under "acme"
+            TENANT.set("globex");                 // next request, different tenant
+            System.out.println("pool thread sees " + pool.submit(TENANT::get).get());
+        }
+    }
+}
+```
+
+the pool thread was born while the tenant was acme, so it inherited acme, and it will say acme for the rest of its life. pools create threads lazily, at unpredictable moments, so which context a pool thread inherited is basically random.
+
+## the modern answer: ScopedValue
+
+`ScopedValue` <Since v={25} /> (final in java 25, [JEP 506](https://openjdk.org/jeps/506)) fixes the design instead of the symptoms. a value is bound for the duration of a call, it can't be changed, and it's unbound automatically when the call returns, so there's nothing to forget to remove:
+
+```java title="Main.java" run output="handling for ada\nbound inside? true\nbound after? false"
+public class Main {
+    static final ScopedValue<String> USER = ScopedValue.newInstance();
+
+    static void handle() {
+        System.out.println("handling for " + USER.get());
+        System.out.println("bound inside? " + USER.isBound());
+    }
+
+    public static void main(String[] args) {
+        ScopedValue.where(USER, "ada").run(Main::handle);
+        System.out.println("bound after? " + USER.isBound());
+    }
+}
+```
+
+| | `ThreadLocal` | `ScopedValue` |
+| --- | --- | --- |
+| lifetime | until `remove()` or the thread dies | exactly the `run`/`call` it's bound for |
+| mutable | yes, `set()` anywhere | no. rebind in a nested scope instead |
+| leaks on pools | yes, if you forget `remove()` | can't, it unbinds itself |
+| child threads | copies the whole map per thread (inheritable) | shared cheaply with [structured concurrency](/learn/concurrency/structured-concurrency) subtasks |
+
+<Gotcha title="ThreadLocal caches and virtual threads">
+the classic trick of caching an expensive object per thread (a `SimpleDateFormat`, a big buffer) assumes a few hundred long-lived threads. with [virtual threads](/learn/concurrency/virtual-threads) you might have a million short-lived ones, so you get a million caches that are each used once. ThreadLocals still *work* on virtual threads, they just stop being a cache. run with `-Djdk.traceVirtualThreadLocals=true` and the JDK prints a stack trace every time a virtual thread sets one, which is a quick way to find them.
+</Gotcha>
+
+<Interview q="how can a ThreadLocal leak memory, if its keys are weak references?">
+the key is weak but the value is strong. values live in a map owned by the `Thread` (`Thread.threadLocals`), with the `ThreadLocal` object as a weakly referenced key. drop the `ThreadLocal` and the GC clears the key, but the value is still strongly reachable from the thread, and the map only expunges stale entries when a probe happens to walk past them or the table rehashes. with a `static` ThreadLocal the key never even goes stale. on a thread pool the threads never die, so the values never go away; worse, the next task sees the previous task's value. the fix is `remove()` in a `finally`. the modern alternative is `ScopedValue`, which unbinds itself when its scope ends.
+</Interview>
+
+<Keylines>
+- the values live in the thread (`Thread.threadLocals`). the `ThreadLocal` is just the key.
+- the map uses open addressing and Fibonacci hashing (`0x61c88647`) so consecutive ThreadLocals don't collide.
+- keys are weak, values are strong. a dropped ThreadLocal leaves a stale entry whose value stays reachable.
+- pool threads never die: always `remove()` in a `finally`, or you leak memory and leak data between requests.
+- `InheritableThreadLocal` copies once, at thread creation. pools make that random.
+- `ScopedValue` (final in 25) has a lifetime you can't get wrong.
+</Keylines>

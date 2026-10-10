@@ -1,0 +1,183 @@
+import { OptionalPipeline } from "@/components/figures/core-api/OptionalPipeline";
+import { OptionalWhere } from "@/components/figures/core-api/OptionalWhere";
+
+<InShort>
+`Optional<T>` is a box that holds one value or nothing. it's for **return types** where "no result" is a normal answer, so the caller can't forget about the empty case.
+
+you work inside the box with **map**, **filter** and **flatMap**, and open it once at the end with **orElse**, **orElseGet** or **orElseThrow**. you don't use it for fields, parameters or collections.
+</InShort>
+
+## the picture
+
+`null` is a value that every reference type secretly allows and no type ever admits to. a method returns `User`, you call `.name()` on it, and once in a while it was `null` all along. Tony Hoare, who added null references to ALGOL W in 1965, later called it his billion-dollar mistake.
+
+`Optional` makes "might be missing" part of the type. a parcel that may or may not have something in it: you can leave instructions for whatever's inside ("if there's something, gift-wrap it") without opening it, and only at the very end decide what to do if it turns out to be empty.
+
+```java
+Optional<User> findById(long id)   // the signature says: this can come back empty
+```
+
+## working inside the box
+
+<Figure wide caption={<>pick an input and step through. each function is <C k="hot">called</C> only when there's something in the box. once the box is empty, every later step is skipped, and nothing ever touches a <code>null</code>.</>}>
+<OptionalPipeline />
+</Figure>
+
+```java title="Main.java" run output="ADA\nANONYMOUS\nANONYMOUS"
+import java.util.Optional;
+
+String greet(Optional<String> raw) {
+    return raw.map(String::strip)
+              .filter(s -> !s.isEmpty())
+              .map(String::toUpperCase)
+              .orElse("ANONYMOUS");
+}
+
+void main() {
+    IO.println(greet(Optional.of("  ada  ")));
+    IO.println(greet(Optional.of("   ")));
+    IO.println(greet(Optional.empty()));
+}
+```
+
+the whole API on one screen:
+
+| method | does |
+| --- | --- |
+| `Optional.of(x)` | a full box. throws an NPE if `x` is null |
+| `Optional.ofNullable(x)` | full if `x` isn't null, empty if it is. the bridge from null-land |
+| `Optional.empty()` | the empty box |
+| `map(f)` | apply `f` to the value, if any. a `null` result becomes empty |
+| `flatMap(f)` | same, when `f` itself returns an `Optional` (so you don't get a box in a box) |
+| `filter(p)` | keep the value only if `p` says yes |
+| `or(() -> other)` <Since v={9} /> | if empty, try another `Optional` |
+| `orElse(x)` | the value, or `x` |
+| `orElseGet(() -> x)` | the value, or compute `x` only now |
+| `orElseThrow()` <Since v={10} /> | the value, or `NoSuchElementException` |
+| `orElseThrow(() -> new X())` | the value, or your exception |
+| `ifPresent(c)`, `ifPresentOrElse(c, r)` <Since v={9} /> | do something with it, or something else |
+| `isPresent()`, `isEmpty()` <Since v={11} /> | ask. (usually a sign you could use one of the above) |
+| `stream()` <Since v={9} /> | a stream of zero or one elements, for `flatMap` in streams |
+
+`map` vs `flatMap` is the one that trips people. if the function itself returns an `Optional`, `map` wraps it again:
+
+```java
+Optional.of("x").map(s -> Optional.of(s + "!"))       // Optional[Optional[x!]]
+Optional.of("x").flatMap(s -> Optional.of(s + "!"))   // Optional[x!]
+```
+
+## orElse vs orElseGet
+
+<Predict options={["ada", "fallback() ran, then ada", "guest"]} answer={1}>
+```java
+String fallback() {
+    IO.println("fallback() ran");
+    return "guest";
+}
+
+void main() {
+    Optional<String> name = Optional.of("ada");
+    IO.println(name.orElse(fallback()));
+}
+```
+<Explain>
+`orElse` is an ordinary method, and java evaluates arguments before calling a method. so `fallback()` runs first, every time, and its result is thrown away when the box is full. `orElseGet(this::fallback)` passes a function instead, and it's only called when the box is empty.
+</Explain>
+</Predict>
+
+```java title="Main.java" run output="orElse:\n  fallback() ran\nada\norElseGet:\nada"
+import java.util.Optional;
+
+String fallback() {
+    IO.println("  fallback() ran");
+    return "guest";
+}
+
+void main() {
+    Optional<String> name = Optional.of("ada");
+    IO.println("orElse:");
+    IO.println(name.orElse(fallback()));
+    IO.println("orElseGet:");
+    IO.println(name.orElseGet(this::fallback));
+}
+```
+
+for a constant (`orElse("guest")`, `orElse(List.of())`) it doesn't matter. for anything that does work (a database call, building a big object, logging) use `orElseGet`.
+
+## what's in memory
+
+an `Optional` is a real object with one field, `value`. `Optional.of` allocates one. `Optional.empty()` doesn't: there's a single shared `EMPTY` instance in the JDK, and every empty optional is that one object.
+
+<Figure caption={<>two full boxes are two objects, each with a <C k="ref">reference</C> to its value. every empty optional is the same shared instance. (so yes, <code>Optional.empty() == Optional.empty()</code> is true, but don't rely on <code>==</code> for optionals: they're value-based, compare them with <code>equals</code>.)</>}>
+<Memory
+  frames={[{ name: "main", locals: { a: { ref: "o1" }, b: { ref: "o2" }, none: { ref: "e" }, alsoNone: { ref: "e" } } }]}
+  heap={{
+    o1: { type: "Optional", fields: { value: { ref: "s1" } } },
+    s1: { type: "String", value: '"ada"' },
+    o2: { type: "Optional", fields: { value: { ref: "s2" } } },
+    s2: { type: "String", value: '"bob"' },
+    e: { type: "Optional", fields: { value: null }, tag: "EMPTY" },
+  }}
+/>
+</Figure>
+
+that box costs 16 bytes and a pointer hop. for a return value that's nothing (and the JIT often removes it entirely when it doesn't escape). for a field in a million objects, it's 16 MB and a cache miss each, which is one of the reasons below.
+
+## where it belongs
+
+<Figure caption={<>click each place. <C k="live">yes</C> means Optional is the right tool, <C k="dead">no</C> means there's something simpler, shown underneath.</>}>
+<OptionalWhere />
+</Figure>
+
+<Effective item={55} title="return optionals judiciously">
+return an `Optional` when a method might not have a result and callers need to handle that. never return `null` from a method declared to return `Optional`, don't wrap collections, maps, streams or arrays (return an empty one), and use `OptionalInt` and friends for primitives.
+</Effective>
+
+## the anti-patterns
+
+<Compare>
+<Bad label="a null check with extra steps">
+```java
+Optional<User> u = findById(id);
+if (u.isPresent()) {
+    send(u.get().email());
+} else {
+    log.warn("no user " + id);
+}
+```
+</Bad>
+<Good label="say it in one expression">
+```java
+findById(id)
+    .map(User::email)
+    .ifPresentOrElse(this::send,
+        () -> log.warn("no user " + id));
+```
+</Good>
+</Compare>
+
+<Gotcha title="get() is the new NPE">
+`get()` on an empty optional throws a `NoSuchElementException` ("No value present"). calling it without checking is exactly the bug `Optional` was meant to prevent, just with a different name. if you're sure there's a value, write `orElseThrow()`: same behaviour, but the name admits it can throw. (`get()` isn't deprecated, but that's why `orElseThrow()` was added in java 10.)
+</Gotcha>
+
+<Gotcha title="an Optional can be null too">
+```java
+Optional<User> findById(long id) {
+    if (id < 0) return null;   // now callers get an NPE from calling .map on it
+    ...
+}
+```
+the whole contract of an `Optional` return type is "never null". return `Optional.empty()`.
+</Gotcha>
+
+<Interview q="when should you use Optional, and when not?">
+as a return type, when "no result" is a legitimate outcome and you want the caller forced to handle it: `findById`, `findFirst`, `max`. not for fields (extra object, not serializable, and the field can still be null), not for parameters (overload instead), not around collections (return an empty one), and use `OptionalInt`/`OptionalLong`/`OptionalDouble` for primitives. and use `map`/`filter`/`orElse`, not `isPresent` plus `get`.
+</Interview>
+
+<Keylines>
+- `Optional` is a return type that says "might be empty". that's its job.
+- work inside the box with `map`, `filter`, `flatMap`. open it once at the end.
+- `orElse(x)` always evaluates `x`. `orElseGet` only calls it when empty.
+- `get()` without a check is a hidden NPE. prefer `orElseThrow()`.
+- no Optional fields, parameters, or wrapped collections. and never return a null Optional.
+</Keylines>

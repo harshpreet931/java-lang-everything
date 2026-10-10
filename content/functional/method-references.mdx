@@ -1,0 +1,131 @@
+import { RefKinds, KindSorter } from "@/components/figures/functional/MethodRefs";
+
+<InShort>
+a **method reference** like `String::length` is a lambda whose whole body is one call to a method that already exists, written as a name instead of a body.
+
+there are four kinds: **static** (`Integer::parseInt`), **bound** (`System.out::println`), **unbound** (`String::length`) and **constructor** (`ArrayList::new`). the target type decides how the arguments line up.
+</InShort>
+
+## the picture
+
+you know how half your lambdas end up as `x -> something(x)`? the lambda adds nothing except a name for the argument, which you immediately hand to someone else. a method reference skips the middleman.
+
+think of a speed dial. instead of writing out the number every time (the lambda body), you point at a contact that's already saved (the method). the phone knows how to dial it.
+
+<Figure caption={<>pick a kind. each method reference sits next to the lambda it stands for. <C k="hot">amber</C> is the first argument the interface hands you, so watch where it goes: straight into the call for <em>static</em>, into the receiver position for <em>unbound</em>. <C k="ref">blue</C> is a receiver captured when the reference is created.</>}>
+<RefKinds />
+</Figure>
+
+## all four, running
+
+```java title="Main.java" run output="43\ntrue\n4\n0\n[]\n3"
+import java.util.*;
+import java.util.function.*;
+
+void main() {
+    // 1. static: Class::staticMethod
+    Function<String, Integer> parse = Integer::parseInt;   // s -> Integer.parseInt(s)
+    // 2. bound: expression::method, the receiver is fixed right now
+    String greeting = "hello";
+    Predicate<String> starts = greeting::startsWith;   // p -> greeting.startsWith(p)
+    // 3. unbound: Class::instanceMethod, the first argument is the receiver
+    Function<String, Integer> len = String::length;    // s -> s.length()
+    Comparator<String> cmp = String::compareToIgnoreCase;
+                                         // (a, b) -> a.compareToIgnoreCase(b)
+    // 4. constructor: Class::new (arrays too)
+    Supplier<List<String>> fresh = ArrayList::new;     // () -> new ArrayList<>()
+    IntFunction<int[]> array = int[]::new;             // n -> new int[n]
+
+    IO.println(parse.apply("42") + 1);
+    IO.println(starts.test("hell"));
+    IO.println(len.apply("duke"));
+    IO.println(cmp.compare("JAVA", "java"));
+    IO.println(fresh.get());
+    IO.println(array.apply(3).length);
+}
+```
+
+the same `::` text can mean different things depending on the target. `String::compareToIgnoreCase` takes one argument as a method, but as a `Comparator<String>` it takes two: the first one becomes the object the method is called on. that's the unbound trick, and it's why `list.sort(String::compareToIgnoreCase)` works.
+
+## sort them yourself
+
+the only hard part is telling **bound** from **unbound**. the question to ask: is there an actual object to the left of `::`, or just a class name?
+
+<Figure caption={<>pick a kind for each one. a class name before an instance method is <em>unbound</em>, an expression (a variable, <code>this</code>, a call) is <em>bound</em>, <code>::new</code> is always a constructor.</>}>
+<KindSorter />
+</Figure>
+
+## when the receiver gets evaluated
+
+here's the subtle difference between a bound reference and the lambda you'd write by hand. the lambda evaluates `sb` every time it runs. the method reference evaluates `sb` **once**, when the reference is created, and keeps that object.
+
+<Predict options={["a", "b", "compile error"]} answer={0}>
+```java
+StringBuilder sb = new StringBuilder("a");
+Supplier<String> snap = sb::toString;
+sb = new StringBuilder("b");
+IO.println(snap.get());
+```
+<Explain>
+`sb::toString` grabbed the first `StringBuilder` when it was created. reassigning the variable afterwards doesn't touch the reference. and notice it compiled: `sb` isn't effectively final, which would be illegal in `() -> sb.toString()`. a method reference doesn't capture the variable, it captures the object the expression evaluated to.
+</Explain>
+</Predict>
+
+that also means a `null` receiver blows up early, at creation, not when you call it:
+
+```java title="Main.java" run output="lambda created\nException in thread \"main\" java.lang.NullPointerException"
+import java.util.function.*;
+
+void main() {
+    String name = null;
+    Supplier<Integer> lazy = () -> name.length();   // fine until get()
+    IO.println("lambda created");
+    Supplier<Integer> eager = name::length;          // throws right here
+    IO.println("method ref created");
+}
+```
+
+javac literally inserts an `Objects.requireNonNull(name)` before the `invokedynamic`, which is why the stack trace points at `Objects.requireNonNull` and you get no helpful message about which variable was null.
+
+## when it's ambiguous
+
+a method reference has to resolve to exactly one method. overloads can make that impossible:
+
+```java
+Function<Integer, String> f = Integer::toString;  // [!code error]
+```
+
+```text
+error: incompatible types: invalid method reference
+    reference to toString is ambiguous
+      both method toString(int) in Integer and method toString() in Integer match
+```
+
+as a `Function<Integer, String>`, the `Integer` argument could be the receiver of `toString()` (unbound) or the argument to `static toString(int)`. javac refuses to guess. write the lambda (`i -> i.toString()`), or pick a reference with only one reading, like `Object::toString` or `String::valueOf`.
+
+<Effective item={43} title="prefer method references to lambdas">
+use a method reference when it's shorter and at least as clear. `map(String::length)` beats `map(s -> s.length())`. but when the class name is long and the lambda is short, or the lambda's parameter name explains something, keep the lambda. `x -> x` is less obscure than `Function.identity()` for many readers, and that's a fine reason to write it.
+</Effective>
+
+<Deep title="what javac emits for a method reference">
+same `invokedynamic` machinery as a lambda, minus one step. for `x -> x.length()` javac has to write a private `lambda$main$0` method to hold the body. for `String::length` there's nothing to write: the bootstrap method gets a direct handle to the method you named.
+
+```text
+REF_invokeVirtual java/lang/String.length:()I       // String::length
+REF_invokeStatic  java/lang/String.valueOf:(Ljava/lang/Object;)Ljava/lang/String;
+```
+
+for a bound reference, the receiver is evaluated, null-checked with `Objects.requireNonNull`, and passed to the `invokedynamic` as a captured argument, exactly like a captured local in a lambda. more in [lambda internals](/learn/deep-dives/lambda-internals).
+</Deep>
+
+<Interview q="what's the difference between String::length and str::length?">
+`String::length` is unbound: there's no string yet, so it's a `Function<String, Integer>` and the argument becomes the receiver. `str::length` is bound to one particular string, captured when the reference is created, so it's a `Supplier<Integer>` (or `IntSupplier`). bonus point: the bound one evaluates `str` immediately and throws a `NullPointerException` right there if it's null, while the equivalent lambda wouldn't fail until it was called.
+</Interview>
+
+<Keylines>
+- a method reference is a lambda that only calls one method. same objects, same `invokedynamic`.
+- static: arguments pass straight through. constructor: `::new`, arrays included.
+- unbound (`Class::method`): the first argument becomes the receiver.
+- bound (`expr::method`): the receiver is evaluated once, at creation. null fails right there.
+- overloads can make a reference ambiguous. then just write the lambda.
+</Keylines>

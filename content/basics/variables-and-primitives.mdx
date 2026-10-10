@@ -1,0 +1,156 @@
+import { PrimitiveWidths } from "@/components/figures/basics/PrimitiveWidths";
+
+<InShort>
+a **variable** is a named slot with a fixed **type**, and the type decides how many bits the slot has and what they mean. java has exactly **8 primitive types**: `byte`, `short`, `int`, `long`, `float`, `double`, `char`, `boolean`. everything else (strings, arrays, your classes) is an object, and a variable can only hold a **reference** to it.
+</InShort>
+
+## the picture
+
+think of variables as labelled boxes in a row of lockers. the label is the name. the type is the size and shape of the box: an `int` box holds exactly 32 bits, a `long` box holds 64, and a `boolean` box only takes `true` or `false`. you can change what's in a box, never its size or shape.
+
+```java title="Main.java" run output="21 true A 72.5"
+void main() {
+    int age = 21;
+    boolean ready = true;
+    char grade = 'A';
+    double weight = 72.5;
+    String name = "ada";
+    IO.println(age + " " + ready + " " + grade + " " + weight);
+}
+```
+
+<Figure caption={<>five locals in <code>main</code>'s frame. the four primitives sit right in their slots. <code>name</code> is the odd one out: its slot holds a <C k="ref">reference</C>, and the actual text lives on the heap.</>}>
+<Memory
+  frames={[{ name: "main", locals: { age: 21, ready: true, grade: "'A'", weight: 72.5, name: { ref: "s1" } } }]}
+  heap={{ s1: { type: "String", value: '"ada"' } }}
+/>
+</Figure>
+
+that split (values in the slot vs arrows to objects) is the most important picture in java. it gets its own chapter: [stack and heap](/learn/basics/stack-and-heap). this one is about the boxes themselves.
+
+## the eight primitives
+
+four whole-number types of increasing size, two decimal types, one for characters, one for yes/no. the sizes are fixed by the language spec: an `int` is 32 bits on every machine java runs on, which isn't true in C.
+
+<Figure wide caption={<>hover or tap a type. each cell is one byte, so you can compare sizes at a glance. the bits below are real: click any of them to flip it and watch the value change. try the leftmost bit of the int.</>}>
+<PrimitiveWidths />
+</Figure>
+
+you don't have to memorize the ranges. java will tell you:
+
+```java title="Main.java" run output="byte   -128 .. 127\nshort  -32768 .. 32767\nint    -2147483648 .. 2147483647\nlong   -9223372036854775808 .. 9223372036854775807\nchar   0 .. 65535\nfloat  3.4028235E38, smallest 1.4E-45\ndouble 1.7976931348623157E308, smallest 4.9E-324"
+void main() {
+    IO.println("byte   " + Byte.MIN_VALUE + " .. " + Byte.MAX_VALUE);
+    IO.println("short  " + Short.MIN_VALUE + " .. " + Short.MAX_VALUE);
+    IO.println("int    " + Integer.MIN_VALUE + " .. " + Integer.MAX_VALUE);
+    IO.println("long   " + Long.MIN_VALUE + " .. " + Long.MAX_VALUE);
+    IO.println("char   " + (int) Character.MIN_VALUE + " .. " + (int) Character.MAX_VALUE);
+    IO.println("float  " + Float.MAX_VALUE + ", smallest " + Float.MIN_VALUE);
+    IO.println("double " + Double.MAX_VALUE + ", smallest " + Double.MIN_VALUE);
+}
+```
+
+notice the whole-number types are lopsided: one more negative value than positive (`-128 .. 127`). that's [two's complement](/learn/basics/casting-and-overflow), the bit trick every CPU uses for negative numbers. and `Float.MIN_VALUE` is not the most negative float, it's the smallest *positive* one. classic trap.
+
+in practice you'll use three of them most of the time: `int` for counting, `double` for measuring, `boolean` for deciding. `long` when numbers get big, `char` when you're poking at text, the rest when you have a specific reason.
+
+## literals
+
+a literal is a value written directly in the code. its spelling decides its type:
+
+| you write | type | value |
+| --- | --- | --- |
+| `42` | int | 42 |
+| `42L` | long | 42 (always use capital `L`, a lowercase `l` looks like a `1`) |
+| `0x2A`, `0b10_1010` | int | 42, in hex and binary |
+| `1_000_000` | int | a million. underscores are just for your eyes |
+| `3.14` | double | any decimal point means double |
+| `3.14f` | float | `f` makes it a float |
+| `'A'`, `'\n'`, `'A'` | char | single quotes, one character (`A` is also `'A'`) |
+| `true`, `false` | boolean | that's the whole list |
+
+```java title="Main.java" run output="42 42 42 42\n3000000000 A 65 B"
+void main() {
+    int dec = 42, hex = 0x2A, bin = 0b10_1010, oct = 052;
+    IO.println(dec + " " + hex + " " + bin + " " + oct);
+    long big = 3_000_000_000L;
+    char c = 'A';
+    IO.println(big + " " + c + " " + (int) c + " " + (char) (c + 1));
+}
+```
+
+see `oct = 052`? that's 42 too. a leading zero means **octal** (base 8). nobody does that on purpose.
+
+<Predict options={["11", "9", "compile error"]} answer={1}>
+```java
+int x = 010;
+IO.println(x + 1);
+```
+<Explain>
+`010` is octal: 1 × 8 + 0 = 8. so `x + 1` is 9. if you ever line up numbers with leading zeros to make a table look neat, java quietly reads them in base 8 (and `09` doesn't compile at all: "illegal digit in an octal literal").
+</Explain>
+</Predict>
+
+<Gotcha title="a whole number literal is an int, even when it's going into a long">
+```java title="Main.java"
+void main() {
+    long big = 3_000_000_000; // [!code error]
+}
+```
+
+`error: integer number too large`. the literal is checked as an `int` first, and 3 billion doesn't fit in an `int`. the `long` on the left doesn't help. write `3_000_000_000L`.
+</Gotcha>
+
+## char is a number in disguise
+
+a `char` is a 16-bit unsigned number that java prints as a character. `'A'` is 65, `'a'` is 97, `'0'` is 48. do arithmetic on it and you get an `int` back, which is why `(char) (c + 1)` above needed the cast to print `B`.
+
+<Figure caption={<>a char's bits. flip some and watch the letter change. bit 5 (the 32s place) is the difference between upper and lower case in ASCII: 65 is 'A', 97 is 'a'.</>}>
+<Bits type="char" value="A" editable />
+</Figure>
+
+and one `char` is one UTF-16 **code unit**, not one "character" as a human counts them. anything outside the first 65,536 code points (most emoji, for example) needs two `char`s:
+
+```java title="Main.java" run output="2 1 55357 56832"
+void main() {
+    String s = "😀";
+    IO.println(s.length() + " " + s.codePointCount(0, s.length()) + " " + (int) s.charAt(0) + " " + (int) s.charAt(1));
+}
+```
+
+`length()` is 2, there's 1 code point, and the two halves are called a surrogate pair. more in [strings, the basics](/learn/basics/strings-101).
+
+## declaring and assigning
+
+```java
+int count;          // declared: the slot exists, no value yet
+count = 3;          // assigned
+int total = count;  // declared and assigned. copies the 3
+count = 10;         // total is still 3
+final int max = 5;  // final: assigned once, never again
+```
+
+`=` always **copies what's in the slot**. for a primitive that's the value itself, so `total` and `count` are independent from then on. (for objects, what's in the slot is a reference, which is why `=` behaves so differently there. see [pass-by-value](/learn/basics/pass-by-value).)
+
+names start with a letter, `_` or `$`, can contain digits after that, and can't be a keyword. convention: `camelCase` for variables, `UPPER_SNAKE` for constants. since java 22, a lone `_` means "a variable i don't need", like `catch (Exception _)`.
+
+| type of slot | gets a default? |
+| --- | --- |
+| fields and array elements | yes: `0`, `0.0`, `false`, `'\u0000'`, `null` |
+| local variables | no. reading one before assigning it is a compile error |
+
+<Deep title="why have primitives at all, if everything else is an object?">
+speed and size. an `int` is 4 bytes, sitting right in its slot. an `Integer` object is a 4-byte value plus a 12-byte header, rounded up to 16 bytes, plus a 4-byte reference to find it (on a typical 64-bit HotSpot with compressed pointers), and the CPU has to follow that reference to read it. a million `int`s in an `int[]` is 4 MB. a million `Integer`s in a list is closer to 20 MB, scattered around the heap. java was designed in the 90s for machines where that mattered a lot, and it still matters. the long-running project to get the best of both (objects that behave like primitives) is [valhalla](/learn/future/valhalla). the boxing side of the story is in [wrappers and autoboxing](/learn/core-api/wrappers-and-boxing).
+</Deep>
+
+<Interview q="what's the size of a boolean in java?">
+the language doesn't say. it holds one bit of information, but HotSpot never stores it in one bit: a boolean field or `boolean[]` element takes a byte, and inside a method a boolean is handled as an `int` by the bytecode (there's no "boolean add" instruction, `true` is literally the int 1). every other primitive has a size fixed by the spec: 8, 16, 32 or 64 bits.
+</Interview>
+
+<Keylines>
+- a variable is a named slot with a fixed type. the type fixes its size and meaning forever.
+- 8 primitives: byte 8, short 16, char 16, int 32, long 64, float 32, double 64 bits, plus boolean.
+- `int` and `double` are the defaults. a whole-number literal is an `int` until you add `L`.
+- `char` is an unsigned 16-bit number, one UTF-16 code unit, not always one visible character.
+- `=` copies what's in the slot. for primitives, that's the value.
+</Keylines>

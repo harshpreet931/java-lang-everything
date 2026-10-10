@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+.vercel
+.env*
+/tools/tracer/build
+
+# local-only: personal writing notes and agent instructions
+VOICE.md
+AGENTS.md
+CLAUDE.md
+.claude/

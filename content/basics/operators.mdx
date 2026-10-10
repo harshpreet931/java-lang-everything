@@ -1,0 +1,167 @@
+import { ExprTree } from "@/components/figures/basics/ExprTree";
+
+export const incdec = {
+  file: "Main.java",
+  source: `void main() {
+    int i = 5;
+    int a = i++;
+    int b = ++i;
+    int c = i++ + ++i;
+    IO.println(a + " " + b + " " + c + " " + i);
+}`,
+  steps: [
+    { line: 2, frames: [{ name: "main", locals: {} }], heap: {}, note: "main starts. no locals yet." },
+    { line: 3, frames: [{ name: "main", locals: { i: 5 } }], heap: {}, note: "i is 5. first, the postfix one: i++." },
+    { line: 3, frames: [{ name: "main", locals: { i: 6 } }], heap: {}, note: "i++ grabs the current value (5) for the expression, then bumps i to 6. the 5 is still in flight: a isn't assigned yet." },
+    { line: 4, frames: [{ name: "main", locals: { i: 6, a: 5 } }], heap: {}, note: "a got the OLD value, 5. i is already 6." },
+    { line: 4, frames: [{ name: "main", locals: { i: 7, a: 5 } }], heap: {}, note: "now the prefix one: ++i bumps i to 7 first, then hands over the NEW value." },
+    { line: 5, frames: [{ name: "main", locals: { i: 7, a: 5, b: 7 } }], heap: {}, note: "b is 7. next line has both, and java evaluates operands strictly left to right." },
+    { line: 5, frames: [{ name: "main", locals: { i: 8, a: 5, b: 7 } }], heap: {}, note: "left operand: i++ hands over 7, i becomes 8." },
+    { line: 5, frames: [{ name: "main", locals: { i: 9, a: 5, b: 7 } }], heap: {}, note: "right operand: ++i makes i 9 and hands over 9. so c = 7 + 9." },
+    { line: 6, frames: [{ name: "main", locals: { i: 9, a: 5, b: 7, c: 16 } }], heap: {}, note: "c is 16, and i is 9: it went up once per ++, four times in total." },
+    { line: 6, frames: [{ name: "main", locals: { i: 9, a: 5, b: 7, c: 16 } }], heap: {}, stdout: "5 7 16 9\n", note: "5 7 16 9. same ++, two answers, depending on which side of the variable it's on." },
+  ],
+};
+
+<InShort>
+operators are the verbs: `+`, `*`, `==`, `&&`. **precedence** decides how an expression is grouped (`*` before `+`), **left-to-right evaluation** decides the order things actually run, and `&&` / `||` **short-circuit**: they skip the right side when the left already decides. `i++` hands over the old value, `++i` the new one.
+</InShort>
+
+## the picture
+
+you know how `2 + 3 * 4` is 14 and not 20? same as in math class. java doesn't read an expression left to right like a sentence. before anything runs, the compiler groups it into a **tree** using precedence rules, and the tree is what gets evaluated: children first, then their parent.
+
+<Figure wide caption={<>pick an example or type your own (ints, decimals, strings, true/false, <code>+ - * / % &lt; &gt; == != &amp;&amp; || !</code> and parentheses). step through: each step evaluates one operator whose operands are ready, and the line under the tree rewrites itself. try the last one: the <code>1 / 0</code> that never runs.</>}>
+<ExprTree />
+</Figure>
+
+a few things that tree just showed you:
+
+- **precedence groups, it doesn't schedule.** `*` binds tighter than `+`, so `3 * 4` becomes one subtree. parentheses override it.
+- **same precedence groups left to right.** `10 - 4 - 3` is `(10 - 4) - 3` = 3, not `10 - (4 - 3)` = 9.
+- **types flow up the tree.** `1 + 2 + "3" + 4 + 5` is `"3345"`: `1 + 2` is still int math (3), then a String joins and every `+` after that glues text.
+- **int division throws away the fraction** before the `* 2.0` ever sees it: `7 / 2 * 2.0` is `6.0`, not `7.0`.
+
+## the arithmetic ones
+
+`+ - * / %` work like you'd expect, with two catches when both sides are integers:
+
+```java title="Main.java" run output="3 -3 1 -1\n-4 2"
+void main() {
+    IO.println(7 / 2 + " " + -7 / 2 + " " + 7 % 3 + " " + -7 % 3);
+    IO.println(Math.floorDiv(-7, 2) + " " + Math.floorMod(-7, 3));
+}
+```
+
+- integer `/` **truncates toward zero**: `7 / 2` is 3 and `-7 / 2` is -3 (not -4).
+- `%` is the **remainder**, and it takes the sign of the left side: `-7 % 3` is -1. if you wanted a "wrap around" modulo (like for clock arithmetic or array indexes), use `Math.floorMod`, which gives 2.
+- integer `/ 0` throws `ArithmeticException`. a `double` divided by zero gives `Infinity` instead (more in [floating point](/learn/basics/floating-point)).
+- int math that doesn't fit in 32 bits silently **wraps around**. that's its own chapter: [casting and overflow](/learn/basics/casting-and-overflow).
+
+compound assignment is shorthand: `x += 5` means `x = x + 5`, same for `-=`, `*=`, `/=`, `%=` and the bit ones. (with one sneaky extra: it casts the result back to `x`'s type, which [casting](/learn/basics/casting-and-overflow) explains.)
+
+## i++ vs ++i
+
+both add 1 to `i`. the difference is what the *expression* is worth: `i++` (postfix) is worth the value **before** the increment, `++i` (prefix) the value **after**.
+
+<Figure wide caption={<>step through and watch <code>i</code> in the frame. the steps in the middle of a line are real: java does the increment the moment it evaluates that operand, not at the end of the statement.</>}>
+<MemoryStepper trace={incdec} />
+</Figure>
+
+on its own line (`i++;` or a `for` loop's update) the two are identical, since nobody uses the value. the difference only bites when the increment is *inside* a bigger expression. which is a good reason to never put it there.
+
+<Predict options={["0", "1", "compile error"]} answer={0}>
+```java
+int i = 0;
+i = i++;
+IO.println(i);
+```
+<Explain>
+`i++` hands over the old value (0) and bumps `i` to 1. then the assignment runs last and stores that 0 back into `i`, overwriting the 1. javac compiles it to exactly that: load i (0), increment the slot (1), store the loaded 0 back. so it prints 0, and it would print 0 if you ran the line a million times.
+</Explain>
+</Predict>
+
+## comparison and logic
+
+comparisons (`< <= > >= == !=`) produce a `boolean`. logic combines booleans: `&&` (and), `||` (or), `!` (not).
+
+the important part: `&&` and `||` **short-circuit**. if the left side of `&&` is `false`, the answer is `false` no matter what, so the right side never runs. same for `||` with `true`. that's not an optimization you can ignore, it's a feature you lean on:
+
+<Compare>
+<Bad label="& evaluates both sides, always">
+```java
+String name = null;
+if (name != null & name.length() > 3) {
+    IO.println("long name");
+}
+```
+`NullPointerException`: `&` on booleans is a logical and **without** the short circuit, so `name.length()` runs anyway.
+</Bad>
+<Good label="&& stops at the first false">
+```java
+String name = null;
+if (name != null && name.length() > 3) {
+    IO.println("long name");
+}
+```
+`name != null` is false, so `name.length()` is never called. the null check guards the call.
+</Good>
+</Compare>
+
+`a ? b : c` (the **ternary**) picks one of two values: `int max = a > b ? a : b;`. only the chosen side is evaluated. it nests, but past two levels nobody can read it, use a [switch](/learn/basics/switch).
+
+`==` on primitives compares values. on objects it compares **references** (is it the same object?), which is why `==` on strings is a bug. see [strings, the basics](/learn/basics/strings-101).
+
+## bits and shifts
+
+the bitwise operators work on the individual bits of integers: `&` (and), `|` (or), `^` (xor), `~` (flip all), and three shifts. `<<` shifts left (each step doubles), `>>` shifts right keeping the sign, `>>>` shifts right filling with zeros.
+
+<Figure caption={<>the same <code>-8</code> shifted right by one, two ways. <code>&gt;&gt;</code> copies the <C k="hot">sign bit</C> in from the left, so the number stays negative (-4). <code>&gt;&gt;&gt;</code> shifts in a zero, and a negative number becomes a huge positive one. click bits to play.</>}>
+<div className="grid gap-6">
+<Bits type="int" value={-4} label="-8 >> 1" editable />
+<Bits type="int" value={2147483644} label="-8 >>> 1" editable />
+</div>
+</Figure>
+
+```java title="Main.java" run output="-4 2147483644 1 4294967296\n1 7 6 -6"
+void main() {
+    IO.println((-8 >> 1) + " " + (-8 >>> 1) + " " + (1 << 32) + " " + (1L << 32));
+    IO.println((5 & 3) + " " + (5 | 3) + " " + (5 ^ 3) + " " + ~5);
+}
+```
+
+note `1 << 32` is 1, not 0: for an `int` only the low 5 bits of the shift distance count, so shifting by 32 is shifting by 0. (`long` uses the low 6 bits.) you'll see these mostly in hashing, flags and low-level code, for example inside [HashMap](/learn/deep-dives/hashmap-internals).
+
+## the precedence table
+
+tightest first. you don't need to memorize it: when in doubt, add parentheses, they're free and the next reader will thank you.
+
+| level | operators |
+| --- | --- |
+| postfix | `x++` `x--` |
+| unary | `++x` `--x` `+x` `-x` `!` `~` `(type)` |
+| multiplicative | `*` `/` `%` |
+| additive | `+` `-` |
+| shift | `<<` `>>` `>>>` |
+| relational | `<` `>` `<=` `>=` `instanceof` |
+| equality | `==` `!=` |
+| bitwise | `&`, then `^`, then `\|` |
+| logical | `&&`, then `\|\|` |
+| ternary | `? :` |
+| assignment | `=` `+=` `-=` `*=` ... (groups right to left: `a = b = 5`) |
+
+<Gotcha title="precedence is not evaluation order">
+in `f() + g() * h()`, the `*` binds tighter, but java still **calls** `f()` first, then `g()`, then `h()`. operands are always evaluated left to right; precedence only decides which results get combined with which. if those methods print something or change shared state, the order is guaranteed (unlike in C, where it's unspecified).
+</Gotcha>
+
+<Interview q="what's the difference between & and &&?">
+on booleans, both mean "and", but `&&` short-circuits: if the left side is false it doesn't evaluate the right. `&` always evaluates both. that matters when the right side has a side effect or depends on the left (`x != null && x.isEmpty()`). on integers, `&` is bitwise and, and `&&` doesn't compile. same story for `|` vs `||`.
+</Interview>
+
+<Keylines>
+- precedence builds the tree (`*` before `+`), then java evaluates it children-first, operands left to right.
+- int `/` truncates, `%` keeps the left side's sign, `/ 0` throws. doubles give Infinity instead.
+- `i++` is worth the old value, `++i` the new one. keep them out of bigger expressions.
+- `&&` and `||` short-circuit, `&` and `|` don't. use the short-circuit ones to guard calls.
+- when precedence isn't obvious, parenthesize. it costs nothing.
+</Keylines>

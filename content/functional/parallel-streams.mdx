@@ -1,0 +1,133 @@
+import { WorkStealing } from "@/components/figures/functional/WorkStealing";
+
+<InShort>
+`.parallel()` splits the source into chunks with a **spliterator**, runs the chunks on the shared **common ForkJoinPool** (one worker per core, minus one, plus your own thread), and combines the results.
+
+it's only faster when there's a lot of independent, CPU-heavy work on a source that splits cleanly. for small or cheap jobs it's slower, and the moment the lambdas touch shared mutable state, it's wrong.
+</InShort>
+
+## the picture
+
+you know how `.parallel()` is one word and looks like free speed? it isn't free. splitting the work, waking threads, handing chunks around and merging the answers all cost time, and you only come out ahead if the actual work is bigger than that overhead.
+
+think of grading a pile of exams. with a hundred exams and five teaching assistants, you split the pile and finish five times sooner. with three exams, by the time you've split them up and collected them back, you'd have been done alone. and if every TA writes their tallies on the same whiteboard at the same time, the totals are garbage.
+
+<Figure wide caption={<>step through it. a parallel stream over 16 elements, simplified to 3 threads and chunks of 4 (the real pool on a 14-core mac has 13 workers and would split 16 elements all the way down to single elements). <C k="hot">amber</C> is running right now, dashed boxes are waiting in a thread's deque, <C k="live">green</C> is done.</>}>
+<WorkStealing />
+</Figure>
+
+three things in that picture are worth remembering. your own thread works too, it doesn't just wait. splitting is done by the source's `Spliterator.trySplit()`, so the source decides how well this goes. and nobody hands out work: idle threads **steal** from the back of busy threads' deques, which keeps everyone busy even when chunks take different amounts of time. more in [fork/join and work stealing](/learn/concurrency/fork-join).
+
+## when it's actually faster
+
+rough numbers, so read the shape, not the decimals: best of 10 to 200 runs (after warm-up) timed with `System.nanoTime` on jdk 25, 14-core arm mac. not [JMH](/learn/performance/jmh).
+
+<Figure caption={<>speedup from adding <code>.parallel()</code>: sequential time divided by parallel time. below 1 means parallel was <C k="dead">slower</C>. the 10M sum swung between 6.1× and 8.4× across two runs, which tells you how noisy this is.</>}>
+<Bars
+  unit="×"
+  data={[
+    { label: "IntStream.range(0, 1_000).sum()", value: 0.15, tone: "dead" },
+    { label: "LinkedList of 1M, mapToInt().sum()", value: 1.3 },
+    { label: "ArrayList of 1M, mapToInt().sum()", value: 3.4 },
+    { label: "LongStream.range(0, 10M).sum()", value: 8.4 },
+    { label: "count primes below 2M", value: 8.8 },
+  ]}
+/>
+</Figure>
+
+see the pattern? the prime count does real work per element and wins big. summing a thousand ints takes 0.3 µs sequentially, so parallel's ~2 µs of setup makes it 7 times *slower*. and the `LinkedList` barely helps, because a linked list can't split in half without walking to the middle.
+
+Doug Lea's rule of thumb (from his guidance on parallel streams, written with Brian Goetz and others): multiply **N** (number of elements) by **Q** (cost per element, roughly in operations). if N × Q isn't at least around 10,000, which is about 100 µs of sequential work, don't bother.
+
+| helps | hurts |
+| --- | --- |
+| arrays, `ArrayList`, `IntStream.range`, `HashMap` (split cleanly) | `LinkedList`, `Stream.iterate`, `BufferedReader.lines()` (split badly) |
+| primitive streams | boxing (memory bandwidth, not CPU, becomes the limit) |
+| stateless ops: `map`, `filter` | order-dependent ops: `limit`, `skip`, `findFirst`, `sorted` |
+| cheap combine: `sum`, `count` | expensive combine: merging big maps in `groupingBy` |
+| CPU-bound work | blocking I/O (it starves the shared pool) |
+
+## the bug: shared mutable state
+
+this is the one that bites. the lambdas run on several threads at once, so anything they share has to be thread-safe, and `ArrayList` isn't:
+
+```java
+List<Integer> out = new ArrayList<>();
+IntStream.range(0, 10_000).parallel().forEach(out::add);   // [!code error]
+IO.println(out.size());   // one run printed 4458
+```
+
+<Figure caption={<>1000 runs of that code on jdk 25. it gave the <C k="live">right answer</C> about one time in nine. the rest lost elements, left <code>null</code>s in the list (two threads wrote the same slot), or crashed while the list was resizing. a second batch had a different split, which is the nature of a race.</>}>
+<Bars
+  log
+  unit="runs"
+  data={[
+    { label: "10,000 (correct)", value: 111, tone: "live" },
+    { label: "lost elements", value: 259, tone: "dead" },
+    { label: "lost elements + nulls", value: 277, tone: "dead" },
+    { label: "ArrayIndexOutOfBounds", value: 353, tone: "dead" },
+  ]}
+/>
+</Figure>
+
+the fix isn't a synchronized list (that works, and serializes the whole thing, so why go parallel). the fix is to let the stream build the result, so each chunk builds its own piece and the pieces are merged:
+
+```java title="Main.java" run output="10000 0 9999"
+import java.util.*;
+import java.util.stream.*;
+
+void main() {
+    List<Integer> good = IntStream.range(0, 10_000).parallel().boxed().toList();
+    IO.println(good.size() + " " + good.getFirst() + " " + good.getLast());
+}
+```
+
+same rule as [reduction](/learn/functional/reduction): describe the result, don't mutate your way to it. the race itself is explained frame by frame in [race conditions](/learn/concurrency/race-conditions).
+
+## order
+
+a parallel stream still knows the encounter order of its source, and some operations promise to respect it. that promise costs coordination.
+
+```java title="Main.java" run output="0 1 2 3 4 5 6 7 \n51"
+import java.util.stream.*;
+
+void main() {
+    IntStream.range(0, 8).parallel().forEachOrdered(i -> IO.print(i + " "));
+    IO.println();
+    IO.println(IntStream.range(0, 100).parallel().filter(i -> i > 50).findFirst().getAsInt());
+}
+```
+
+`forEach` makes no promise: one run of `IntStream.range(0, 8).parallel().forEach(...)` printed `5 4 0 1 2 3 6 7`, the next `5 7 6 1 4 2 3 0`. `forEachOrdered` and `findFirst` give the sequential answer, but threads have to wait for each other to do it. if you don't care which element you get, `findAny()` is cheaper, and `.unordered()` tells `limit`, `distinct` and friends they can stop caring too.
+
+<Predict options={["it depends on the run", "[0, 1, 2]", "[2, 1, 0]"]} answer={1}>
+```java
+IO.println(IntStream.range(0, 1000).parallel()
+        .boxed()
+        .limit(3)
+        .toList());
+```
+<Explain>
+`limit` on an ordered stream means "the first 3 in encounter order", parallel or not, and `toList()` keeps encounter order. so it's always `[0, 1, 2]`. what parallel changes is the cost: threads may compute elements past the limit that then get thrown away. order is a promise about the result, not about which thread ran first.
+</Explain>
+</Predict>
+
+<Gotcha title="every parallel stream shares one pool">
+all parallel streams in the JVM (and every `CompletableFuture` without an explicit executor) run on `ForkJoinPool.commonPool()`, which has `availableProcessors() - 1` threads: 13 on a 14-core mac. if one parallel stream blocks on I/O inside its lambdas, it holds those threads hostage and every other parallel stream in the app slows down. size it with `-Djava.util.concurrent.ForkJoinPool.common.parallelism=N`, keep blocking work out of it, and for slow I/O calls use [virtual threads](/learn/concurrency/virtual-threads) or `Gatherers.mapConcurrent` ([gatherers](/learn/functional/gatherers)) instead.
+</Gotcha>
+
+<Deep title="the custom pool trick, and why it's not a contract">
+you'll see this on stack overflow: `new ForkJoinPool(4).submit(() -> list.parallelStream()...).get()`. it makes the stream run in that pool instead of the common one, because a fork/join task forks into whatever pool the current thread belongs to. it works on every JDK so far, but it's an implementation detail, not documented API, so treat it as a hack. and a container that limits your CPUs changes `availableProcessors()`, which changes the common pool's size. see [the JVM in containers](/learn/performance/jvm-in-containers).
+</Deep>
+
+<Interview q="when would you use a parallel stream?">
+when the data is large, the per-element work is CPU-bound and independent, the source splits well (arrays, `ArrayList`, ranges), and I've measured it. Doug Lea's heuristic is N × Q of at least about 10,000. I'd avoid it for small collections, `LinkedList` or I/O sources, blocking calls (they starve the shared common pool), and anything with shared mutable state. bonus point: order-sensitive operations like `limit` and `findFirst` get more expensive in parallel, and `unordered()` or `findAny()` can win that back.
+</Interview>
+
+<Keylines>
+- `.parallel()` = split with a spliterator, run on the common ForkJoinPool, combine.
+- your thread works too, and idle workers steal chunks from busy ones.
+- it pays off only for lots of CPU-heavy, independent work. N × Q ≥ ~10,000, then measure.
+- shared mutable state in the lambdas is a race. let the stream build the result.
+- every parallel stream shares one pool. never block in it.
+</Keylines>

@@ -1,0 +1,151 @@
+import { BugMatrix } from "@/components/figures/tooling/BugMatrix";
+
+<InShort>
+javac only checks that your code is legal java. a family of **static analysis** tools checks whether it's *right*: **Error Prone** hooks into javac and fails the build on known bug patterns, **NullAway** plus **JSpecify** annotations catch `NullPointerException`s at compile time, **SpotBugs** reads your bytecode, **PMD** and **Checkstyle** read your source.
+
+they overlap, they each miss things, and every one of them caught something javac didn't.
+</InShort>
+
+## the picture
+
+javac is a grammar checker. it confirms every sentence is well-formed. it doesn't notice that you wrote "lock the door" and then walked away without locking it. these tools are the proofreaders who've seen that mistake ten thousand times and recognise its shape.
+
+they plug in at different points of the build, which decides what they can see:
+
+<Figure caption="hover a stage. source tools see formatting and names, compile-time tools see types, bytecode tools see what javac actually produced.">
+<Flow
+  stages={[
+    { label: "*.java", sub: "checkstyle · pmd", note: "read the source text and syntax tree. great at style, naming, and simple bug patterns." },
+    { label: "javac", sub: "error prone · nullaway", note: "run inside the compiler as a plugin, with full type information. can fail the build like a compile error." },
+    { label: "*.class", sub: "spotbugs", note: "analyses the compiled bytecode, so it sees through generated code and other JVM languages too." },
+  ]}
+/>
+</Figure>
+
+## what each one caught
+
+i wrote three small classes with nine classic mistakes, and ran all of them on their **default configuration** in one maven build (jdk 25). javac compiled every file without a single warning.
+
+<Figure wide caption={<>click a dot to read the real message. a <C k="live">green dot</C> means that tool flagged the line. no tool caught everything; spotbugs caught the most, error prone explained the fix best.</>}>
+<BugMatrix />
+</Figure>
+
+a few things jump out:
+
+- **javac caught zero.** every one of these compiles. `s.trim()` on its own line, an exception that's built and never thrown, `==` on strings: all legal java.
+- **overlap is normal.** error prone and spotbugs both caught `trim()`, the dead exception and the string `==`. that's fine, they found them in different ways (types vs bytecode).
+- **each had a solo find.** only spotbugs noticed the leaked file handle, only error prone the mutable `public static final` array, only PMD the `hashCode` without `equals`, only checkstyle the naming.
+
+that's the honest case for running more than one. and for picking deliberately, because each one has a cost in build time and noise.
+
+## error prone: bugs as compile errors
+
+error prone (from google) runs inside javac as a compiler plugin, so its checks fail the build exactly like a type error does, with a suggested fix. this is the setup that produced the output above:
+
+```xml title="pom.xml (maven-compiler-plugin)"
+<configuration>
+  <compilerArgs>
+    <arg>-XDcompilePolicy=simple</arg>
+    <arg>--should-stop=ifError=FLOW</arg>
+    <arg>-Xplugin:ErrorProne -XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:JSpecifyMode=true</arg>
+  </compilerArgs>
+  <annotationProcessorPaths>
+    <path>
+      <groupId>com.google.errorprone</groupId>
+      <artifactId>error_prone_core</artifactId>
+      <version>2.50.0</version>
+    </path>
+    <path>
+      <groupId>com.uber.nullaway</groupId>
+      <artifactId>nullaway</artifactId>
+      <version>0.14.2</version>
+    </path>
+  </annotationProcessorPaths>
+</configuration>
+```
+
+because it reaches into javac's internals, it also needs a `.mvn/jvm.config` with a handful of `--add-exports jdk.compiler/com.sun.tools.javac.*=ALL-UNNAMED` lines (the [module system](/learn/tooling/modules) walls in the compiler too). the error prone docs list them. the payoff:
+
+```text
+[ERROR] Bugs.java:[13,15] [ReturnValueIgnored] Return value of 'trim' must be used
+    (see https://errorprone.info/bugpattern/ReturnValueIgnored)
+  Did you mean 's = s.trim();' or to remove this line?
+[ERROR] Bugs.java:[19,13] [DeadException] Exception created but not thrown
+    (see https://errorprone.info/bugpattern/DeadException)
+  Did you mean 'throw new IllegalArgumentException("negative age: " + age);'?
+```
+
+those two are errors by default: error prone only makes a check an error when it's essentially never a false positive. the rest (`EqualsIncompatibleType`, `ReferenceEquality`, `MutablePublicArray`) came out as warnings. it even suggested renaming my unused local to `_`, the java 22 unnamed variable. kinda nice.
+
+## null safety: JSpecify and NullAway
+
+`NullPointerException` is still the exception every java developer knows best. the fix that's finally converging is two parts:
+
+<Defs>
+<dt>JSpecify</dt><dd>a tiny jar of standard annotations (1.0 shipped in july 2024), agreed on by google, jetbrains, uber, oracle, spring and others. `@NullMarked` on a class or package says "nothing here is null unless marked". `@Nullable` marks the exceptions.</dd>
+<dt>NullAway</dt><dd>an error prone plugin (from uber) that enforces those annotations at compile time, fast enough to run on every build.</dd>
+</Defs>
+
+```java title="Users.java"
+import java.util.Map;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+@NullMarked
+public class Users {
+    private final Map<String, String> emails = Map.of("ada", "ada@example.com");
+
+    @Nullable String emailOf(String user) {
+        return emails.get(user);              // Map.get can return null
+    }
+
+    int emailLength(String user) {
+        return emailOf(user).length();        // [!code error]
+    }
+}
+```
+
+```text
+[WARNING] Users.java:[16,29] [NullAway] dereferenced expression 'emailOf(user)' is @Nullable
+```
+
+notice it came out as a **warning**: that's error prone's default severity for NullAway. teams turn it up with `-Xep:NullAway:ERROR` once a codebase is clean. under `@NullMarked`, the opposite mistake is caught too: returning `null` from a method that doesn't say `@Nullable`. the type system starts carrying the information your javadoc used to.
+
+<Note title="the JDK and frameworks are coming along">
+JSpecify annotations are spreading through the ecosystem: [junit 6](/learn/tooling/testing-with-junit) annotates its whole API with them, and spring framework 7 adopted them too. and project valhalla is working on nullness in the type system itself (`String!`), which would make some of this a language feature. see [valhalla](/learn/future/valhalla).
+</Note>
+
+## spotbugs, PMD, checkstyle
+
+**SpotBugs** (the successor to FindBugs) analyses bytecode with a few hundred detectors and ranks findings by confidence. it caught 6 of the 9 here, including the resource leak nobody else saw. it runs after compilation, so it's a separate build step (`mvn spotbugs:check`).
+
+**PMD** checks source code against rule sets: bugs, design smells, unused code, complexity. its default maven rule set is deliberately small (it flagged two of the nine, plus two unused imports). most of its value is in the rules you turn on.
+
+**Checkstyle** is about consistency: formatting, naming, javadoc presence. which brings us to the classic mistake:
+
+<Gotcha title="the style checker hated 4-space indentation">
+with `google_checks.xml`, checkstyle reported **42 violations** on these three tiny files. one was the `total_items` name. the vast majority looked like this:
+
+```text
+[WARN] Cart.java:12:9: 'method def' child has incorrect indentation level 8,
+       expected level should be 4. [Indentation]
+```
+
+google's java style uses 2-space indents. everyone else's java uses 4. a style tool is only useful when its config is *your team's* style, so start from a config that matches the code you have (or let a formatter like google-java-format or palantir-java-format own whitespace entirely, and keep checkstyle for the things a formatter can't fix).
+</Gotcha>
+
+<Deep title="where should these run?">
+error prone and NullAway are cheap enough to run on every compile, which is the best place for a check: the feedback arrives while the code is still in your head. spotbugs and PMD add seconds to minutes, so many teams run them in CI and on pull requests. and introduce any of them on a big old codebase with a **baseline**: suppress the existing findings, fail only on new ones, burn the old ones down over time. turning on a tool that reports 3,000 issues on day one just teaches everyone to ignore it.
+</Deep>
+
+<Interview q="how would you prevent NullPointerExceptions in a large java codebase?">
+make nullness part of the types instead of the documentation: mark packages `@NullMarked` with JSpecify, annotate the few things that can be null with `@Nullable`, and enforce it at compile time with NullAway (or the checker framework for a stricter, slower version). at the boundaries, validate inputs early (`Objects.requireNonNull`), and use `Optional` for return values that can be absent. bonus point: mention java's helpful NPE messages (java 14+) for the ones that still get through, and that valhalla is exploring null-restricted types.
+</Interview>
+
+<Keylines>
+- javac checks legality. static analysis checks for known mistakes.
+- error prone and NullAway run inside javac and can fail the build like a type error.
+- JSpecify `@NullMarked` + `@Nullable` + NullAway = NPEs caught at compile time.
+- spotbugs reads bytecode, PMD and checkstyle read source. each catches things the others miss.
+- configure for your codebase and start from a baseline, or the noise wins.
+</Keylines>

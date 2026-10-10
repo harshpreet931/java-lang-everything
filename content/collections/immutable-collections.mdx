@@ -1,0 +1,167 @@
+import { MutabilityGrid } from "@/components/figures/collections/MutabilityGrid";
+
+export const viewVsCopy = {
+  file: "Main.java",
+  source: `void main() {
+    List<String> src = new ArrayList<>(List.of("a"));
+    List<String> view = Collections.unmodifiableList(src);
+    List<String> copy = List.copyOf(src);
+    src.add("b");
+    IO.println(view + " " + copy);
+    view.add("c");
+}`,
+  steps: [
+    { line: 2, frames: [{ name: "main", locals: {} }], heap: {}, note: "three lists are about to be made. only one of them actually owns its elements." },
+    {
+      line: 3,
+      frames: [{ name: "main", locals: { src: { ref: "al" } } }],
+      heap: { al: { type: "ArrayList<String>", items: [{ ref: "sa" }] }, sa: { type: "String", value: '"a"' } },
+      note: "src is a normal ArrayList holding a reference to \"a\".",
+    },
+    {
+      line: 4,
+      frames: [{ name: "main", locals: { src: { ref: "al" }, view: { ref: "uv" } } }],
+      heap: {
+        al: { type: "ArrayList<String>", items: [{ ref: "sa" }] },
+        uv: { type: "UnmodifiableList", fields: { list: { ref: "al" } } },
+        sa: { type: "String", value: '"a"' },
+      },
+      note: "unmodifiableList copies nothing. it makes a tiny wrapper whose only field points at src.",
+    },
+    {
+      line: 5,
+      frames: [{ name: "main", locals: { src: { ref: "al" }, view: { ref: "uv" }, copy: { ref: "cp" } } }],
+      heap: {
+        al: { type: "ArrayList<String>", items: [{ ref: "sa" }] },
+        uv: { type: "UnmodifiableList", fields: { list: { ref: "al" } } },
+        cp: { type: "List12", tag: "List.copyOf", items: [{ ref: "sa" }] },
+        sa: { type: "String", value: '"a"' },
+      },
+      note: "copyOf builds a new immutable list and copies the references into it. same \"a\" object: it's a shallow copy.",
+    },
+    {
+      line: 6,
+      frames: [{ name: "main", locals: { src: { ref: "al" }, view: { ref: "uv" }, copy: { ref: "cp" } } }],
+      heap: {
+        al: { type: "ArrayList<String>", items: [{ ref: "sa" }, { ref: "sb" }] },
+        uv: { type: "UnmodifiableList", fields: { list: { ref: "al" } } },
+        cp: { type: "List12", tag: "List.copyOf", items: [{ ref: "sa" }] },
+        sa: { type: "String", value: '"a"' },
+        sb: { type: "String", value: '"b"' },
+      },
+      note: "src.add(\"b\") changes the ArrayList. the view reads through to it, so the view has changed too. the copy hasn't.",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { src: { ref: "al" }, view: { ref: "uv" }, copy: { ref: "cp" } } }],
+      heap: {
+        al: { type: "ArrayList<String>", items: [{ ref: "sa" }, { ref: "sb" }] },
+        uv: { type: "UnmodifiableList", fields: { list: { ref: "al" } } },
+        cp: { type: "List12", tag: "List.copyOf", items: [{ ref: "sa" }] },
+        sa: { type: "String", value: '"a"' },
+        sb: { type: "String", value: '"b"' },
+      },
+      stdout: "[a, b] [a]\n",
+      note: "the \"unmodifiable\" list just changed under us, and the copy is still [a].",
+    },
+    {
+      line: 7,
+      frames: [{ name: "main", locals: { src: { ref: "al" }, view: { ref: "uv" }, copy: { ref: "cp" } } }],
+      heap: {
+        al: { type: "ArrayList<String>", items: [{ ref: "sa" }, { ref: "sb" }] },
+        uv: { type: "UnmodifiableList", fields: { list: { ref: "al" } } },
+        cp: { type: "List12", tag: "List.copyOf", items: [{ ref: "sa" }] },
+        sa: { type: "String", value: '"a"' },
+        sb: { type: "String", value: '"b"' },
+      },
+      stdout: "[a, b] [a]\nException in thread \"main\" java.lang.UnsupportedOperationException\n",
+      note: "view.add throws UnsupportedOperationException. the view only blocks writes that go through it, not writes to the list underneath.",
+    },
+  ],
+};
+
+<InShort>
+java has three different things people call "immutable": **truly immutable** lists (`List.of`, `List.copyOf`), **read-only views** (`Collections.unmodifiableList`) that still change when the original does, and **fixed-size** lists (`Arrays.asList`) you can't grow but can overwrite.
+
+they all have the same type, `List`. the difference only shows up at runtime, as an `UnsupportedOperationException`.
+</InShort>
+
+## the picture
+
+you know how you hand someone a list "read-only" and then it changes anyway? because you gave them a window, not a photo.
+
+an unmodifiable *view* is a window into your list: they can look but not touch, and they see everything you do on your side. an immutable *copy* is a photo: frozen at the moment you took it. both block their holder's writes. only one of them stays still.
+
+<Figure wide caption={<>step through it. the view is one tiny object <C k="ref">pointing at</C> <code>src</code>. the copy has its own array of references (to the same strings). after <code>src.add("b")</code>, the view shows <code>[a, b]</code> and the copy still says <code>[a]</code>. the last step is the <C k="dead">exception</C>.</>}>
+<MemoryStepper trace={viewVsCopy} />
+</Figure>
+
+so `Collections.unmodifiableList(list)` is the right tool when *you* keep the only reference to `list` and want to hand out a read-only window (a getter on a class, for instance). it's the wrong tool when you want a snapshot: then you want `List.copyOf`.
+
+## the zoo
+
+seven ways to get a `List`, seven different rule sets. every cell here was run on jdk 25:
+
+<Figure wide caption={<>click a cell to see the code and what happens. <C k="live">ok</C> means no exception. <C k="dead">UOE</C> is <code>UnsupportedOperationException</code>, <C k="dead">NPE</C> is <code>NullPointerException</code>.</>}>
+<MutabilityGrid />
+</Figure>
+
+the useful rules of thumb:
+
+- **`List.of`, `Set.of`, `Map.of`** <Since v={9} />: compact, truly immutable, no `null`s anywhere. `Set.of` and `Map.of` also reject duplicates at creation (`IllegalArgumentException`), and their iteration order is deliberately shuffled per JVM run (so nobody accidentally depends on it).
+- **`List.copyOf(c)`** <Since v={10} />: an immutable snapshot of anything. if `c` is already an immutable list, it returns `c` itself, no copy.
+- **`stream.toList()`** <Since v={16} />: unmodifiable, but allows `null`s. prefer it to `collect(Collectors.toList())`, which is mutable today without promising to be.
+- **`Collections.unmodifiableList(l)`**: a read-only view of a list you keep to yourself.
+- **`Arrays.asList(arr)`**: a fixed-size list backed by the array. good for passing an array where a `List` is expected, not for building a list.
+
+<Predict options={["a", "z", "UnsupportedOperationException"]} answer={1}>
+```java
+String[] arr = {"a", "b", "c"};
+List<String> list = Arrays.asList(arr);
+list.set(0, "z");
+IO.println(arr[0]);
+```
+<Explain>
+`Arrays.asList` doesn't copy the array, it wraps it. `set` writes straight into `arr`, so `arr[0]` is now `"z"`. it works the other way too: change `arr[2]` and the list sees it. the only thing it refuses is changing the size (`add`, `remove`), because an array can't grow.
+</Explain>
+</Predict>
+
+<Gotcha title="List.of hates null, even in contains">
+`List.of("a", "b").contains(null)` doesn't return `false`, it throws `NullPointerException`. same for `indexOf(null)` and `Set.of(...).contains(null)`. the immutable collections reject `null` so consistently that even asking about it is an error. if a method might receive `null`, check before you ask, or use a collection that tolerates it.
+</Gotcha>
+
+## immutable isn't deep
+
+an immutable list stops you from changing *which* objects it holds. it does nothing about the objects themselves.
+
+```java title="Main.java" run output="[hi!?]"
+void main() {
+    var sb = new StringBuilder("hi");
+    List<StringBuilder> frozen = List.of(sb);
+    sb.append("!");
+    frozen.get(0).append("?");
+    IO.println(frozen);
+}
+```
+
+`frozen` still holds exactly one reference, to the same `StringBuilder`, and that object changed twice. for a truly immutable structure, the elements must be immutable too: `String`, `Integer`, records of immutable fields. more on that in [immutability](/learn/oop/immutability).
+
+<Effective item={50} title="make defensive copies when needed">
+if your class stores a collection it was given, copy it in the constructor (`this.items = List.copyOf(items)`), or the caller can change your object's state after the fact by mutating their list. and when you return it, hand out the immutable copy (or an unmodifiable view), never your mutable internals. `List.copyOf` does both jobs in one call and also rejects `null` elements for free. (item 17, "minimize mutability", is the bigger picture.)
+</Effective>
+
+## why not just a read-only interface?
+
+the obvious question: why doesn't java have an `ImmutableList` type, so the compiler can stop `add` calls? the collections framework chose the opposite in 1998: one `List` interface, and "optional operations" that an implementation may refuse at runtime. the authors' reasoning (in the collections design FAQ) was that splitting every interface into modifiable / unmodifiable / fixed-size / append-only variants would explode the number of types. the cost is that `List<String> l` tells you nothing about whether `l.add` will work. libraries like Guava add `ImmutableList` as a *class* type, which at least documents intent in signatures.
+
+<Interview q="what's the difference between Collections.unmodifiableList and List.copyOf?">
+`unmodifiableList` is a view: a wrapper that throws on writes but reads through to the original, so if anyone still holds the original list and changes it, the "unmodifiable" list changes too. it allows `null`s. `List.copyOf` is a snapshot: a new immutable list with the same element references, unaffected by later changes to the source, and it rejects `null`s. use the view to expose your private list read-only; use the copy to freeze input you don't control.
+</Interview>
+
+<Keylines>
+- a view (`unmodifiableList`) blocks writes through itself. the original can still change it.
+- a copy (`List.copyOf`, `List.of`) is frozen. later changes to the source don't show up.
+- `Arrays.asList` is fixed-size, not read-only: `set` writes into the array.
+- `List.of` and friends reject `null`, even in `contains`.
+- immutable collections are shallow. mutable elements can still change.
+</Keylines>

@@ -1,0 +1,284 @@
+import { InitLadder } from "@/components/figures/oop/InitLadder";
+
+export const order = {
+  file: "Main.java",
+  source: `class Parent {
+    static String ps = Main.log("Parent static field");
+    static { Main.log("Parent static block"); }
+
+    String pf = Main.log("Parent field");
+    { Main.log("Parent init block"); }
+
+    Parent() {
+        super();
+        Main.log("Parent() body");
+    }
+}
+
+class Child extends Parent {
+    static String cs = Main.log("Child static field");
+    static { Main.log("Child static block"); }
+
+    String cf = Main.log("Child field");
+    { Main.log("Child init block"); }
+
+    Child() {
+        this("rex");
+        Main.log("Child() body");
+    }
+
+    Child(String name) {
+        super();
+        Main.log("Child(String) body");
+    }
+}
+
+public class Main {
+    static String log(String what) {
+        System.out.println(what);
+        return what;
+    }
+
+    public static void main(String[] args) {
+        new Child();
+        log("--- again");
+        new Child();
+    }
+}`,
+  steps: [
+    { line: 39, frames: [{ name: "main", locals: {} }], heap: {}, note: "main is about to say new Child(). but Child has never been used, so before any object exists, its classes get initialized." },
+    { line: 2, frames: [{ name: "main", locals: {} }, { name: "static init: Parent", locals: {} }], heap: {}, note: "parents first: Parent's static initializers run, top to bottom. a static field with an initializer counts." },
+    { line: 3, frames: [{ name: "main", locals: {} }, { name: "static init: Parent", locals: {} }], heap: {}, stdout: "Parent static field\n", note: "then Parent's static block. still no object anywhere." },
+    { line: 15, frames: [{ name: "main", locals: {} }, { name: "static init: Child", locals: {} }], heap: {}, stdout: "Parent static field\nParent static block\n", note: "now Child's static init. static stuff runs once per class, the first time the class is actually used." },
+    { line: 16, frames: [{ name: "main", locals: {} }, { name: "static init: Child", locals: {} }], heap: {}, stdout: "Parent static field\nParent static block\nChild static field\n", note: "Child's static block. both classes are ready." },
+    { line: 22, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }], heap: { o5: {"type": "Child", "fields": {"pf": null, "cf": null}, "state": "new"} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\n", note: "new allocates one Child object with every field zeroed, Parent's pf and Child's cf alike, then calls Child(). its first statement is this(\"rex\")." },
+    { line: 27, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }], heap: { o5: {"type": "Child", "fields": {"pf": null, "cf": null}},  o6: {"type": "String", "value": "\"rex\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\n", note: "this(...) hops to the other constructor. this one starts with super()." },
+    { line: 9, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }, { name: "Parent()", locals: {"this": {"ref": "o5"}} }], heap: { o5: {"type": "Child", "fields": {"pf": null, "cf": null}},  o6: {"type": "String", "value": "\"rex\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\n", note: "Parent() calls super() too, into Object(), which does nothing interesting." },
+    { line: 5, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }, { name: "Parent()", locals: {"this": {"ref": "o5"}} }], heap: { o5: {"type": "Child", "fields": {"pf": null, "cf": null}},  o6: {"type": "String", "value": "\"rex\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\n", note: "super() just returned, so now Parent's field initializers and init blocks run, in the order they're written." },
+    { line: 6, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }, { name: "Parent()", locals: {"this": {"ref": "o5"}} }], heap: { o5: {"type": "Child", "fields": {"pf": {"ref": "o7"}, "cf": null}},  o6: {"type": "String", "value": "\"rex\""},  o7: {"type": "String", "value": "\"Parent field\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\n", note: "pf is set. next, Parent's init block." },
+    { line: 10, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }, { name: "Parent()", locals: {"this": {"ref": "o5"}} }], heap: { o5: {"type": "Child", "fields": {"pf": {"ref": "o7"}, "cf": null}},  o6: {"type": "String", "value": "\"rex\""},  o7: {"type": "String", "value": "\"Parent field\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\n", note: "only after all of that does the Parent() body run." },
+    { line: 18, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }], heap: { o5: {"type": "Child", "fields": {"pf": {"ref": "o7"}, "cf": null}},  o6: {"type": "String", "value": "\"rex\""},  o7: {"type": "String", "value": "\"Parent field\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\n", note: "back in Child(String). its super() returned, so it's Child's turn: field initializers and init blocks, in source order." },
+    { line: 19, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }], heap: { o5: {"type": "Child", "fields": {"pf": {"ref": "o7"}, "cf": {"ref": "o10"}}},  o6: {"type": "String", "value": "\"rex\""},  o7: {"type": "String", "value": "\"Parent field\""},  o10: {"type": "String", "value": "\"Child field\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\nChild field\n", note: "cf is set. Child's init block next." },
+    { line: 28, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }, { name: "Child(String)", locals: {"this": {"ref": "o5"}, "name": {"ref": "o6"}} }], heap: { o5: {"type": "Child", "fields": {"pf": {"ref": "o7"}, "cf": {"ref": "o10"}}},  o6: {"type": "String", "value": "\"rex\""},  o7: {"type": "String", "value": "\"Parent field\""},  o10: {"type": "String", "value": "\"Child field\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\nChild field\nChild init block\n", note: "now the Child(String) body." },
+    { line: 23, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o5"}} }], heap: { o5: {"type": "Child", "fields": {"pf": {"ref": "o7"}, "cf": {"ref": "o10"}}},  o7: {"type": "String", "value": "\"Parent field\""},  o10: {"type": "String", "value": "\"Child field\""} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\nChild field\nChild init block\nChild(String) body\n", note: "and last, the rest of Child(), the constructor new actually called. it ran first and finishes last." },
+    { line: 41, frames: [{ name: "main", locals: {} }], heap: {}, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\nChild field\nChild init block\nChild(String) body\nChild() body\n--- again\n", note: "the object was never stored, so it's garbage already. now the second new Child()." },
+    { line: 22, frames: [{ name: "main", locals: {} }, { name: "Child()", locals: {"this": {"ref": "o15"}} }], heap: { o15: {"type": "Child", "fields": {"pf": null, "cf": null}, "state": "new"} }, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\nChild field\nChild init block\nChild(String) body\nChild() body\n--- again\n", note: "straight to Child(). no static init this time: a class is initialized once, ever." },
+    { line: 42, frames: [{ name: "main", locals: {} }], heap: {}, stdout: "Parent static field\nParent static block\nChild static field\nChild static block\nParent field\nParent init block\nParent() body\nChild field\nChild init block\nChild(String) body\nChild() body\n--- again\nParent field\nParent init block\nParent() body\nChild field\nChild init block\nChild(String) body\nChild() body\n", note: "the second object ran every instance step again, in the same order. compare the two halves of stdout." },
+  ],
+};
+
+
+<InShort>
+`new Child()` runs things in a fixed order. first, **static init** for `Parent`, then `Child` (once per class, ever). then the object is allocated with every field zeroed. then the constructors **chain up** through `this(...)` and `super(...)` to `Object`, and on the way back down each class runs its **field initializers and init blocks**, then the rest of its constructor body.
+
+parents first. always.
+</InShort>
+
+## the picture
+
+you know how a subclass constructor can't touch anything until `super(...)` returns? there's a reason, and it's the order.
+
+think of a two-storey house. you hire the contractor for the top floor (`Child`), but the first thing he does is call the ground-floor contractor (`Parent`) and wait. the ground floor gets finished completely (its fields, its init blocks, its constructor body) before anyone lays a single brick upstairs. the top-floor contractor got called first and walks out last.
+
+<Figure caption={<>flip between the first and second <code>new</code>: the <C k="meta">static</C> rows only ever happen once per class. then call <code>new Child("rex")</code> directly and watch the <code>this(...)</code> hop disappear. the <C k="hot">allocation</C> always comes before any constructor code.</>}>
+<InitLadder />
+</Figure>
+
+## constructors, quickly
+
+a constructor has the class's name and no return type. it's not really a method: you can't call it on an object, only through `new`, `this(...)` or `super(...)`.
+
+```java title="Point.java"
+class Point {
+    final int x, y;
+
+    Point(int x, int y) {   // the real one
+        this.x = x;
+        this.y = y;
+    }
+
+    Point() {
+        this(0, 0);         // delegate to the real one
+    }
+}
+```
+
+<Defs>
+<dt>this(...)</dt><dd>call another constructor of the same class. handy for defaults: every path ends up in one "real" constructor.</dd>
+<dt>super(...)</dt><dd>call the parent's constructor. if you don't write either, javac quietly inserts <code>super()</code>.</dd>
+<dt>default constructor</dt><dd>if a class declares no constructor at all, javac adds a no-arg one that just calls <code>super()</code>. declare any constructor and you lose it.</dd>
+<dt>init block</dt><dd>a bare <code>{"{ ... }"}</code> in the class body. runs for every object, as if pasted into each constructor that calls <code>super(...)</code>.</dd>
+<dt>static block</dt><dd><code>static {"{ ... }"}</code>. runs once, when the class is initialized.</dd>
+</Defs>
+
+<Gotcha title="declaring a constructor deletes the free one">
+`Animal` below has no no-arg constructor anymore, and `Dog()` silently calls `super()`. so `Dog` doesn't compile, even though you never wrote a call to anything.
+
+```java title="Main.java"
+class Animal {
+    String name;
+    Animal(String name) { this.name = name; }
+}
+
+class Dog extends Animal {
+    Dog() { } // [!code error]
+}
+```
+
+`error: constructor Animal in class Animal cannot be applied to given types;`
+</Gotcha>
+
+## walk through it
+
+here's a real program that prints at every single step. two classes, statics, fields, init blocks, a `this(...)` and two `new Child()`s. the stack shows the constructor chain growing and shrinking.
+
+<Figure wide caption={<>step 6 is the one to stare at: the object already exists, <code>pf</code> and <code>cf</code> both <code>null</code>, and three constructor frames pile up before a single initializer runs. then compare stdout before and after <code>--- again</code>.</>}>
+<MemoryStepper trace={order} />
+</Figure>
+
+see? the static lines print once (scrub to the last step and read stdout). everything else prints twice, in exactly the same order. and `Child()`, the constructor `new` actually called, is the last one to print.
+
+<Predict options={["sA a A sB b B a A b B", "sA sB a A b B a A b B", "sA sB a A b B sA sB a A b B", "a A b B sA sB a A b B"]} answer={1}>
+```java
+class A {
+    { IO.print("a "); }
+    A() { IO.print("A "); }
+    static { IO.print("sA "); }
+}
+
+class B extends A {
+    static { IO.print("sB "); }
+    B() { IO.print("B "); }
+    { IO.print("b "); }
+}
+
+void main() {
+    new B();
+    new B();
+}
+```
+<Explain>
+both static blocks first, parent before child, and only once. then per object: `A`'s init block, `A`'s constructor body, then `B`'s init block, `B`'s body. where the block sits in the source relative to the constructor doesn't matter, init blocks always run before the constructor's own body.
+</Explain>
+</Predict>
+
+<Deep title="where the initializers actually go">
+there's no "run the initializers" step in the JVM. javac pastes field initializers and init blocks into every constructor that calls `super(...)`, right after that call. constructors that start with `this(...)` don't get a copy, which is why the initializers run once per object, not once per constructor. `javap -c Child` on the program above:
+
+```text nolines
+Child();
+   aload_0
+   ldc "rex"
+   invokespecial Child.<init>(String)   // this("rex"). no initializers here
+   ldc "Child() body" ...
+
+Child(java.lang.String);
+   aload_0
+   invokespecial Parent.<init>()        // super()
+   ldc "Child field" ... putfield cf    // the field initializer, pasted in
+   ldc "Child init block" ...           // the init block, pasted in
+   ldc "Child(String) body" ...
+```
+
+static initializers get the same treatment, collected in source order into one hidden method called `<clinit>`, which the JVM runs when the class is first initialized. more in [class loading](/learn/jvm/class-loading).
+</Deep>
+
+## the trap: overridable calls in a constructor
+
+the parent's constructor runs before the child's fields are set. so if the parent calls a method the child overrides, the child's code runs against a half-built object.
+
+```java title="Main.java" run output="a pet named null"
+class Base {
+    Base() {
+        describe(); // runs Pet's version, before Pet is ready
+    }
+
+    void describe() {
+        IO.println("a base");
+    }
+}
+
+class Pet extends Base {
+    final String name;
+
+    Pet(String name) {
+        this.name = name; // too late: super() already ran
+    }
+
+    @Override
+    void describe() {
+        IO.println("a pet named " + name);
+    }
+}
+
+void main() {
+    new Pet("rex");
+}
+```
+
+`name` is `final` and it still prints `null`. you just watched a final field change value. kinda cursed.
+
+<Effective item={19} title="design and document for inheritance or else prohibit it">
+a constructor shouldn't call methods that subclasses can override, directly or indirectly. the override runs before the subclass constructor, so it sees default values. same goes for `clone` and `readObject`.
+</Effective>
+
+### java 25: statements before super()
+
+since <Since v={25} /> a constructor can run code *before* `super(...)` ([flexible constructor bodies](/learn/modern/flexible-constructors), JEP 513). you still can't read `this`, call instance methods or touch `super` there, but you *can* assign your own fields. so the fix is to set `name` first:
+
+```java title="Main.java" run output="a pet named rex" {16-17}
+class Base {
+    Base() {
+        describe();
+    }
+
+    void describe() {
+        IO.println("a base");
+    }
+}
+
+class Pet extends Base {
+    final String name;
+
+    Pet(String name) {
+        this.name = name; // before super(): allowed since java 25
+        super();
+    }
+
+    @Override
+    void describe() {
+        IO.println("a pet named " + name);
+    }
+}
+
+void main() {
+    new Pet("rex");
+}
+```
+
+the prologue is also the right place for validation (throw before the parent does any work). what it can't do is *read* the object:
+
+```java title="Main.java"
+class Dog extends Animal {
+    String tag = "dog";
+
+    Dog(String name) {
+        IO.println(tag); // [!code error]
+        super(name);
+    }
+}
+```
+
+`error: cannot reference tag before supertype constructor has been called`
+
+<Interview q="in what order is a subclass object initialized?">
+static initializers of the superclass, then the subclass, the first time the class is used. then allocation with all fields zeroed. then the constructor chain: each constructor's first job is `this(...)` or `super(...)`, all the way up to `Object`. on the way back down, each class runs its field initializers and instance init blocks in source order, then the rest of its constructor body. the follow-up is always "so what happens if the superclass constructor calls an overridden method?", and the answer is: it sees the subclass's fields at their defaults.
+</Interview>
+
+<Keylines>
+- static init runs once per class, parent before child, on first use.
+- the object exists, all zeroed, before any constructor code runs.
+- constructors chain up first (`this(...)`, `super(...)`), then do their work on the way back down.
+- field initializers and init blocks run right after `super(...)` returns, in source order.
+- never call an overridable method from a constructor. in java 25 you can at least set your fields before `super()`.
+</Keylines>

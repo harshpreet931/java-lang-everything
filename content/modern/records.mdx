@@ -1,0 +1,130 @@
+import { RecordExpansion } from "@/components/figures/modern/RecordExpansion";
+
+<InShort>
+a **record** is a class that is just its data: `record Point(int x, int y) {}`. from that one line the compiler writes private final fields, a **canonical constructor**, accessors `x()` and `y()`, and `equals`, `hashCode` and `toString` based on the components. final in java 16.
+
+records are **shallowly immutable**: the fields can't change, but an object a field points to (a list, say) still can.
+</InShort>
+
+## the picture
+
+you know the class with two fields, a constructor, two getters, `equals`, `hashCode` and `toString`, fifty lines that all say "this is a pair of ints"? and how adding a third field means editing six places, and forgetting one of them is a bug? a record says the data once and derives the rest.
+
+think of a form with labelled boxes. a record is the form: the boxes are the components, and once it's filled in and stamped, nobody can rub a box out. two forms with the same answers are the same form, as far as anyone cares.
+
+<Figure wide caption={<>pick a member. the left side is what <code>record Point(int x, int y) {}</code> turns into, written out as java. the right side is <code>javap -p</code> on the real class file from javac 25. every member on the right came from that one line.</>}>
+<RecordExpansion />
+</Figure>
+
+## using one
+
+```java title="Main.java" run output="Point[x=1, y=2]\n3\ntrue false\ntrue"
+record Point(int x, int y) {}
+
+void main() {
+    var p = new Point(1, 2);
+    IO.println(p);                                   // toString
+    IO.println(p.x() + p.y());                       // accessors
+    IO.println(p.equals(new Point(1, 2)) + " " + (p == new Point(1, 2)));
+    IO.println(p.hashCode() == new Point(1, 2).hashCode());
+}
+```
+
+`equals` compares values, `==` still compares identity: two different objects, equal contents. records can also have static fields, static methods, instance methods, nested types, and they can implement interfaces. what they can't have is extra state:
+
+```text
+record R(int a) { int b; }
+error: field declaration must be static
+  (consider replacing field with record component)
+```
+
+## compact constructors: validation without the boilerplate
+
+the canonical constructor is generated, but you can write it yourself to check arguments. the **compact** form drops the parameter list and the field assignments: you write the checks, and the assignments happen after your code runs.
+
+```java title="Main.java" run output="Range[lo=1, hi=5]\nException in thread \"main\" java.lang.IllegalArgumentException: 5 > 1"
+record Range(int lo, int hi) {
+    Range {                                   // no (int lo, int hi), no this.lo = lo
+        if (lo > hi) throw new IllegalArgumentException(lo + " > " + hi);
+    }
+}
+
+void main() {
+    IO.println(new Range(1, 5));
+    IO.println(new Range(5, 1));
+}
+```
+
+inside a compact constructor, `lo` and `hi` are the parameters, and you can reassign them to normalize (`hi = Math.max(hi, 0)`). what you can't do is touch the fields: `this.lo = lo` there is `error: cannot assign a value to final variable lo`, because the compiler does that assignment itself, at the end.
+
+## shallowly immutable
+
+the fields are `final`, so a record's components can never point somewhere else. but `final` is about the arrow, not the thing it points at:
+
+<Figure caption={<>the <code>members</code> field is final: that <C k="ref">arrow</C> will always point at the same list. the list itself is an ordinary <code>ArrayList</code>, so anyone holding it can still add to it.</>}>
+<Memory
+  frames={[{ name: "main", locals: { list: { ref: "l" }, t: { ref: "t" } } }]}
+  heap={{
+    t: { type: "Team", fields: { name: { ref: "n" }, members: { ref: "l" } } },
+    n: { type: "String", value: '"core"' },
+    l: { type: "ArrayList\u003CString>", items: [{ ref: "a" }, { ref: "b" }] },
+    a: { type: "String", value: '"ada"' },
+    b: { type: "String", value: '"bob"', state: "new" },
+  }}
+/>
+</Figure>
+
+<Compare>
+<Bad label="the caller's list leaks in">
+```java
+record Team(String name, List<String> members) {}
+
+var list = new ArrayList<>(List.of("ada"));
+var t = new Team("core", list);
+list.add("bob");          // t.members() now has bob
+```
+</Bad>
+<Good label="copy in the compact constructor">
+```java
+record Team(String name, List<String> members) {
+    Team {
+        Objects.requireNonNull(name);
+        members = List.copyOf(members);
+    }
+}
+```
+</Good>
+</Compare>
+
+`List.copyOf` makes an unmodifiable copy, so the record stops sharing the caller's list and `t.members().add(...)` throws `UnsupportedOperationException`. that's the record version of a [defensive copy](/learn/oop/immutability).
+
+<Predict options={["true", "false", "compile error"]} answer={1}>
+```java
+record Tagged(int[] data) {}
+
+IO.println(new Tagged(new int[]{1}).equals(new Tagged(new int[]{1})));
+```
+<Explain>
+the generated `equals` compares each component with its own `equals`, and arrays don't override `equals`: two different arrays are never equal, even with the same contents. so is the generated `hashCode` (identity-based). if a record holds an array, override `equals`, `hashCode` and `toString` with `Arrays.equals` and friends, or hold a `List` instead.
+</Explain>
+</Predict>
+
+<Gotcha title="records aren't JavaBeans">
+the accessor is `name()`, not `getName()`. libraries that look for getters by naming convention (older JSON mappers, some templating engines, JPA) may not see a record's properties, or may need a newer version or a module that knows about records. and JPA entities can't be records at all: they need a no-arg constructor and mutable fields.
+</Gotcha>
+
+<Effective item={17} title="minimize mutability">
+records are the shortest way to follow this item: final class, private final fields, no setters, value-based equality. the part the language can't do for you is the deep copying of mutable components. that's still your job, in the compact constructor.
+</Effective>
+
+<Interview q="what does a record give you, and what can't it do?">
+from the component list, javac generates private final fields, a canonical constructor, an accessor per component, and `equals`, `hashCode` and `toString` based on all components. a record is implicitly final, extends `java.lang.Record`, can implement interfaces, and can't declare extra instance fields or extend another class. bonus points: records are only shallowly immutable, so mutable components need a defensive copy in a compact constructor, and since java 21 records can be taken apart with [record patterns](/learn/modern/record-patterns).
+</Interview>
+
+<Keylines>
+- `record Point(int x, int y) {}`: fields, constructor, accessors, equals, hashCode, toString. one line.
+- a record is final, extends `Record`, and has no state besides its components.
+- compact constructors validate and normalize. the field assignments happen after your code.
+- equality is by value. arrays inside break that, because arrays compare by identity.
+- shallowly immutable: copy mutable components with `List.copyOf` and friends.
+</Keylines>

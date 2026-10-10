@@ -1,0 +1,154 @@
+import { LeakChart } from "@/components/figures/gc/LeakChart";
+import { Suspects } from "@/components/figures/gc/Suspects";
+import { Dominators } from "@/components/figures/gc/Dominators";
+
+<InShort>
+a java **memory leak** is an object you'll never use again that's still **reachable**, so the GC isn't allowed to free it. the collector works fine. the bug is a reference you forgot about.
+
+the usual suspects: static collections, listeners nobody removes, caches with no limit, `ThreadLocal`s on pool threads, inner classes holding `this$0`. you find them with a **heap dump**: look for the object with the biggest **retained size** in the **dominator tree**, then read its path back to a GC root.
+</InShort>
+
+## the picture
+
+you know how people say "java has a garbage collector, so it can't leak"? the GC frees what's **unreachable**, not what's **unused**. it has no idea you're done with something. it only knows whether there's still a path to it from a [GC root](/learn/gc/reachability-and-references).
+
+think of a storage unit. you moved out of the flat years ago, you'll never open the unit again, but the key is still on your key ring, so the company keeps billing you every month. the GC is the company: it'll happily clear out any unit whose key nobody holds. it will never clear one just because nobody's visited.
+
+## what a leak looks like
+
+two real runs, same 256 MB heap, same collector (G1, jdk 25). the healthy one is the toy service from [serial and parallel](/learn/gc/serial-and-parallel). the leaking one is the same program with one extra line: every 10th request registers a listener, and nothing ever removes it.
+
+<Figure wide caption={<>same x axis for both. the <C k="hot">amber</C> line joins the heap left after each whole-heap collection (full GCs, or G1's remarks when there are none), which is the live set. in the healthy run it stays flat. in the leaking one it only goes up, <C k="dead">full GCs</C> pile up, and the run dies.</>}>
+<LeakChart />
+</Figure>
+
+see how the leak announces itself long before the error? the healthy run finished all 3 million requests in about a second, with 274 ms of pauses. the leaking one made it 70% of the way, spent 2.5 of its 3.5 seconds in 210 full GCs that each freed a little less, and then died with `OutOfMemoryError: Java heap space`. the line that leaked:
+
+```java title="LeakyService.java"
+if (req % 10 == 0) {
+    byte[] state = new byte[1024];
+    listeners.add(() -> System.out.print(state.length));   // registered, never removed
+}
+```
+
+one 16-byte lambda holding one 1 KB array, on every tenth request. nothing about it looks dangerous in a code review. that's what makes leaks annoying: every line is fine, the bug is a missing line somewhere else. how to spot this shape in your own logs is in [reading GC logs](/learn/gc/reading-gc-logs).
+
+## the usual suspects
+
+almost every leak is one of these. each one ends the same way: something long-lived (a static field, a running thread, a singleton) holds a reference to something that should have been short-lived.
+
+<Figure wide caption={<>pick a suspect. the chain is what a heap dump shows you: the <C k="ref">GC root</C> on the left, every reference in between, and the memory you didn't mean to keep, in <C k="dead">red</C>.</>}>
+<Suspects />
+</Figure>
+
+you can test for a leak without a heap dump. hold the object through a `WeakReference` (which doesn't keep it alive), drop your own reference, ask for a GC, and check whether it's gone:
+
+<Predict options={["collected: true", "collected: false", "it depends on the collector"]} answer={1}>
+```java
+static final List<Runnable> LISTENERS = new ArrayList<>();
+
+record Screen(byte[] pixels) {
+    void open() { LISTENERS.add(this::redraw); }   // a bound method reference
+    void redraw() { }
+}
+
+void main() throws InterruptedException {
+    Screen screen = new Screen(new byte[10_000_000]);
+    screen.open();
+    var probe = new WeakReference<>(screen);
+    screen = null;
+    System.gc();
+    Thread.sleep(100);
+    IO.println("collected: " + (probe.get() == null));
+}
+```
+<Explain>
+`collected: false`, every time, on every collector. `this::redraw` is a bound method reference: it captures the `Screen` it was created from, and the static list holds the method reference. add `LISTENERS.clear()` before the GC and it printed `collected: true` on all five collectors in jdk 25 (that half isn't guaranteed, since `System.gc()` is only a request, but the leaking half is: a reachable object can never be collected). this "weak probe" trick is how a lot of leak tests are written.
+</Explain>
+</Predict>
+
+## heap dumps
+
+a heap dump is a snapshot of every object in the heap, with every reference between them, written to an `.hprof` file. three ways to get one:
+
+```bash
+# from a running JVM. only live objects: it runs a full GC first (add -all to skip that)
+jcmd <pid> GC.heap_dump /tmp/app.hprof
+
+# automatically, the moment it dies. set this in production, today.
+java -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dumps -jar app.jar
+
+# no dump at all, just a count per class. cheap, and often enough to know what is piling up
+jcmd <pid> GC.class_histogram
+```
+
+here's the histogram of the leaking service, taken while it ran:
+
+```text title="jcmd <pid> GC.class_histogram" nolines
+ num     #instances         #bytes  class name (module)
+-------------------------------------------------------
+   1:        221464      242317776  [B (java.base@25.0.4.1)
+   2:        192934        3086944  LeakyService$$Lambda/0x000007f001041000
+   3:          1949        1913360  [Ljdk.internal.vm.FillerElement; (java.base@25.0.4.1)
+   4:          1070        1096024  [Ljava.lang.Object; (java.base@25.0.4.1)
+   5:         20000         800000  java.util.LinkedHashMap$Entry (java.base@25.0.4.1)
+```
+
+`[B` is `byte[]`: 231 MB of them. and 192,934 lambdas from `LeakyService`, which is a hint, since one class of lambda shouldn't have that many live instances. (the `FillerElement` arrays are padding G1 puts into unused corners of regions. ignore them.) but a histogram can't say **who** holds those arrays. the cache holds 20,000 of them too. for that you need the graph.
+
+and the automatic dump, when the leaking run finally died:
+
+```text nolines
+java.lang.OutOfMemoryError: Java heap space
+Dumping heap to leak.hprof ...
+Heap dump file created [275784926 bytes in 0.083 secs]
+```
+
+## shallow, retained, and the dominator tree
+
+two numbers for every object in a heap dump:
+
+<Defs>
+<dt>shallow size</dt><dd>the object itself: header plus fields. an `ArrayList` is 24 bytes no matter how much is in it.</dd>
+<dt>retained size</dt><dd>everything that would become garbage if this one object disappeared: itself, plus everything reachable **only** through it. that's the number that finds leaks.</dd>
+</Defs>
+
+the tool that computes retained sizes is the **dominator tree**. object A dominates B if every path from a GC root to B goes through A. so A's retained size is the sum of everything it dominates.
+
+<Figure wide caption={<>click an object to <C k="hot">highlight</C> what it retains. Config is reachable from the list <em>and</em> from a local variable, so neither one retains it. switch the local off and watch the list suddenly own the config and its 4 KB array.</>}>
+<Dominators />
+</Figure>
+
+that's the whole trick of leak hunting: sort the dominator tree by retained size, and the leak floats to the top. i read the leaking service's dump with a small script that walks the same graph:
+
+| object | shallow | retained |
+| --- | --- | --- |
+| `LeakyService.listeners` (an `ArrayList`) | 24 B | 212.9 MB, 421,050 objects |
+| `LeakyService.cache` (the `LinkedHashMap`) | 64 B | 40.6 MB, 59,970 objects |
+| everything live | | 254.5 MB |
+
+a 24-byte list retaining 84% of the heap. that's the answer, and its path to a root (a static field of `LeakyService`) tells you exactly which line to go and fix. real tools do this with a few clicks: Eclipse MAT (the "leak suspects" report is literally this), VisualVM, or your IDE's profiler.
+
+<Gotcha title="a heap dump is everything">
+a heap dump contains every object in memory: passwords, session tokens, API keys, your customers' personal data, in plain bytes. treat `.hprof` files like a database backup, not like a log file. and they're not free to take: the JVM is stopped while it writes the dump, and the file is about as big as the live heap (275 MB here, tens of GB on a big service). `-gz=1` compresses it.
+</Gotcha>
+
+<Deep title="finding leaks without a heap dump: JFR's old object sample">
+[flight recorder](/learn/performance/jfr-and-jmc) can sample allocations and keep track of the ones that stay alive for a long time (`jdk.OldObjectSample`, on in the default settings). dump the recording with `jcmd <pid> JFR.dump` plus `path-to-gc-roots=true` and each surviving sample comes with its path to a GC root. it's a sample, so it won't find every leak, but it's cheap enough to leave on in production, and it never writes your whole heap to disk.
+</Deep>
+
+<Note title="a growing heap isn't always a leak">
+G1 doesn't collect until it needs to, so "heap used" climbs between GCs in a perfectly healthy app, and caches legitimately grow while they warm up. what matters is the floor: what's left after collections that look at the whole heap, over hours of steady load. and the leak might not be in the heap at all: classes that never unload fill metaspace ([class loader leaks](/learn/deep-dives/classloader-leaks)), and threads and direct buffers live in [native memory](/learn/gc/native-memory).
+</Note>
+
+<Interview q="can a java program have a memory leak if it has a garbage collector?">
+yes. the GC only frees objects that are unreachable from GC roots. if the program keeps a reference to objects it will never use again (in a static collection, a cache without eviction, a listener list, a ThreadLocal on a pooled thread, an inner class's hidden reference to its outer object), those objects stay reachable and can't be collected. the symptom is the heap's floor rising after each full collection until OutOfMemoryError. to find it, take a heap dump (`jcmd GC.heap_dump`, or `-XX:+HeapDumpOnOutOfMemoryError`), open the dominator tree, sort by retained size, and follow the biggest one's path back to its GC root.
+</Interview>
+
+<Keylines>
+- the GC frees unreachable objects, not unused ones. a leak is a reference you forgot.
+- the shape: the heap left after full GCs keeps rising, full GCs pile up, then OOM.
+- suspects: statics, listeners, unbounded caches, pooled ThreadLocals, this$0, mutable keys.
+- always run with `-XX:+HeapDumpOnOutOfMemoryError`. a histogram says what, a dump says who.
+- retained size is what goes away with an object. sort the dominator tree by it.
+</Keylines>

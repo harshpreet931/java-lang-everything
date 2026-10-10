@@ -1,0 +1,151 @@
+{
+  "file": "Recursion.java",
+  "source": "public class Recursion {\n    static int factorial(int n) {\n        if (n <= 1) {\n            return 1;\n        }\n        return n * factorial(n - 1);\n    }\n\n    public static void main(String[] args) {\n        int result = factorial(4);\n        System.out.println(\"4! = \" + result);\n    }\n}\n",
+  "steps": [
+    {"line": 10, "frames": [{"name": "main", "line": 10, "locals": {}}], "heap": {}, "stdout": ""},
+    {
+      "line": 3,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 3, "locals": {"n": 4}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 3,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 3, "locals": {"n": 3}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 3,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}},
+        {"name": "factorial", "line": 3, "locals": {"n": 2}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}},
+        {"name": "factorial", "line": 6, "locals": {"n": 2}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 3,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}},
+        {"name": "factorial", "line": 6, "locals": {"n": 2}},
+        {"name": "factorial", "line": 3, "locals": {"n": 1}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 4,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}},
+        {"name": "factorial", "line": 6, "locals": {"n": 2}},
+        {"name": "factorial", "line": 4, "locals": {"n": 1}}
+      ],
+      "heap": {},
+      "stdout": ""
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}},
+        {"name": "factorial", "line": 6, "locals": {"n": 2}}
+      ],
+      "heap": {},
+      "stdout": "",
+      "note": "factorial returned 1"
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}},
+        {"name": "factorial", "line": 6, "locals": {"n": 3}}
+      ],
+      "heap": {},
+      "stdout": "",
+      "note": "factorial returned 2"
+    },
+    {
+      "line": 6,
+      "frames": [
+        {"name": "main", "line": 10, "locals": {}},
+        {"name": "factorial", "line": 6, "locals": {"n": 4}}
+      ],
+      "heap": {},
+      "stdout": "",
+      "note": "factorial returned 6"
+    },
+    {
+      "line": 10,
+      "frames": [{"name": "main", "line": 10, "locals": {}}],
+      "heap": {},
+      "stdout": "",
+      "note": "factorial returned 24"
+    },
+    {
+      "line": 11,
+      "frames": [{"name": "main", "line": 11, "locals": {"result": 24}}],
+      "heap": {},
+      "stdout": "",
+      "changed": ["result"]
+    },
+    {
+      "line": 12,
+      "frames": [{"name": "main", "line": 12, "locals": {"result": 24}}],
+      "heap": {},
+      "stdout": "4! = 24\n"
+    },
+    {
+      "line": 12,
+      "frames": [],
+      "heap": {},
+      "stdout": "4! = 24\n",
+      "note": "main returned, program ends"
+    }
+  ]
+}

@@ -1,0 +1,214 @@
+import { ItemMap } from "@/components/figures/effective-java/ItemMap";
+import { Lens } from "@/components/figures/effective-java/Lens";
+import { ProxyLanes } from "@/components/figures/effective-java/ProxyLanes";
+
+<InShort>
+the last six items, in one line: **don't use java serialization**. `readObject` on untrusted bytes can run code from any serializable class on your classpath. if you're stuck with it, filter what can be deserialized, treat `readObject` as a public **constructor** that skips your checks, and serialize a **proxy** (or a record) instead of the object itself.
+</InShort>
+
+<Figure caption={<>items 85 to 90. filters and records are the two big changes since the book.</>}>
+<ItemMap
+  items={[
+    { n: 85, t: "prefer anything to java serialization", lens: "serialization filters" },
+    { n: 86, t: "implementing Serializable is a forever promise" },
+    { n: 87, t: "design the serialized form on purpose" },
+    { n: 88, t: "readObject is a constructor in disguise" },
+    { n: 89, t: "enums for instance control" },
+    { n: 90, t: "serialize a proxy, not the object", lens: "records do this for you" },
+  ]}
+/>
+</Figure>
+
+## don't
+
+### item 85 · prefer anything to java serialization
+
+`ObjectInputStream.readObject()` reads a class name from the stream, instantiates that class (any serializable class the JVM can find), and runs its deserialization code. an attacker who controls the bytes chooses which classes run. chains of innocent-looking classes ("gadgets") in common libraries have been strung together into remote code execution many times. there's no way to make it safe in general; the attack surface is your whole classpath.
+
+<Figure caption={<>hover each stage. the danger is the middle: the <em>stream</em> decides which classes get created and which <code>readObject</code> methods run.</>}>
+<Flow
+  stages={[
+    { label: "untrusted bytes", sub: "network, file, cache", note: "anything an attacker can write: a request body, a message on a queue, a cached blob." },
+    { label: "readObject()", sub: "ObjectInputStream", note: "reads class names from the stream itself and instantiates them, before your code sees the result." },
+    { label: "gadget chain", sub: "any class on the classpath", note: "readObject, readResolve, hashCode and equals of library classes run on attacker data. strung together, that's code execution." },
+    { label: "your cast", sub: "too late", note: "(Order) in.readObject() fails only after all of that already happened." },
+  ]}
+/>
+</Figure>
+
+so: for new systems, use a cross-platform format (JSON, protobuf, a plain binary format you parse yourself) where the receiving side decides the types. if you must accept java serialization, never from untrusted sources, and with an allowlist filter:
+
+```java title="F.java" run output="[ada, bo]\nblocked: filter status: REJECTED"
+import java.io.*;
+import java.util.*;
+
+public class F {
+    static byte[] write(Object o) throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) { out.writeObject(o); }
+        return bytes.toByteArray();
+    }
+
+    static Object read(byte[] data) throws Exception {
+        try (var in = new ObjectInputStream(new ByteArrayInputStream(data))) {
+            // allow exactly these classes, reject everything else, cap the depth.
+            // ArrayList keeps an Object[] inside, and arrays are checked by element type.
+            in.setObjectInputFilter(ObjectInputFilter.Config.createFilter(
+                "java.util.ArrayList;java.lang.String;java.lang.Object;maxdepth=5;!*"));
+            return in.readObject();
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println(read(write(new ArrayList<>(List.of("ada", "bo")))));
+        try {
+            read(write(new ArrayList<>(List.of(new Date(0)))));   // a Date isn't on the list
+        } catch (InvalidClassException e) {
+            System.out.println("blocked: " + e.getMessage());
+        }
+    }
+}
+```
+
+<Lens v={17}>serialization filters (JEP 290) arrived in java 9 and got backported to 8; JEP 415 (17) added a JVM-wide filter factory, so you can set a filter per context without touching every `ObjectInputStream`. a global `-Djdk.serialFilter=...` works without code changes. it's mitigation, not a fix: an allowlist is only as good as the classes on it. see [serialization](/learn/io/serialization).</Lens>
+
+## if you must
+
+### item 86 · implementing Serializable is a forever promise
+
+the moment a class is `Serializable`, its byte layout (including private fields) becomes part of its public API: change a field and old streams can't be read, unless you keep supporting the old form. it adds a hidden constructor (item 88), makes every new version a compatibility test, and is inherited by every subclass. declare an explicit `serialVersionUID` so a harmless change doesn't break compatibility on its own. classes designed for inheritance and inner classes should almost never be serializable. value classes like `BigInteger` and big collections are the classic legitimate cases.
+
+### item 87 · design the serialized form on purpose
+
+the default form writes every non-`transient` field, which is the object's **physical** representation. that's fine when physical and logical match (a point is two ints). it's terrible for, say, a linked list: the default form writes every node and every link, recursively (slow, deep enough to overflow the stack on long lists), when the logical form is just "these elements, in order". write the logical form with `writeObject`/`readObject`, mark everything else `transient`, and remember that transient fields come back as `0`/`null`, so re-establish them in `readObject`.
+
+## protecting yourself
+
+### item 88 · readObject is a constructor in disguise
+
+deserialization creates an object without calling your constructor, so your constructor's validation and defensive copies (item 50) are skipped. a forged stream can produce an object your constructor would have rejected, or one that shares a mutable field with the attacker:
+
+```java title="Main.java" run output="class constructor ran\ngot range 1..5\nrecord constructor ran\nrecord constructor ran\ngot Span[lo=1, hi=5]"
+import java.io.*;
+
+class Range implements Serializable {
+    final int lo, hi;
+    Range(int lo, int hi) {
+        if (lo > hi) throw new IllegalArgumentException(lo + " > " + hi);
+        System.out.println("class constructor ran");
+        this.lo = lo; this.hi = hi;
+    }
+}
+
+record Span(int lo, int hi) implements Serializable {
+    Span {
+        if (lo > hi) throw new IllegalArgumentException(lo + " > " + hi);
+        System.out.println("record constructor ran");
+    }
+}
+
+public class Main {
+    static Object roundTrip(Object o) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) { out.writeObject(o); }
+        var in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()));
+        return in.readObject();
+    }
+
+    public static void main(String[] args) throws Exception {
+        Range r = (Range) roundTrip(new Range(1, 5));   // constructor runs once: on new
+        System.out.println("got range " + r.lo + ".." + r.hi);
+        Span s = (Span) roundTrip(new Span(1, 5));      // twice: on new, and on read
+        System.out.println("got " + s);
+    }
+}
+```
+
+see? the class came back without its constructor running; the record went through its canonical constructor again. for a class, a defensive `readObject` must: copy every mutable component (copy first, as in item 50), then check every invariant and throw `InvalidObjectException` if one fails, and never call overridable methods.
+
+### item 89 · enums for instance control
+
+a serializable singleton isn't a singleton anymore: every `readObject` makes a fresh instance. `readResolve` can swap the copy for the real one, but it's fragile (every instance field must be `transient`, or an attacker can grab a reference to the copy before the swap). an enum's identity is guaranteed by the JVM:
+
+<Predict question="three serializable singletons, written and read back. which come back as the same instance?" options={["all three", "only the enum", "FixedClock and the enum"]} answer={2}>
+```java
+class Clock implements Serializable {
+    static final Clock INSTANCE = new Clock();
+    private Clock() {}
+}
+
+class FixedClock implements Serializable {
+    static final FixedClock INSTANCE = new FixedClock();
+    private FixedClock() {}
+    // swap the deserialized copy for the one true instance
+    private Object readResolve() { return INSTANCE; }
+}
+
+enum EnumClock { INSTANCE }
+
+// roundTrip(Clock.INSTANCE) == Clock.INSTANCE            → ?
+// roundTrip(FixedClock.INSTANCE) == FixedClock.INSTANCE  → ?
+// roundTrip(EnumClock.INSTANCE) == EnumClock.INSTANCE    → ?
+```
+<Explain>
+`false`, `true`, `true` (run on jdk 25). the plain `Clock` came back as a second instance. `readResolve` patched it for `FixedClock`. the enum needed nothing: enum constants are serialized by name and resolved to the existing constant on read. prefer the enum unless the set of instances isn't known at compile time.
+</Explain>
+</Predict>
+
+### item 90 · serialize a proxy, not the object
+
+the cleanest fix for items 87 and 88 at once: give the class a private nested **proxy** class that holds just the logical state. `writeReplace` writes the proxy instead of the object; the proxy's `readResolve` rebuilds the object through the public constructor, so every check runs again:
+
+<Figure caption={<>two ways back from bytes. the default path <C k="dead">skips your constructor</C>; the proxy path <C k="live">goes through it</C>, every time.</>}>
+<ProxyLanes />
+</Figure>
+
+```java title="Main.java" run output="1..5 Range"
+import java.io.*;
+
+final class Range implements Serializable {
+    private final int lo, hi;
+
+    Range(int lo, int hi) {
+        if (lo > hi) throw new IllegalArgumentException(lo + " > " + hi);
+        this.lo = lo; this.hi = hi;
+    }
+
+    @Override public String toString() { return lo + ".." + hi; }
+
+    private Object writeReplace() { return new Proxy(lo, hi); }   // write the proxy instead
+
+    // a forged stream that claims to hold a Range directly is refused
+    private void readObject(ObjectInputStream in) throws InvalidObjectException {
+        throw new InvalidObjectException("use the proxy");
+    }
+
+    private record Proxy(int lo, int hi) implements Serializable {
+        // back through the constructor, so the check runs again
+        private Object readResolve() { return new Range(lo, hi); }
+    }
+}
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var out = new ObjectOutputStream(bytes)) { out.writeObject(new Range(1, 5)); }
+        var in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()));
+        Object back = in.readObject();
+        System.out.println(back + " " + back.getClass().getSimpleName());
+    }
+}
+```
+
+the costs: it doesn't work for classes clients can extend, or for object graphs with cycles, and it's a little slower than the default form.
+
+<Lens v={16}>records (16) are serialized by their components and always deserialized through the canonical constructor: the serialization proxy pattern is built into the language. for a data class that has to be `Serializable`, make it a record and items 87, 88 and 90 mostly take care of themselves. (item 85 still applies: a record on your classpath is still a class the stream can ask for.)</Lens>
+
+<Keylines>
+- deserializing untrusted bytes runs code chosen by the bytes. don't, or filter with an allowlist.
+- `Serializable` turns your private fields into public API, forever.
+- the default form is the physical layout. write the logical form instead.
+- `readObject` skips your constructor: copy, validate, and never trust the stream.
+- an enum is the only serializable singleton you don't have to defend.
+- serialize a proxy and rebuild through the constructor. records do exactly that, for free.
+</Keylines>

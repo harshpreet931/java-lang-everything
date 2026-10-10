@@ -1,0 +1,113 @@
+import { ArrayListLab } from "@/components/figures/collections/ArrayListLab";
+import { BoxedList } from "@/components/figures/collections/BoxedList";
+
+<InShort>
+an `ArrayList` is a plain `Object[]` plus a `size`. when the array fills up, it allocates one **1.5x bigger** and copies everything over. that copy is expensive, but rare enough that `add` is **amortized O(1)**.
+
+inserting or removing anywhere but the end **shifts** every element after it. that part is O(n), every time.
+</InShort>
+
+## the picture
+
+you know how everyone says "arrays have a fixed size" and then uses `ArrayList` which... doesn't? it's the same array. it just moves house when it runs out of room.
+
+think of a bookshelf with numbered slots. adding a book at the end is easy. when the shelf is full, you buy a shelf 1.5x longer, move every book across one by one, and throw the old shelf out. annoying, but you don't do it often. squeezing a book in at slot 0 though? every other book scoots one slot right. that's annoying *every single time*.
+
+<Figure wide caption={<>press <code>add</code> until the array is full, then once more. the <C k="hot">copy</C> is the expensive part, and the old array becomes <C k="dead">garbage</C>. keep adding and watch the <C k="live">average</C>: the spikes get taller but rarer, so it flattens out. then try <code>add(0, x)</code> and <code>remove(0)</code>.</>}>
+<ArrayListLab />
+</Figure>
+
+three things to notice in there:
+
+1. `new ArrayList<>()` doesn't allocate anything. it points at one shared empty array, and the real 10-slot array shows up on the first `add`. lots of lists are created and never filled, so this saves real memory.
+2. the growth is `old + (old >> 1)`: half again. so 10 → 15 → 22 → 33 → 49.
+3. capacity only goes up. remove everything and you still hold the big array (call `trimToSize()` if you care).
+
+## the growth, exactly
+
+this is the actual line in jdk 25's `ArrayList.grow` (via `ArraysSupport.newLength`): the preferred growth is `oldCapacity >> 1`, and the new array is `Arrays.copyOf(elementData, newCapacity)`. here's the sequence it produces:
+
+```java title="Main.java" run output="10 → 15 → 22 → 33 → 49 → 73 → 109 → 163 → 244"
+void main() {
+    int cap = 10;
+    var seen = new StringBuilder("10");
+    while (cap < 200) {
+        cap = cap + (cap >> 1);
+        seen.append(" → ").append(cap);
+    }
+    IO.println(seen);
+}
+```
+
+(i also checked the real capacity with reflection on jdk 25 while adding 200 elements: same numbers, growing on the 11th, 16th, 23rd, 34th... add.)
+
+### why "amortized O(1)" isn't a lie
+
+a single `add` that triggers a grow costs O(n): it copies every element. but after copying n elements, you get about n/2 cheap adds before the next copy. spread the copy over those adds and each one pays a constant. add up all the writes and copies over a long run and it settles at about 4 per element, however big the list gets. that's what "amortized" means: the average over a sequence, not the worst single call.
+
+the price is the occasional slow `add` (a latency spike while a million references get copied) and up to a third of the array sitting empty right after a grow.
+
+<Note title="presize when you know">
+if you know you're about to add a million elements, `new ArrayList<>(1_000_000)` allocates once. starting from the default, that's 29 grows (10 → 15 → ... → 1,215,487) and about 2.4 million copied references for nothing. `ensureCapacity(n)` does the same on an existing list.
+</Note>
+
+## what it actually holds
+
+an `ArrayList<Integer>` doesn't hold ints. generics only work with objects, so every element is a **reference** to an `Integer` on the heap. the list's array is an array of arrows.
+
+<Figure caption={<>three hops deep: the list, its array, then the elements. every <C k="ref">blue arrow</C> is a 4-byte reference (compressed oops, the default under 32 GB of heap). each <code>Integer</code> is a whole object of its own. the <code>int[]</code> underneath just holds the numbers.</>}>
+<BoxedList />
+</Figure>
+
+so a million ints in an `ArrayList<Integer>` is about 20 MB (4 bytes per slot + 16 per `Integer`), while an `int[]` is 4 MB. if you have a lot of primitives and performance matters, use a primitive array (or a primitive collection library). more on boxing in [wrappers and boxing](/learn/core-api/wrappers-and-boxing).
+
+the upside of the flat array: `get(i)` is one bounds check and one array read. elements sit next to each other in memory, so iterating is about as cache-friendly as java gets (well, the references are; the `Integer`s they point at can be anywhere).
+
+## the cost of every operation
+
+| operation | cost | why |
+| --- | --- | --- |
+| `get(i)`, `set(i, x)` | O(1) | `elementData[i]` |
+| `add(x)` | amortized O(1) | write at `size`, sometimes grow |
+| `add(i, x)` | O(n - i) | `System.arraycopy` shifts the tail right |
+| `remove(i)` | O(n - i) | shifts the tail left |
+| `removeLast()` | O(1) | nulls one slot |
+| `contains(x)`, `indexOf(x)`, `remove(x)` | O(n) | linear scan with `equals` |
+
+`System.arraycopy` is a fast native copy, so shifting a few thousand references is quick in absolute terms. it's still linear, and doing it in a loop (`remove(0)` until empty) is quadratic. if you keep taking from the front, you wanted a [deque](/learn/collections/linkedlist-and-arraydeque).
+
+<Predict options={["[30]", "[20]", "[10, 30]", "IndexOutOfBoundsException"]} answer={0}>
+```java
+List<Integer> list = new ArrayList<>(List.of(10, 20, 30));
+list.remove(1);
+list.remove(Integer.valueOf(10));
+IO.println(list);
+```
+<Explain>
+`List` has two `remove` methods: `remove(int index)` and `remove(Object o)`. `remove(1)` picks the `int` one (an exact match beats autoboxing), so it removes index 1, the `20`. `remove(Integer.valueOf(10))` passes an object, so it removes the element equal to `10`. left: `[30]`.
+</Explain>
+</Predict>
+
+<Gotcha title="remove(int) vs remove(Object)">
+with a `List<Integer>`, `list.remove(5)` removes **index** 5, not the value 5. the compiler picks the overload without boxing first. say what you mean: `list.remove(Integer.valueOf(5))` for the value. this one shows up in code review about once a month.
+</Gotcha>
+
+## why not just use an array?
+
+you should, when the size is fixed and known (or you're storing primitives). `ArrayList` buys you growth, a `List` interface everything accepts, and helpers like `sort`, `removeIf` and `subList`. it costs one extra object and an extra hop. for most code that's free.
+
+<Deep title="why 1.5x and not 2x?">
+it's a trade between memory and copying. growing by 2x copies less often but can leave half the array empty. 1.5x wastes at most a third and still gives you the constant amortized cost (any growth by a constant factor does). the exact factor matters much less than the fact that it's multiplicative. growing by a fixed +10 each time would make `add` O(n) amortized, and filling a big list quadratic.
+</Deep>
+
+<Interview q="what's the time complexity of ArrayList.add?">
+amortized O(1), worst case O(n). most adds write one slot. when the array is full, it allocates a new one 1.5x bigger and copies everything, which is O(n), but that happens geometrically less often, so the total over n adds is O(n). bonus points: the first `add` on a default list allocates the 10-slot array lazily, and `add(i, x)` in the middle is O(n) regardless because of the shift.
+</Interview>
+
+<Keylines>
+- `ArrayList` = `Object[]` + `size`. that's it.
+- full? allocate 1.5x, copy everything, keep going. amortized O(1).
+- `get(i)` is O(1). inserting or removing anywhere but the end shifts, O(n).
+- it stores references. `ArrayList<Integer>` is boxes in an array, not ints.
+- know the size? presize it. removing from the front a lot? use a deque.
+</Keylines>

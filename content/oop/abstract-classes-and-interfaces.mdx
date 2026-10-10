@@ -1,0 +1,169 @@
+import { DiamondResolver } from "@/components/figures/oop/DiamondResolver";
+
+<InShort>
+an **abstract class** is a half-finished class: it can have fields, constructors and real methods, plus abstract ones the subclass must fill in. you can extend only one. an **interface** is a contract with no instance state: abstract methods, plus `default`, `static` and `private` methods. a class can implement as many as it likes.
+
+when two interfaces hand a class the same default method, three rules decide who wins: **the class wins**, then **the more specific interface wins**, else it's a compile error and **you pick** with `X.super.m()`.
+</InShort>
+
+## the picture
+
+an abstract class is a house with the foundations poured and the walls up, missing a kitchen. you buy *the house* (extend it), and you're stuck with its layout, but you got a lot for free.
+
+an interface is a job description: "must be able to `area()`". anybody can apply, a circle, a square, a lambda, and you can hold several job titles at once (`Comparable`, `Serializable`, `Shape`). since java 8 a job description can even come with a default way of doing some of the tasks.
+
+## an abstract class: state plus holes
+
+```java title="Main.java" run output="== sales ==\n42 units\n-- end"
+abstract class Report {
+    private final String title;           // state: interfaces can't have this
+
+    Report(String title) {                // a constructor: neither can they
+        this.title = title;
+    }
+
+    final String render() {               // the fixed recipe
+        return "== " + title + " ==\n" + body() + "\n-- end";
+    }
+
+    abstract String body();               // the hole each subclass fills
+}
+
+class Sales extends Report {
+    Sales() { super("sales"); }
+
+    @Override
+    String body() { return "42 units"; }
+}
+
+void main() {
+    IO.println(new Sales().render());
+}
+```
+
+that shape (a `final` method that calls an `abstract` one) is the template method pattern. `new Report("x")` won't compile: `error: Report is abstract; cannot be instantiated`. it has a constructor anyway, because every subclass object contains a Report part that needs initializing (see [inheritance](/learn/oop/inheritance)).
+
+## an interface: a contract with optional defaults
+
+```java title="Main.java" run output="a shape of area 3.14\na shape of area 9.0"
+interface Shape {
+    double area();                               // abstract: every Shape must say
+
+    default String describe() {                  // default: a body you may override
+        return "a shape of area " + round(area());
+    }
+
+    private static double round(double d) {      // private helper, java 9+
+        return Math.round(d * 100) / 100.0;
+    }
+
+    static Shape square(double side) {           // static: called as Shape.square(..)
+        return () -> side * side;
+    }
+}
+
+record Circle(double r) implements Shape {
+    public double area() { return Math.PI * r * r; }
+}
+
+void main() {
+    IO.println(new Circle(1).describe());
+    IO.println(Shape.square(3).describe());
+}
+```
+
+notice `Shape.square` returns a lambda. `Shape` has exactly one abstract method, so it's a [functional interface](/learn/functional/functional-interfaces), and any lambda with the right shape *is* a Shape.
+
+| can it have... | abstract class | interface |
+| --- | --- | --- |
+| instance fields | yes | no. fields are implicitly `public static final` constants |
+| constructors | yes | no |
+| abstract methods | yes | yes (the default, no keyword needed) |
+| concrete methods | yes, any visibility | `default` (public), `static`, `private` |
+| how many per class | one (`extends`) | any number (`implements`) |
+| non-public members | yes | only `private` methods |
+| static methods inherited by implementers | yes | no: always call them as `Shape.square()` |
+
+why default methods at all? java 8 needed to add `stream()` and `forEach()` to `Collection` without breaking every class that ever implemented it. a default method is a body that implementers get unless they write their own. that solved interface evolution, and created a new problem.
+
+## the diamond problem
+
+if `Robot` gets `hello()` from two places, which one runs? java's answer is three rules, applied in order:
+
+1. **class wins.** a method from the superclass chain (even an abstract one) beats every interface default.
+2. **more specific wins.** if one interface extends the other, the sub-interface's default replaces its parent's.
+3. **otherwise, you choose.** two unrelated defaults is a compile error until the class overrides the method. inside the override, `Greeter.super.hello()` calls one specific default.
+
+<Figure caption={<>pick a case. <C k="live">green</C> is the method that wins, <C k="dead">red</C> is where javac gives up, faded is a loser. every case was compiled on jdk 25, and the output or error is copied from javac.</>}>
+<DiamondResolver />
+</Figure>
+
+there's no state in interfaces, so this diamond is only ever about *which code*, never about "how many copies of a field". that's exactly why java allows multiple inheritance of interfaces but not classes.
+
+<Predict options={["Base.hello", "Greeter.hello", "compile error"]} answer={0}>
+```java
+interface Greeter {
+    default String hello() { return "Greeter.hello"; }
+}
+
+class Base {
+    public String hello() { return "Base.hello"; }
+}
+
+class Robot extends Base implements Greeter {}
+
+void main() {
+    IO.println(new Robot().hello());
+}
+```
+<Explain>
+rule 1: the class wins. `Robot` inherits a real `hello()` from `Base`, and an interface default never overrides class code. this is also why adding a default method to an interface can't silently change the behaviour of a class that already had that method.
+</Explain>
+</Predict>
+
+## which one should i use?
+
+| you need... | use |
+| --- | --- |
+| a type that unrelated classes can all be (`Comparable`, `Runnable`) | interface |
+| a class to be several things at once | interfaces |
+| to add a capability to existing classes (a mixin) | interface |
+| a lambda to be able to implement it | interface (functional) |
+| shared state or a constructor that every subtype needs | abstract class |
+| non-public helper methods for subclasses (`protected`) | abstract class |
+| the convenience of both | an interface, plus an abstract "skeletal" class that implements it |
+
+that last row is how the JDK does it: `List` is the interface (what you program against), `AbstractList` is the skeletal implementation (implement `get` and `size` and you get the rest), and `ArrayList` extends it. you depend on `List`, never on `AbstractList`.
+
+<Figure caption="the collections framework uses both: interfaces for the types you declare variables with, abstract skeletal classes so implementers write less. click to fold.">
+<Tree>{`
+Iterable                    // interface
+    Collection              // interface
+        List                // interface: what you program against
+            AbstractList    // abstract class: skeletal implementation
+                ArrayList   // a real class (it also says implements List)
+        Set                 // interface
+            AbstractSet     // abstract class
+                HashSet
+`}</Tree>
+</Figure>
+
+<Effective item={20} title="prefer interfaces to abstract classes">
+existing classes can easily be retrofitted to implement a new interface, but can't be given a new superclass without wrecking their hierarchy. interfaces are ideal for mixins and allow non-hierarchical type frameworks. combine them with a skeletal implementation (an abstract class named `AbstractInterface`) to give implementers a head start without forcing a class hierarchy on them.
+</Effective>
+
+<Gotcha title="the constant interface">
+because interface fields are `public static final`, people used to write `interface Constants {"{ int MAX = 10; }"}` and implement it to get unqualified access to `MAX`. don't. it leaks the constants into the class's public API forever (every subclass "is a" Constants). use a final class with a private constructor, or `import static`. effective java calls this out as item 22: interfaces are for defining types.
+</Gotcha>
+
+<Interview q="since java 8, what's the difference between an abstract class and an interface?">
+interfaces still can't have instance state or constructors, and all their non-private members are public. abstract classes can have both, plus protected and package-private members. a class can extend one class but implement many interfaces. default methods give interfaces behaviour, but with conflict rules: a class method always beats a default, a more specific interface beats a less specific one, and two unrelated defaults force the class to override (optionally delegating with `X.super.m()`). rule of thumb: interface for the type, abstract class for shared implementation.
+</Interview>
+
+<Keylines>
+- abstract class: state, constructors, holes. extend one.
+- interface: a contract, no instance state. implement many.
+- default methods are fallbacks. a class method always beats them.
+- more specific interface beats less specific. unrelated defaults: override and pick with `X.super.m()`.
+- program to the interface, inherit from the skeletal class.
+</Keylines>

@@ -1,0 +1,173 @@
+import { CloseOrder } from "@/components/figures/core-api/CloseOrder";
+
+<InShort>
+`try (var r = open()) { ... }` calls `r.close()` for you when the block ends, however it ends. with several resources they close in **reverse order** of opening, and only the ones that actually got opened.
+
+if the body throws and `close()` throws too, the close exception doesn't replace the real one: it's attached to it as a **suppressed** exception.
+</InShort>
+
+## the picture
+
+getting dressed: socks, then shoes. getting undressed: shoes, then socks. you undo things in the reverse order you did them, because the later thing usually depends on the earlier one. a buffered reader sits on a file, a statement sits on a connection. close the connection first and the statement's `close()` has nothing to talk to.
+
+try-with-resources is that rule, written once in the compiler instead of a hundred times in your code. anything that implements `AutoCloseable` (one method, `close()`) can go in the parentheses.
+
+## before java 7: the finally dance
+
+<Compare>
+<Bad label="try / finally by hand">
+```java
+Connection conn = open();
+try {
+    Statement st = conn.createStatement();
+    try {
+        st.execute(sql);
+    } finally {
+        st.close();
+    }
+} finally {
+    conn.close();
+}
+```
+one level of nesting per resource. and if `execute` throws and then `close()` throws, the close exception *replaces* the real one: your log says "close failed" and the actual SQL error is gone.
+</Bad>
+<Good label="try-with-resources">
+```java
+try (Connection conn = open();
+     Statement st = conn.createStatement()) {
+    st.execute(sql);
+}
+```
+same closing, in the same order, written once. and when both throw, the SQL error is the one you see, with the close failure attached to it.
+</Good>
+</Compare>
+
+<Effective item={9} title="prefer try-with-resources to try-finally">
+the code is shorter, it closes in the right order even when something fails halfway, and it keeps the first exception instead of the last one. there's no case where the hand-written `finally` version is better.
+</Effective>
+
+## the order things happen in
+
+```java title="Main.java" run output="open A\nopen B\nopen C\nbody\nclose C\nclose B\nclose A\nfinally"
+record Res(String name) implements AutoCloseable {
+    Res {
+        IO.println("open " + name);
+    }
+
+    public void close() {
+        IO.println("close " + name);
+    }
+}
+
+void main() {
+    try (var a = new Res("A"); var b = new Res("B"); var c = new Res("C")) {
+        IO.println("body");
+    } finally {
+        IO.println("finally");
+    }
+}
+```
+
+opened left to right, closed right to left. and notice where `finally` lands: *after* the resources are closed. same for a `catch` on a try-with-resources, it only runs once everything is already closed.
+
+now make things fail. every scenario below is the real output of that program with one thing changed:
+
+<Figure wide caption={<>pick a failure and step through. resources stack up as they open and close <strong>newest first</strong>. when the body and a <code>close()</code> both throw, the <C k="dead">body's exception</C> is the one you catch, and the close failure rides along inside <code>getSuppressed()</code>. if a constructor throws, only what was already opened gets closed.</>}>
+<CloseOrder />
+</Figure>
+
+<Predict options={["open A, open B, close A, close B, done", "open A, open B, close B, close A, done", "open A, open B, done, close B, close A"]} answer={1}>
+```java
+try (var a = new Res("A"); var b = new Res("B")) {
+    throw new IllegalStateException("x");
+} catch (IllegalStateException e) {
+    IO.println("done");
+}
+```
+<Explain>
+the body throws, so both resources are closed first, newest first (B, then A). only after that does the `catch` run and print `done`. the catch can't see the resources at all: they're scoped to the `try` block, and they're already closed by the time it runs.
+</Explain>
+</Predict>
+
+## suppressed exceptions
+
+when the body throws and then a `close()` throws, java has two exceptions and can only propagate one. it keeps the body's (the cause of the trouble) and attaches the other with `addSuppressed`. nothing is lost, and the stack trace prints both:
+
+```text
+Exception in thread "main" java.lang.RuntimeException: query failed
+	at Sup.main(Sup.java:7)
+	Suppressed: java.lang.IllegalStateException: close failed
+		at Sup$Conn.close(Sup.java:3)
+		at Sup.main(Sup.java:6)
+```
+
+in code, `e.getSuppressed()` gives you the array. it's on every `Throwable` since java 7, so you can use `addSuppressed` yourself whenever you're cleaning up after a failure and the cleanup fails too.
+
+## what javac writes for you
+
+try-with-resources is pure compiler sugar. for one resource, the generated code is shaped like this (a sketch of JLS 14.20.3.1):
+
+```java
+final Res r = new Res("A");
+Throwable primary = null;
+try {
+    body();
+} catch (Throwable t) {
+    primary = t;
+    throw t;
+} finally {
+    if (r != null) {
+        if (primary != null) {
+            try {
+                r.close();
+            } catch (Throwable closeFailure) {
+                primary.addSuppressed(closeFailure);   // keep the first, attach the second
+            }
+        } else {
+            r.close();                                 // nothing failed: a close failure is the failure
+        }
+    }
+}
+```
+
+several resources nest: each later one is a try-with-resources *inside* the earlier one's body. that's the whole reason the order is reversed.
+
+a few rules fall straight out of that:
+
+<Defs>
+<dt>null is fine</dt><dd>a `null` resource is skipped, `close()` is never called on it, no NPE.</dd>
+<dt>resources are final</dt><dd>you can't reassign `r` inside the block. since java 9 you can also list an existing, effectively final variable: `try (reader) { ... }`.</dd>
+<dt>AutoCloseable vs Closeable</dt><dd>`AutoCloseable.close()` throws `Exception` (java 7). `Closeable.close()` throws `IOException` and must be safe to call twice (java 5, every I/O stream). implement the narrowest one you can.</dd>
+<dt>catch and finally come last</dt><dd>both run after every resource is closed.</dd>
+</Defs>
+
+<Gotcha title="returning something that the try is about to close">
+```java
+Stream<String> lines(Path p) throws IOException {
+    try (Stream<String> s = Files.lines(p)) {
+        return s;                      // closed the moment we return
+    }
+}
+```
+the caller gets a stream that's already closed, and the first terminal operation fails with an `IllegalStateException`: "stream has already been operated upon or closed". the resource's lifetime is the block, not the value. either do the work inside the block and return the result, or don't use try-with-resources here and make the *caller* responsible (`try (var s = lines(p)) { ... }`).
+</Gotcha>
+
+<Gotcha title="one resource per declaration">
+```java
+try (var in = new BufferedReader(new FileReader(file))) { ... }        // one resource
+try (var fr = new FileReader(file); var in = new BufferedReader(fr)) { ... }   // two
+```
+the first registers only the `BufferedReader`. if its constructor threw, the `FileReader` underneath would never be closed. it's rare (that constructor basically can't fail), but the habit is free: one resource per declaration.
+</Gotcha>
+
+<Interview q="what is a suppressed exception?">
+when a try-with-resources body throws and then closing a resource throws too, the close exception is added to the body's exception with `addSuppressed` instead of replacing it. you get the original failure, with the cleanup failure available from `getSuppressed()` and printed as "Suppressed:" in the stack trace. before java 7, a hand-written `finally` would lose the original. bonus: resources close in reverse order, and a `catch` or `finally` on the same statement runs only after everything is closed.
+</Interview>
+
+<Keylines>
+- anything `AutoCloseable` goes in the parentheses. it's closed however the block ends.
+- several resources close in reverse order, and only the ones that were actually opened.
+- body and close both throw? you get the body's, with the close failure in `getSuppressed()`.
+- catch and finally run after the resources are closed.
+- don't return a resource from inside the block that closes it.
+</Keylines>

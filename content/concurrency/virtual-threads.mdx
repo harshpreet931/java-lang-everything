@@ -1,0 +1,149 @@
+import { MountSim } from "@/components/figures/concurrency/MountSim";
+import { ThreadModels } from "@/components/figures/concurrency/ThreadModels";
+
+<InShort>
+a **virtual thread** is a `java.lang.Thread` that the JVM manages instead of the OS. thousands of them share a few **carrier threads** (platform threads, about one per core). when a virtual thread blocks on I/O, it **unmounts**: its stack is parked on the heap and the carrier runs someone else. so blocking becomes cheap, and "one thread per request" works again, even at a million requests. final since java 21 ([JEP 444](https://openjdk.org/jeps/444)).
+</InShort>
+
+## the picture
+
+a restaurant used to give every table its own waiter (a platform thread per request). waiters are expensive, so you can only hire a few hundred, and most of the time each one is standing at a table waiting for the customer to decide. virtual threads are order slips. there are as many slips as tables, and a handful of waiters (carriers) carry whichever slips are ready to move. a slip waiting on the kitchen (I/O) sits on the rail (the heap) and costs almost nothing.
+
+<Figure wide caption={<>a platform thread <em>is</em> an OS thread. virtual threads are <C k="live">mounted</C> on a carrier only while they're actually running; everything else waits on the heap.</>}>
+<ThreadModels />
+</Figure>
+
+the API is the one you already know. a virtual thread is a `Thread`, with the same six [states](/learn/concurrency/threads), interrupts, `join`, `ThreadLocal`s. only creation differs:
+
+```java title="Make.java"
+Thread t = Thread.ofVirtual().name("handler").start(() -> handle(request));
+Thread u = Thread.startVirtualThread(() -> handle(request));
+
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    executor.submit(() -> handle(request));      // a new virtual thread per task. no pool.
+}
+```
+
+## mounting and unmounting
+
+the trick is entirely in what happens at a blocking call. on a platform thread, `socket.read()` blocks the OS thread. on a virtual thread, the JDK's blocking code (sockets, `Thread.sleep`, locks, `BlockingQueue`...) notices it's running on a virtual thread and **yields** instead: the virtual thread's frames are copied off the carrier's stack into a heap object (a stack chunk), and the carrier goes back to the scheduler for more work. when the I/O is ready, the virtual thread is scheduled again, its frames are copied back onto whichever carrier is free, and it continues as if nothing happened.
+
+<Figure wide caption={<>press run. each virtual thread does a bit of CPU work, then blocks. watch it leave its carrier for the <C k="ref">heap</C> and come back later, maybe on a different carrier. then switch to <strong>synchronized (pinned)</strong>: a blocked thread now <C k="dead">holds its carrier hostage</C>, and the whole thing takes longer.</>}>
+<MountSim />
+</Figure>
+
+the scheduler is a `ForkJoinPool` in FIFO mode, with parallelism equal to the number of cores by default. it's the same [work-stealing](/learn/concurrency/fork-join) machinery: each carrier has its own queue and steals when it runs dry.
+
+## a hundred thousand threads
+
+```java title="Main.java" run
+import java.time.Duration;
+import java.util.concurrent.Executors;
+import java.util.stream.IntStream;
+
+void main() {
+    long start = System.nanoTime();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        IntStream.range(0, 100_000).forEach(i -> executor.submit(() -> {
+            Thread.sleep(Duration.ofSeconds(1));
+            return i;
+        }));
+    }   // close() waits for every task
+    IO.println("100,000 threads, 1 s of sleep each: " + (System.nanoTime() - start) / 1_000_000 + " ms");
+}
+```
+
+100,000 threads that each block for a full second, done in about 1.4 seconds: 1,404, 1,444 and 1,412 ms in three runs on jdk 25, on a 14-core arm mac, peaking around 170 MB of memory for the whole process.
+
+the same program with platform threads (`Executors.newThreadPerTaskExecutor(Thread.ofPlatform().factory())`) doesn't even get close. macOS caps a process at 6,144 threads (`kern.num_taskthreads`), so 100,000 is out of the question. even 10,000 failed in two of three runs with `OutOfMemoryError: unable to create native thread` after about 6,100 threads; the run that survived only did because the first threads finished their second of sleep before the last ones were created.
+
+<Figure caption={<>wall-clock time to run N tasks that each sleep for 1 second, one thread per task, median of 3 runs on jdk 25 on an arm mac. the 10,000 platform bar is the one run out of three that didn't crash. there's no bar for 100,000 platform threads: <C k="dead">it can't run at all</C>.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "100,000 virtual", value: 1412, tone: "live" },
+    { label: "5,000 platform", value: 1377 },
+    { label: "10,000 platform", value: 2865 },
+  ]}
+/>
+</Figure>
+
+virtual threads aren't *faster* threads. a task runs at exactly the same speed. what changes is how many you can have waiting at once, which is the number that limits a server doing mostly I/O.
+
+## pinning, and what java 24 fixed
+
+sometimes a virtual thread can't unmount when it blocks, because something on its stack can't be moved to the heap. it's then **pinned**: it blocks while still holding its carrier, exactly like a platform thread would. with only a handful of carriers, a few pinned threads can stall everything.
+
+in java 21 to 23, the big one was `synchronized`: block inside a synchronized block or method (I/O, `sleep`, `wait()`), and the virtual thread pinned. that's why "replace synchronized with ReentrantLock" was standard advice. [JEP 491](https://openjdk.org/jeps/491), delivered in **java 24**, reworked monitors so a virtual thread can unmount while holding one. here's the proof on jdk 25: one carrier thread, 100 virtual threads, each sleeping 50 ms *inside* a synchronized block:
+
+```java title="Main.java" run output="carrier threads used: 1\n100 x 50 ms of sleeping took under a second: true"
+import java.time.Duration;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+
+void main() {
+    System.setProperty("jdk.virtualThreadScheduler.parallelism", "1");    // a single carrier thread
+    Set<String> carriers = ConcurrentHashMap.newKeySet();
+    long start = System.nanoTime();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        for (int i = 0; i < 100; i++) {
+            Object lock = new Object();
+            executor.submit(() -> {
+                synchronized (lock) {                                     // pinned the carrier before java 24
+                    String me = Thread.currentThread().toString();       // VirtualThread[#42]/runnable@ForkJoinPool-1-worker-1
+                    carriers.add(me.substring(me.indexOf('@') + 1));
+                    Thread.sleep(Duration.ofMillis(50));                 // blocks while holding the monitor
+                }
+                return null;
+            });
+        }
+    }
+    long ms = (System.nanoTime() - start) / 1_000_000;
+    IO.println("carrier threads used: " + carriers.size());
+    IO.println("100 x 50 ms of sleeping took under a second: " + (ms < 1000));
+}
+```
+
+it took 59 ms. if `synchronized` still pinned, each sleep would hold the only carrier and the whole thing would need at least 100 × 50 ms = 5 seconds.
+
+what still pins, per JEP 491:
+
+- a native method or a foreign (FFM) function that calls back into java, and then that java code blocks
+- blocking inside a class initializer (`static { ... }`), or waiting for another thread to finish initializing a class
+
+when it happens, the JFR event `jdk.VirtualThreadPinned` records it, with the stack trace. the old `-Djdk.tracePinnedThreads` flag no longer does anything.
+
+<Gotcha title="file I/O doesn't unmount either">
+blocking file operations (and some other OS calls) can't be done asynchronously on most platforms, so they hold the carrier while they run. the scheduler compensates by temporarily adding a carrier, up to `jdk.virtualThreadScheduler.maxPoolSize` (256 by default, or the core count if that's bigger). fine in moderation, but a flood of file I/O on virtual threads behaves more like a large platform-thread pool.
+</Gotcha>
+
+## when not to use them
+
+- **CPU-bound work.** a virtual thread computing for 10 seconds occupies a carrier for 10 seconds. there are only as many carriers as cores, so you've gained nothing over a [thread pool](/learn/concurrency/executors) or a [parallel stream](/learn/concurrency/fork-join). virtual threads help with *waiting*, not computing.
+- **don't pool them.** they cost about as much as an object, so create one per task and let it die. a pool of virtual threads only adds a queue.
+- **limit concurrency with a semaphore, not a pool size.** a fixed pool of 20 used to double as "at most 20 calls to the database". with virtual threads, put a [Semaphore](/learn/concurrency/synchronizers) of 20 in front of the database instead.
+- **careful with ThreadLocal caches.** a `ThreadLocal` holding an expensive object (a parser, a big buffer) assumed a few hundred long-lived threads. with a million short-lived virtual threads, that's a million copies, each built and thrown away once. [scoped values](/learn/concurrency/structured-concurrency) are the virtual-thread-friendly replacement for passing context.
+- **it's not free speed.** if your app is limited by CPU, a connection pool, or a database that can only take 50 queries at a time, more threads just means a longer queue somewhere else.
+
+<Quiz question="a REST service spends ~95% of each request waiting on downstream HTTP calls and a database. what do virtual threads mostly buy you?" options={["each request runs faster", "many more requests can be in flight at once without a huge thread pool", "it stops needing a connection pool"]} answer={1}>
+<Explain>
+the request code runs at the same speed. what changes is that a blocked request costs a small heap object instead of an OS thread, so you can have tens of thousands in flight with plain blocking code. the database still only takes as many connections as it takes, so the connection pool (or a semaphore) is still your real limit.
+</Explain>
+</Quiz>
+
+<Deep title="what's actually on the heap">
+a virtual thread is a `VirtualThread` object plus a continuation. when it unmounts, the frames between the continuation's entry and the blocking call are copied into one or more `StackChunk` objects on the heap, and the GC treats them like any other object. on mount, only the top frames are copied back eagerly, and the rest are copied lazily as the code returns into them, which keeps mount cheap even for deep stacks. more in [virtual threads, inside](/learn/deep-dives/virtual-thread-internals).
+</Deep>
+
+<Interview q="how do virtual threads differ from platform threads?">
+a platform thread is a thin wrapper around an OS thread, 1:1, with a fixed reserved stack, so you can afford thousands. a virtual thread is scheduled by the JVM onto a small pool of carrier platform threads (M:N). when it blocks on I/O or a lock, it unmounts and its stack moves to the heap, freeing the carrier, so you can afford millions. same Thread API, same blocking code. they help throughput for I/O-bound work, not CPU-bound work, and they shouldn't be pooled. since java 24, blocking inside synchronized no longer pins the carrier.
+</Interview>
+
+<Keylines>
+- virtual threads are real `Thread`s, scheduled by the JVM onto a few carrier threads.
+- blocking unmounts the virtual thread: its stack goes to the heap and the carrier moves on.
+- 100,000 sleeping threads: about 1.4 s and 170 MB. platform threads can't get there.
+- since java 24, synchronized doesn't pin. native frames and class initializers still do.
+- great for I/O-bound concurrency. useless for CPU-bound work. never pool them.
+</Keylines>

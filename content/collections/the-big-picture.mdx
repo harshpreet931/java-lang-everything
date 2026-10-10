@@ -1,0 +1,149 @@
+import { CollectionFamily } from "@/components/figures/collections/CollectionFamily";
+import { FourShapes } from "@/components/figures/collections/FourShapes";
+
+<InShort>
+the `java.util` package is a small set of **interfaces** (what a collection can do) and a few **implementations** (how it's actually stored). `List`, `Set` and `Queue` all extend `Collection`. `Map` is its own family.
+
+since java 21, the **sequenced** interfaces give every ordered collection the same `getFirst()`, `getLast()` and `reversed()`.
+</InShort>
+
+## the picture
+
+you know how there are like forty classes in `java.util` and they all kinda sound the same? `ArrayList`, `ArrayDeque`, `LinkedList`, `LinkedHashSet`. it's less chaos than it looks.
+
+think of a hiring board. the interfaces are job descriptions ("must keep things in order", "must never hold two of the same thing"). the classes are the people hired for those jobs, each with a different way of getting it done (an array, a chain of nodes, a tree). you write your code against the job description, and you can swap the hire later.
+
+<Figure wide caption={<>click an interface to see what it adds and who implements it. click a class at the bottom to light up every interface it is. notice <code>Map</code> sits alone, and the three <code>Sequenced</code> ones (java 21) slot in between.</>}>
+<CollectionFamily />
+</Figure>
+
+read the arrows as "is a". a `Deque` is a `Queue` and also a `SequencedCollection`. a `NavigableSet` is a `SortedSet` is a `SequencedSet` is a `Set` is a `Collection` is an `Iterable`. that last one is why every collection works in a for-each loop (the loop just asks for an iterator, more in [iterators and fail-fast](/learn/collections/iterators-and-fail-fast)).
+
+## four shapes of data
+
+forget the class names for a second. almost every collection you'll ever need is one of four shapes.
+
+<Figure caption="the four shapes. a List cares about position, a Set cares about uniqueness, a Deque cares about its ends, a Map cares about keys.">
+<FourShapes />
+</Figure>
+
+and then each shape has a couple of ways to be stored. that's where the real differences live: speed, memory, ordering.
+
+| class | is a | inside | chapter |
+| --- | --- | --- | --- |
+| `ArrayList` | `List` | an `Object[]` that grows | [ArrayList](/learn/collections/arraylist) |
+| `LinkedList` | `List`, `Deque` | doubly linked nodes | [LinkedList and ArrayDeque](/learn/collections/linkedlist-and-arraydeque) |
+| `ArrayDeque` | `Deque` | a circular `Object[]` | [LinkedList and ArrayDeque](/learn/collections/linkedlist-and-arraydeque) |
+| `PriorityQueue` | `Queue` | a binary heap in an `Object[]` | [PriorityQueue](/learn/collections/priorityqueue) |
+| `HashMap` | `Map` | an array of buckets | [HashMap](/learn/collections/hashmap) |
+| `LinkedHashMap` | `SequencedMap` | a `HashMap` with a linked list through it | [LinkedHashMap](/learn/collections/linkedhashmap-and-lru) |
+| `TreeMap` | `NavigableMap` | a red-black tree | [TreeMap](/learn/collections/treemap) |
+| `HashSet`, `TreeSet` | `Set`, `NavigableSet` | a `HashMap` / `TreeMap` with dummy values | [sets](/learn/collections/sets) |
+| `EnumSet` | `Set` | bits in a `long` | [sets](/learn/collections/sets) |
+
+see the pattern? there are really only four storage tricks in here: a flat array, linked nodes, a hash table and a balanced tree. every class is one of those (or two of them glued together).
+
+<Quiz question="which of these can you call getFirst() on, in java 21+?" options={["HashSet", "LinkedHashSet", "Set.of(...)", "all three"]} answer={1}>
+<Explain>
+`getFirst()` lives on `SequencedCollection`. `LinkedHashSet` remembers insertion order, so it's a `SequencedSet`. a plain `HashSet` (and `Set.of`) has no defined order, so there's no "first" to get. it doesn't compile on a variable typed `HashSet`, and `hs instanceof SequencedCollection` is `false`.
+</Explain>
+</Quiz>
+
+## sequenced collections <Since v={21} />
+
+here's a fun one. before java 21, "give me the last element" was spelled differently for every collection:
+
+<Compare>
+<Bad label="before 21: four ways to say last">
+```java
+list.get(list.size() - 1);
+deque.getLast();
+sortedSet.last();
+// LinkedHashSet: walk the whole thing
+String last = null;
+for (String s : linkedSet) last = s;
+```
+</Bad>
+<Good label="21+: one way">
+```java
+list.getLast();
+deque.getLast();
+sortedSet.getLast();
+linkedSet.getLast();
+```
+</Good>
+</Compare>
+
+[JEP 431](https://openjdk.org/jeps/431) added three interfaces: `SequencedCollection`, `SequencedSet` and `SequencedMap`. anything with a defined encounter order got `getFirst`, `getLast`, `addFirst`, `addLast`, `removeFirst`, `removeLast` and `reversed()` (maps got `firstEntry`, `lastEntry`, `putFirst`, `putLast` and friends).
+
+```java title="Main.java" run output="c c c c=3\n[c, b, a] [c, b, a] {c=3, b=2, a=1}"
+void main() {
+    List<String> list = new ArrayList<>(List.of("a", "b", "c"));
+    Deque<String> deque = new ArrayDeque<>(List.of("a", "b", "c"));
+    SequencedSet<String> set = new LinkedHashSet<>(List.of("a", "b", "c"));
+    SequencedMap<String, Integer> map = new TreeMap<>(Map.of("a", 1, "b", 2, "c", 3));
+
+    IO.println(list.getLast() + " " + deque.getLast() + " " + set.getLast() + " " + map.lastEntry());
+    IO.println(list.reversed() + " " + set.reversed() + " " + map.reversed());
+}
+```
+
+(no imports: a compact source file gets all of `java.base` imported for free, `java.util` included.)
+
+<Predict options={["[3, 2, 1]", "[4, 3, 2, 1]", "UnsupportedOperationException"]} answer={1}>
+```java
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3));
+List<Integer> r = list.reversed();
+list.add(4);
+IO.println(r);
+```
+<Explain>
+`reversed()` doesn't copy anything. it returns a **view**: a thin object that reads the original list back to front. add to the list and the view sees it. that's cheap (no copy) and occasionally surprising. if you want a frozen reversed copy, wrap it: `new ArrayList<>(list.reversed())`.
+</Explain>
+</Predict>
+
+## program to the interface
+
+declare the variable as the job, not the hire:
+
+```java
+List<String> names = new ArrayList<>();     // the type says "a list"
+Map<String, Integer> ages = new HashMap<>(); // the type says "a map"
+```
+
+now every method that takes `names` only promises to use list things. if a profiler later tells you a different implementation fits better, you change one `new` and nothing else.
+
+<Effective item={64} title="refer to objects by their interfaces">
+if a fitting interface exists, use it for parameters, return types, fields and variables. the class only shows up next to `new`. the exception: when you actually need something only the class has (say, `LinkedHashMap`'s access order), say so in the type.
+</Effective>
+
+but pick the *right* interface. `Collection` is the most flexible type and the least useful one: it has no `get(i)`, no order and no idea about keys. take the narrowest thing that has the methods you actually call.
+
+<Gotcha title="optional operations">
+the interfaces promise more than every implementation delivers. `List` has `add`, but `List.of(1, 2).add(3)` throws `UnsupportedOperationException`, and so does `Arrays.asList(1, 2).add(3)`. the javadoc marks these as "optional operations", which is a polite way of saying "the type checker won't save you here". the whole story is in [immutable collections](/learn/collections/immutable-collections).
+</Gotcha>
+
+## the legacy ones
+
+`Vector`, `Hashtable`, `Stack` and `Enumeration` are from java 1.0, before the collections framework existed (it arrived in 1.2). they still compile, they still work, and they make every single method `synchronized`, which costs you on every call and still doesn't make compound actions like "check then add" safe.
+
+| legacy | use instead |
+| --- | --- |
+| `Vector` | `ArrayList` |
+| `Stack` | `ArrayDeque` (`push` / `pop` / `peek`) |
+| `Hashtable` | `HashMap`, or `ConcurrentHashMap` if threads share it |
+| `Enumeration` | `Iterator` |
+
+if you really need thread-safety, reach for the [concurrent collections](/learn/concurrency/concurrent-collections), which were designed for it instead of patched for it.
+
+<Interview q="why doesn't Map extend Collection?">
+because a map doesn't hold elements, it holds pairs. what would `map.add(x)` even mean, a key with no value? `contains(x)`, a key or a value? so `Map` stands alone and gives you three collection-shaped *views* instead: `keySet()` (a `Set`), `values()` (a `Collection`) and `entrySet()` (a `Set` of `Map.Entry`). they're views, not copies, so removing from `keySet()` removes from the map.
+</Interview>
+
+<Keylines>
+- interfaces say what a collection can do. classes say how it's stored.
+- `List`, `Set`, `Queue`, `Deque` are `Collection`s. `Map` is its own family.
+- four storage tricks underneath everything: array, linked nodes, hash table, balanced tree.
+- java 21 gave every ordered collection `getFirst`, `getLast` and `reversed()`.
+- declare the interface, `new` the class. skip `Vector`, `Stack` and `Hashtable`.
+</Keylines>

@@ -1,0 +1,154 @@
+import { ToolAtlas } from "@/components/figures/tooling/ToolAtlas";
+import { AttachHandshake } from "@/components/figures/tooling/AttachHandshake";
+
+<InShort>
+a JDK is not one program, it's **30 programs** in `$JAVA_HOME/bin`. you'll touch about eight of them every week: `javac`, `java`, `jar` and `jshell` to build and run, `javap` and `jdeps` to look inside compiled code, and **`jcmd`** and `jfr` to poke at a JVM that's already running.
+
+the diagnostic ones all work the same way: find the **pid**, attach, ask.
+</InShort>
+
+## the picture
+
+think of a mechanic's van. there's the stuff for building the car (`javac`, `jar`), the key that starts it (`java`), and a diagnostic scanner you plug into a running engine without stopping it (`jcmd`). most people only ever open the first drawer.
+
+<Figure caption={<>click any tool. every transcript is real output from temurin 25.0.4.1, trimmed. try <code>jdeprscan</code> for a preview of your next upgrade, and <code>jcmd</code> for the one diagnostic tool to learn first.</>} wide>
+<ToolAtlas />
+</Figure>
+
+`ls $JAVA_HOME/bin` on jdk 25 lists exactly 30. they're thin launchers: most of them start a small JVM that runs a class from a module like `jdk.compiler` or `jdk.jcmd` (that's why `jps` lists itself as `jdk.jcmd/sun.tools.jps.Jps`). so every tool here is also a java program, running on the JDK it ships with.
+
+## the build loop
+
+you'll learn this one in a day and then never think about it again. a build tool ([maven](/learn/tooling/maven), [gradle](/learn/tooling/gradle)) runs exactly these steps for you.
+
+<Figure caption="hover a stage. a build tool is mostly this loop with dependency downloads and tests bolted on.">
+<Flow
+  stages={[
+    { label: "Hello.java", sub: "source", note: "plain text. the only thing you write." },
+    { label: "javac", sub: "compile", note: "checks types and writes one .class file per class. -d out picks the folder." },
+    { label: "Hello.class", sub: "bytecode", note: "936 bytes for this one. javap -v shows major version 69 = java 25." },
+    { label: "jar", sub: "package", note: "zips the class files and writes META-INF/MANIFEST.MF. --main-class sets Main-Class in it." },
+    { label: "java -jar", sub: "run", note: "starts a JVM, reads the manifest, calls Hello.main." },
+  ]}
+/>
+</Figure>
+
+```java title="Hello.java"
+public class Hello {
+    public static void main(String[] args) {
+        String name = args.length > 0 ? args[0] : "world";
+        System.out.println("hello, " + name);
+    }
+}
+```
+
+```bash
+$ javac -d out Hello.java
+$ jar --create --file hello.jar --main-class Hello -C out .
+$ java -jar hello.jar
+hello, world
+$ java Hello.java ada          # no javac step at all
+hello, ada
+```
+
+that last line is the source launcher (java 11, and since 22 it handles programs spread over several files). it compiles in memory and runs. great for scripts and for this site, but it's still the same `javac` doing the work, it just never writes a `.class` to disk.
+
+<Gotcha title="javac --release, not -source/-target">
+compiling on jdk 25 for servers that still run 17? `javac --release 17` checks your code against the java 17 API too, so `list.getFirst()` (added in 21) fails right there with `cannot find symbol`, instead of blowing up with `NoSuchMethodError` in prod. the old `-source 17 -target 17` pair only sets the language level and the bytecode version. it compiled that same call without complaint, after a warning that literally says `--release 17 is recommended instead`.
+</Gotcha>
+
+## looking inside compiled code
+
+two tools read class files without running anything. `javap` disassembles one class. `jdeps` maps what a whole jar depends on.
+
+```text title="javap -c -cp out Hello"
+  public static void main(java.lang.String[]);
+    Code:
+         0: aload_0
+         1: arraylength
+         2: ifle          11
+         5: aload_0
+         6: iconst_0
+         7: aaload
+         8: goto          13
+        11: ldc           #7     // String world
+        13: astore_1
+        14: getstatic     #9     // Field java/lang/System.out:Ljava/io/PrintStream;
+        17: aload_1
+        18: invokedynamic #15,0  // InvokeDynamic #0:makeConcatWithConstants
+        23: invokevirtual #19    // Method java/io/PrintStream.println
+        26: return
+```
+
+see line 18? `"hello, " + name` didn't become a `StringBuilder`. since java 9, javac emits one `invokedynamic` and lets the JVM pick the fastest way to concatenate at runtime. you can only learn that kind of thing by looking, and `javap` is how you look. the full instruction set is in [bytecode](/learn/jvm/bytecode), and the concat trick has its own page: [string concatenation](/learn/deep-dives/string-concatenation).
+
+<Quiz question="your app runs fine on your laptop but throws NoClassDefFoundError: java/sql/Connection after you ship it on a jlinked runtime. which tool would have told you beforehand?" options={["javap", "jdeps", "jdeprscan", "jcmd"]} answer={1}>
+<Explain>
+`jdeps --print-module-deps app.jar` lists every JDK module your code touches (`java.base,java.sql` here). feed that list to `jlink --add-modules` and the runtime has what it needs. `javap` shows one class at a time, `jdeprscan` looks for deprecated APIs, and `jcmd` needs a running JVM. more in [jar, jlink, jpackage](/learn/tooling/jars-jlink-jpackage).
+</Explain>
+</Quiz>
+
+## poking a JVM that's already running
+
+this is the drawer worth learning properly. something is slow, stuck or eating memory in prod, and you can't restart it (restarting destroys the evidence). you don't need an agent or a special flag: every HotSpot JVM accepts commands from `jcmd` out of the box.
+
+<Figure caption={<>step through it. the second time you attach, the socket already exists and jcmd skips straight to the last step. on macOS the socket lives in <code>$TMPDIR</code> instead of <code>/tmp</code>; it showed up there as <code>srw-------</code> while i attached.</>}>
+<AttachHandshake />
+</Figure>
+
+so the whole workflow is two commands: `jps` (or `jcmd` with no arguments) to get the pid, then `jcmd <pid> <command>`. `jcmd <pid> help` lists 54 commands on jdk 25. you need about six:
+
+| the question | the command |
+| --- | --- |
+| which JVMs are running? | `jcmd` (or `jps -l`) |
+| what is every thread doing right now? | `jcmd <pid> Thread.print` |
+| what's filling the heap? | `jcmd <pid> GC.class_histogram` |
+| give me the whole heap to analyze | `jcmd <pid> GC.heap_dump /tmp/heap.hprof` |
+| what flags did it actually start with? | `jcmd <pid> VM.flags` |
+| record everything for a minute | `jcmd <pid> JFR.start duration=60s filename=app.jfr` |
+
+`jstack`, `jmap` and `jinfo` do some of the same jobs. they're older (java 5) and still work, but `jcmd` (java 7) is the one tool that does all of it, so that's the one to remember.
+
+and a thread dump is where a deadlock confesses. two threads, two locks, opposite order:
+
+```text title="jcmd 12615 Thread.print (the end of it)"
+Found one Java-level deadlock:
+=============================
+"alice":
+  waiting to lock monitor 0x00000075e149e3e0 (object 0x0000007018418118, a java.lang.Object),
+  which is held by "bob"
+
+"bob":
+  waiting to lock monitor 0x00000075e149e4c0 (object 0x0000007018418108, a java.lang.Object),
+  which is held by "alice"
+```
+
+the JVM found the cycle itself. you didn't have to read 30 stacks to spot it. why that happens and how to avoid it is in [deadlocks](/learn/concurrency/deadlocks-and-liveness).
+
+<Gotcha title="attach only works as the same user">
+the socket is `srw-------`: readable by its owner, nobody else. so `jcmd` run as `root` against a JVM started by `app` fails on most setups, and inside containers you have to run it inside the same container (or at least the same user and pid namespace). `-XX:+DisableAttachMechanism` turns the whole thing off, which some hardened images do. find out before the incident, not during it.
+</Gotcha>
+
+## the rest of the box
+
+- **`jshell`** (java 9) is a REPL. it's the fastest way to check what `"a,b,,".split(",")` actually returns. [jshell](/learn/start/jshell) has the tour.
+- **`jwebserver`** (java 18) serves a folder over http in one command. for testing, docs and teaching. it's not hardened for production and says so.
+- **`jlink`** and **`jpackage`** build a runtime with only the modules you need, then wrap it into a native installer. that's [the next-but-one chapter](/learn/tooling/jars-jlink-jpackage).
+- **`jfr`** reads flight recordings. [flight recorder](/learn/performance/jfr-and-jmc) is all about it.
+- **`keytool`** and **`jarsigner`** handle keys, certificates and signed jars. you'll meet `keytool` the first time a TLS handshake fails because a corporate CA isn't in `cacerts`.
+
+<Deep title="why are there still tools for RMI and serialVersionUID?">
+because the JDK almost never deletes a tool without a deprecation cycle first. `rmiregistry` and `serialver` date from java 1.1 and still have users. the ones that did go away went loudly: `appletviewer` (gone in 11), `jjs` (the nashorn JavaScript shell, gone in 15), and `jrunscript`, which was deprecated for removal in 24 and deleted in 26. run it on 25 and it warns you first. `jdeprscan` gives your own code the same courtesy.
+</Deep>
+
+<Interview q="a java service is stuck in production. what do you do, before restarting it?">
+get the pid (`jcmd` with no args). take three thread dumps a few seconds apart with `jcmd <pid> Thread.print`: a thread that's in the same frame in all three is your suspect, and a deadlock gets printed for you at the bottom. if it's slow rather than stuck, start a flight recording with `jcmd <pid> JFR.start duration=60s filename=x.jfr`. if memory is the problem, `GC.class_histogram` first (cheap), `GC.heap_dump` second (pauses the JVM while it writes). then restart. bonus point: all of this works on any HotSpot JVM with no flags set in advance.
+</Interview>
+
+<Keylines>
+- the JDK is 30 small programs. learn javac, java, jar, jshell, javap, jdeps, jcmd and jfr.
+- `javac --release N` is how you safely target an older java.
+- `javap -c` shows what javac actually wrote. trust it over blog posts.
+- a live JVM accepts commands: `jcmd <pid> help`. no restart, no agent, no setup.
+- thread dumps catch deadlocks for you. take a few, a few seconds apart.
+</Keylines>

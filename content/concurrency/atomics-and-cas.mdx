@@ -1,0 +1,178 @@
+import { CasSim } from "@/components/figures/concurrency/CasSim";
+import { LongAdderCells } from "@/components/figures/concurrency/LongAdderCells";
+import { Lanes } from "@/components/figures/concurrency/Lanes";
+
+export const aba = [
+  { mem: { top: "A", "A.next": "B" }, note: "a lock-free stack: top → A → B. T1 wants to pop A by swinging top from A to A.next." },
+  { ops: ["read top → A, next → B", null], note: "T1 reads top (A) and A.next (B), then gets descheduled before its CAS." },
+  { ops: [{ t: "(paused)", wait: true }, "pop A"], mem: { top: "B" }, note: "T2 pops A. top is B." },
+  { ops: [{ t: "(paused)", wait: true }, "pop B"], mem: { top: "null" }, note: "T2 pops B too. the stack is empty, and B is gone (maybe reused, maybe freed)." },
+  { ops: [{ t: "(paused)", wait: true }, "push A again"], mem: { top: "A", "A.next": "null" }, note: "T2 pushes A back. same node, different stack. A.next is now null." },
+  { ops: [{ t: "CAS(top, A → B): ok", k: "dead" }, null], mem: { top: { v: "B", k: "dead" } }, note: "T1 wakes up. top is A, just like it saw, so the CAS succeeds and sets top to B: a node that was already popped. the stack is corrupt, and nothing failed." },
+];
+
+<InShort>
+**compare-and-swap (CAS)** is a single CPU instruction: "if this memory still holds A, make it B, and tell me if it worked". the atomic classes (`AtomicInteger`, `AtomicReference`...) wrap it in **retry loops**: read, compute, CAS, and if someone changed it in between, try again. no locks, nobody ever blocks. for counters that many threads hammer, **`LongAdder`** spreads the CAS out over several cells.
+</InShort>
+
+## the picture
+
+two people editing one shared doc with a "save only if nobody else saved since you opened it" button. you open version 5, make your edit, hit save. if it's still version 5, your save goes through. if someone else saved version 6 in the meantime, the button refuses, and you reopen and redo your edit on top of theirs. nobody ever waits for a lock on the doc, and nobody's work silently disappears.
+
+that button is CAS. on x86 it's `lock cmpxchg`; on ARM it's `cas` (or a load-exclusive / store-exclusive pair). the hardware makes the compare and the swap one indivisible step.
+
+## the CAS loop
+
+last time, `count++` lost updates because the write blindly overwrote whatever was there. here's the same three steps with the blind write swapped for `compareAndSet`:
+
+<Figure wide caption={<>same game as the <a href="/learn/concurrency/race-conditions">race simulator</a>: step the threads in any order. a CAS that finds the value changed <C k="hot">fails</C> and the thread loops back to read again. you can make it retry as much as you like. you can't make it lose an update.</>}>
+<CasSim />
+</Figure>
+
+written out by hand, that's this loop. it's lock-free: some thread always makes progress, because a CAS only fails when another thread's CAS succeeded.
+
+```java title="Main.java" run output="2000000"
+import java.util.concurrent.atomic.AtomicInteger;
+
+int increment(AtomicInteger count) {
+    while (true) {
+        int current = count.get();
+        int next = current + 1;
+        if (count.compareAndSet(current, next)) {
+            return next;
+        }
+        // someone else changed it between get() and compareAndSet(): go again
+    }
+}
+
+void main() throws InterruptedException {
+    AtomicInteger count = new AtomicInteger();
+    Runnable work = () -> {
+        for (int i = 0; i < 1_000_000; i++) increment(count);
+    };
+    Thread a = new Thread(work);
+    Thread b = new Thread(work);
+    a.start();
+    b.start();
+    a.join();
+    b.join();
+    IO.println(count.get());
+}
+```
+
+you'd never write that loop for a counter, because `AtomicInteger` already has it. the API is small:
+
+```java title="Main.java" run output="6\n6\ntrue\nfalse\n200\n200"
+import java.util.concurrent.atomic.AtomicInteger;
+
+void main() {
+    AtomicInteger n = new AtomicInteger(5);
+    IO.println(n.incrementAndGet());              // 6: add, then return
+    IO.println(n.getAndIncrement());              // 6: return, then add
+    IO.println(n.compareAndSet(7, 100));          // true: it was 7
+    IO.println(n.compareAndSet(7, 200));          // false: it's 100 now
+    IO.println(n.updateAndGet(x -> x * 2));       // 200
+    IO.println(n.accumulateAndGet(5, Math::max)); // 200
+}
+```
+
+`updateAndGet` and `accumulateAndGet` run your function inside the retry loop, which means **your function can run more than once**. keep it pure: no printing, no I/O, no side effects.
+
+<Deep title="incrementAndGet isn't really a CAS loop">
+in the JDK source, `Unsafe.getAndAddInt` (what `incrementAndGet` calls) is a do/while loop around `weakCompareAndSetInt`, exactly the loop above. but it's marked `@IntrinsicCandidate`, and the JIT replaces the whole loop with a single atomic-add instruction where the CPU has one: `lock xadd` on x86, `ldadd` on ARM with the LSE extensions. no retry at all, the cache line just bounces between cores. `compareAndSet`, `updateAndGet` and friends do stay as CAS loops.
+</Deep>
+
+the family, quickly:
+
+| class | for |
+| --- | --- |
+| `AtomicInteger`, `AtomicLong`, `AtomicBoolean` | one number or flag |
+| `AtomicReference<V>` | one reference, swapped atomically (great for immutable state: build a new object, CAS it in) |
+| `AtomicIntegerArray`, `AtomicReferenceArray`... | arrays where each element is atomic |
+| `AtomicStampedReference<V>` | a reference plus an int version stamp (see ABA below) |
+| `LongAdder`, `LongAccumulator` | counters and sums with heavy write contention |
+| `VarHandle` | CAS and friends on any field or array element, without wrapper objects (java 9+) |
+
+every atomic read and write also has volatile semantics, so everything from the [memory model](/learn/concurrency/java-memory-model) chapter applies: a successful CAS publishes whatever the thread wrote before it.
+
+## when CAS gets crowded: LongAdder
+
+a CAS loop is cheap when it usually succeeds. with eight threads hammering one `AtomicLong`, every core is fighting over the same cache line: it bounces between cores on every update, and the more threads, the more of them are waiting for it at any moment.
+
+`LongAdder` cheats. it keeps a `base` plus an array of **cells**. while there's no contention, it CASes `base` like an `AtomicLong`. the first time a CAS on base fails, it creates the cells, and from then on each thread adds into its own cell (picked by a per-thread hash). collide with someone in a cell, and the thread rehashes to a different one; keep colliding, and the array doubles, up to about the number of cores. `sum()` adds them all up.
+
+<Figure wide caption={<>a toy model, one CAS attempt per thread per tick. with <strong>AtomicLong</strong>, every thread fights for one cell, so with 8 threads 7 of every 8 attempts <C k="dead">fail</C>. switch to <strong>LongAdder</strong> and watch it grow cells until each thread mostly has its own. the <C k="hot">amber</C> cells got an update this tick.</>}>
+<LongAdderCells />
+</Figure>
+
+the real thing, measured. each thread increments 10 million times, median of 7 runs on jdk 25 on a 14-core arm mac (plain wall-clock timing, not a JMH benchmark, so read the ratios, not the digits):
+
+<Figure caption={<>8 threads × 10 million increments. <code>synchronized</code> and <code>AtomicLong</code> both took close to 3 seconds (synchronized swung anywhere from 0.9 to 4.6). <C k="live">LongAdder</C> took 49 ms. nearly 60× faster.</>}>
+<Bars
+  unit="ms"
+  data={[
+    { label: "synchronized", value: 2813 },
+    { label: "AtomicLong", value: 2882 },
+    { label: "LongAdder", value: 49, tone: "live" },
+  ]}
+/>
+</Figure>
+
+with one thread the order flipped: synchronized 9 ms, `AtomicLong` 16 ms, `LongAdder` 42 ms. no contention means no reason for cells, just more work per increment. so:
+
+- many writers, rare reads (request counters, metrics): `LongAdder`.
+- you need the exact current value in a decision (`if (count.incrementAndGet() > limit)`), or a sequence number: `AtomicLong`. `LongAdder.sum()` is a moving target while writers are still writing.
+
+<Gotcha title="false sharing">
+the cells are padded (annotated `@Contended` inside the JDK) so two cells never share a 64-byte cache line. without that, two threads writing *different* cells would still bounce the same line between cores and be as slow as one shared counter. your own hot per-thread fields can hit the same thing. more in [mechanical sympathy](/learn/performance/mechanical-sympathy).
+</Gotcha>
+
+## the ABA problem
+
+CAS asks "is it still A?", not "has anything happened since I looked?". if a value goes A → B → A while you weren't looking, your CAS can't tell, and succeeds. for an `int` counter that's harmless. for a pointer in a lock-free data structure, it can be a disaster:
+
+<Figure wide caption={<>T1's CAS checks the top of the stack is still <code>A</code>, and it is. but it's not the same <em>situation</em> anymore, and T1 installs a <C k="dead">node that was already popped</C>.</>}>
+<Lanes threads={["T1", "T2"]} cells={["top", "A.next"]} steps={aba} />
+</Figure>
+
+the fix is to compare a version along with the value. `AtomicStampedReference` pairs the reference with an int stamp, and you bump the stamp on every change. A with stamp 0 and A with stamp 2 are not equal:
+
+```java title="Main.java" run output="true\nfalse"
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicStampedReference;
+
+void main() {
+    AtomicReference<String> top = new AtomicReference<>("A");
+    String seen = top.get();                         // T1 reads A, then stalls
+    top.set("B");                                    // meanwhile: A → B
+    top.set("A");                                    //            B → A
+    IO.println(top.compareAndSet(seen, "C"));        // T1's CAS can't tell
+
+    AtomicStampedReference<String> stamped = new AtomicStampedReference<>("A", 0);
+    int[] stamp = new int[1];
+    String seen2 = stamped.get(stamp);               // reads A and stamp 0
+    stamped.compareAndSet("A", "B", 0, 1);           // A → B, stamp 1
+    stamped.compareAndSet("B", "A", 1, 2);           // B → A, stamp 2
+    IO.println(stamped.compareAndSet(seen2, "C", stamp[0], stamp[0] + 1));
+}
+```
+
+in practice java dodges most of ABA for free: the classic version needs a node to be freed and *reused*, and the garbage collector won't recycle a node while T1 still holds a reference to it. it bites when you pool and reuse objects yourself, or CAS on values (like ints) that can legitimately come back around.
+
+<Quiz question="which one of these is a good fit for updateAndGet(f)?" options={["f sends an email and returns x + 1", "f returns Math.max(x, latest)", "f appends x to a log file"]} answer={1}>
+<Explain>
+the function runs inside a CAS retry loop, so under contention it runs more than once, and only the last run's result is kept. a pure function like `Math.max` is fine. the others would send two emails or write two log lines for one update.
+</Explain>
+</Quiz>
+
+<Interview q="what's the difference between AtomicLong and LongAdder?">
+`AtomicLong` is one value updated with CAS (or an atomic add), so every writer contends on the same cache line, and throughput collapses as threads increase. `LongAdder` keeps a base plus a dynamically grown array of padded cells, so threads under contention update different cells, and `sum()` adds them up. `LongAdder` is much faster for write-heavy counters, but `sum()` isn't an atomic snapshot and there's no `compareAndSet`, so use `AtomicLong` when you need the exact value in a decision.
+</Interview>
+
+<Keylines>
+- CAS: "if it's still A, make it B". one instruction, never blocks.
+- the atomic classes are CAS retry loops. a failed CAS means someone else made progress.
+- functions passed to `updateAndGet` can run more than once. keep them pure.
+- many writers on one counter: `LongAdder` spreads the contention over cells.
+- CAS can't see A → B → A. stamp it when that matters.
+</Keylines>
