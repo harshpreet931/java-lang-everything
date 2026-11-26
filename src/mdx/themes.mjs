@@ -1,6 +1,7 @@
-// two code themes for shiki, warm and quiet like old print: slate keywords, sage
-// strings, brown literals, soft italic comments. muted on purpose, so the bright
-// semantic colours in figures (blue = reference, red = garbage...) still stand out.
+// two code themes for shiki (lit instruments): slate keywords, sage strings, brown
+// literals, italic comments that still clear 4.5:1. muted on purpose, so the semantic
+// colours in figures (blue = reference, red = garbage...) still stand out. the values
+// match the --code-* tokens in globals.css.
 
 const scopes = (s) => s.split(/\s+/).filter(Boolean);
 
@@ -59,29 +60,29 @@ function theme({ name, type, fg, bg, kw, ty, fn, lit, str, cmt, punc, anno }) {
 export const darkTheme = theme({
   name: "blackroom",
   type: "dark",
-  fg: "#e4ded3",
-  bg: "#201f1c",
-  kw: "#a3b8c4",
-  ty: "#dcc6ad",
-  fn: "#e8d2b8",
-  lit: "#d9b285",
-  str: "#b3c49a",
-  cmt: "#857e73",
-  punc: "#a0968a",
-  anno: "#a69f93",
+  fg: "#e3ded5",
+  bg: "#0e0e0d",
+  kw: "#9fb8d0",
+  ty: "#d8c4ad",
+  fn: "#ebe3d6",
+  lit: "#ddb487",
+  str: "#b6cc9a",
+  cmt: "#948d82",
+  punc: "#a49c90",
+  anno: "#aca59a",
 });
 
 export const lightTheme = theme({
   name: "paper",
   type: "light",
-  fg: "#3a332c",
-  bg: "#f7f3ec",
-  kw: "#4f6878",
-  ty: "#6e5444",
-  fn: "#6a4f3c",
-  lit: "#8b6237",
-  str: "#55704a",
-  cmt: "#a09888",
-  punc: "#8a7e72",
-  anno: "#7a6e62",
+  fg: "#26241f",
+  bg: "#fdfcfa",
+  kw: "#3b5878",
+  ty: "#6a4a39",
+  fn: "#3d362e",
+  lit: "#87552a",
+  str: "#45663a",
+  cmt: "#6b665d",
+  punc: "#6b665d",
+  anno: "#5c5850",
 });

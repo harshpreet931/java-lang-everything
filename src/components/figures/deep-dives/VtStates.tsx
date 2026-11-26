@@ -86,8 +86,8 @@ export function VtStates() {
         <svg viewBox={`0 0 ${W} ${H}`} className="mx-auto block w-full max-w-[540px]" style={{ fontFamily: "var(--font-code)" }} role="img" aria-label={`state ${st.at}`}>
           <defs>
             {["mute", "hot"].map((t) => (
-              <marker key={t} id={`${uid}-${t}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                <path d="M0 0.5 L7.5 4 L0 7.5 z" fill={t === "hot" ? "var(--hot)" : "var(--line-2)"} />
+              <marker key={t} id={`${uid}-${t}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+                <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke={t === "hot" ? "var(--hot)" : "var(--line-2)"} strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
               </marker>
             ))}
           </defs>

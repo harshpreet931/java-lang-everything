@@ -1,12 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { StepControls, useStepper } from "@/components/viz/stepper";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { comet } from "@/components/viz/comet";
+import { Chevron, StepControls, useStepper } from "@/components/viz/stepper";
 import { Row, Words } from "@/components/figures/basics/kit";
 
 // every call fib(5) makes, as a tree, in the order java makes them. the live call stack is the
 // path from the root to the current node. call counts match a real run on jdk 25:
 // naive fib(5) = 15 calls, memoized = 9 (cache hits counted as calls).
+// drawn on the dot grid: calls are dotted runs, the frames on the stack are hot, the top
+// frame is the bigger lit one. stepping a call sends a comet down to the new frame; stepping
+// a return sends the value back up the same run, to the caller.
 
 type N = { id: number; n: number; kids: N[]; depth: number; x: number; cached?: boolean };
 type Ev = { kind: "call" | "return"; id: number; value?: number; cached?: boolean };
@@ -90,60 +94,114 @@ function Walk({ nodes, events, leaves, memo }: { nodes: N[]; events: Ev[]; leave
   const px = (nd: N) => nd.x * W + W / 2;
   const py = (nd: N) => nd.depth * H + 18;
 
+  // a comet down the edge on a call, back up it on a return
+  const svgRef = useRef<SVGSVGElement>(null);
+  const host = useRef<SVGGElement>(null);
+  const lastI = useRef(s.i);
+  useEffect(() => {
+    const prev = lastI.current;
+    lastI.current = s.i;
+    if (s.i !== prev + 1 || !last || !svgRef.current || !host.current) return;
+    const el = svgRef.current.querySelector<SVGPathElement>(`path[data-kid="${last.id}"]`);
+    if (!el) return;
+    return comet(el, host.current, { colour: "var(--hot)", r: 3.4, ms: 380, back: last.kind === "return" });
+  }, [s.i, last]);
+
+  const edgeDots = (x1: number, y1: number, x2: number, y2: number) => {
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    const n = Math.max(2, Math.round(len / 6));
+    return Array.from({ length: n + 1 }, (_, k) => [x1 + ((x2 - x1) * k) / n, y1 + ((y2 - y1) * k) / n] as const);
+  };
+
   return (
     <div {...s.keys} className="mt-4 outline-none">
       <div className="overflow-x-auto">
         <svg
+          ref={svgRef}
           viewBox={`0 0 ${width} ${height}`}
           width="100%"
           style={{ maxWidth: width, minWidth: Math.min(width, 320) }}
-          className="mx-auto block"
-          fontFamily="var(--font-code), monospace"
+          className="jle-dots mx-auto block"
           role="img"
           aria-label={`the call tree of fib(5)${memo ? " with a cache" : ""}`}
         >
           {nodes.map((nd) =>
-            nd.kids.map((k) => (
-              <line
-                key={`${nd.id}-${k.id}`}
-                x1={px(nd)}
-                y1={py(nd) + 11}
-                x2={px(k)}
-                y2={py(k) - 11}
-                stroke={state.get(k.id) === "active" ? "var(--hot)" : "var(--line-2)"}
-                strokeWidth={state.get(k.id) === "active" ? 1.5 : 1}
-              />
-            )),
+            nd.kids.map((k) => {
+              const on = state.get(k.id) === "active";
+              const called = state.has(k.id);
+              const x1 = px(nd);
+              const y1 = py(nd) + 12;
+              const x2 = px(k);
+              const y2 = py(k) - 12;
+              return (
+                <g key={`${nd.id}-${k.id}`}>
+                  <path data-kid={k.id} d={`M ${x1} ${y1} L ${x2} ${y2}`} fill="none" stroke="none" />
+                  <g className={on ? "lit" : undefined}>
+                    {edgeDots(x1, y1, x2, y2).map(([x, y], j) => (
+                      <circle
+                        key={j}
+                        cx={x}
+                        cy={y}
+                        r={on ? 1.7 : 1.3}
+                        style={{ fill: on ? "var(--hot)" : called ? "var(--edge)" : "var(--grid)", transition: "fill 300ms" }}
+                      />
+                    ))}
+                  </g>
+                </g>
+              );
+            }),
           )}
           {nodes.map((nd) => {
             const st = state.get(nd.id);
             const top = stack[stack.length - 1]?.id === nd.id;
-            const stroke = top ? "var(--hot)" : st === "active" ? "var(--hot)" : st === "done" ? (nd.cached ? "var(--meta)" : "var(--line-2)") : "var(--line)";
+            // on the stack = hot. the top frame is filled and a touch bigger. returned = neutral.
+            // came from the cache = meta (machinery). not called yet = an unlit ring.
+            const fill = top ? "var(--hot)" : st === "active" ? "var(--well)" : st === "done" ? "var(--well)" : "var(--well)";
+            const stroke = top || st === "active" ? "var(--hot)" : st === "done" ? (nd.cached ? "var(--meta)" : "var(--dot)") : "var(--grid)";
+            const w = top ? 42 : 38;
+            const h = top ? 25 : 22;
             return (
-              <g key={nd.id} opacity={st ? 1 : 0.35}>
-                <rect x={px(nd) - 19} y={py(nd) - 11} width={38} height={22} rx={4} fill={top ? "color-mix(in srgb, var(--hot) 16%, var(--well))" : "var(--well)"} stroke={stroke} strokeDasharray={nd.cached ? "3 2" : undefined} />
-                <text x={px(nd)} y={py(nd) + 4} textAnchor="middle" fontSize={11} fill={st ? "var(--hi)" : "var(--faint)"}>
+              <g key={nd.id} opacity={st ? 1 : 0.6} className={top ? "lit" : undefined}>
+                <rect
+                  x={px(nd) - w / 2}
+                  y={py(nd) - h / 2}
+                  width={w}
+                  height={h}
+                  rx={h / 2}
+                  style={{ fill, stroke, strokeWidth: st === "active" && !top ? 1.5 : 1.2, transition: "fill 300ms, stroke 300ms" }}
+                  strokeDasharray={nd.cached ? "2 2.5" : undefined}
+                />
+                <text
+                  x={px(nd)}
+                  y={py(nd) + 4}
+                  textAnchor="middle"
+                  fontSize={11}
+                  style={{ fill: top ? "var(--well)" : st ? "var(--hi)" : "var(--faint)", stroke: "none", fontWeight: top ? 600 : 400 }}
+                >
                   f({nd.n})
                 </text>
                 {vals.has(nd.id) && (
-                  <text x={px(nd) + 22} y={py(nd) - 8} fontSize={10} fill={nd.cached ? "var(--meta)" : "var(--mute)"}>
+                  <text x={px(nd) + 22} y={py(nd) - 9} fontSize={10.5} style={{ fill: nd.cached ? "var(--meta)" : "var(--mute)" }}>
                     {vals.get(nd.id)}
                   </text>
                 )}
               </g>
             );
           })}
+          <g ref={host} className="lit" aria-hidden />
         </svg>
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
-          <div className="mb-1 text-11 text-faint">call stack right now (bottom → top)</div>
+          <div className="mb-1 font-ui text-12 text-faint">call stack right now, bottom to top</div>
           <div className="flex min-h-[26px] flex-wrap items-center gap-1 text-12">
             <span className="text-faint">main</span>
             {stack.map((nd, i) => (
               <span key={nd.id} className="flex items-center gap-1">
-                <span className="text-faint">→</span>
+                <span className="text-faint">
+                  <Chevron size={10} />
+                </span>
                 <span className={i === stack.length - 1 ? "text-hot" : "text-ink"}>fib({nd.n})</span>
               </span>
             ))}

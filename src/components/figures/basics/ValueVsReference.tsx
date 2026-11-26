@@ -24,17 +24,41 @@ function Slot({ name, value, tone, alias }: { name: string; value: React.ReactNo
   );
 }
 
+// frames wear the same header strip as the memory figures: a row of meta dots and the name
 function FrameBox({ title, children, dim }: { title: string; children: React.ReactNode; dim?: boolean }) {
   return (
-    <div className={`rounded-md bg-well px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-2)] ${dim ? "opacity-60" : ""}`}>
-      <div className="mb-1 text-12 text-hi">{title}</div>
+    <div className={`rounded-lg bg-well px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-2)] transition-opacity duration-300 ${dim ? "opacity-60" : ""}`}>
+      <div
+        className="-mx-[11px] -mt-[7px] mb-1.5 flex h-[24px] items-center gap-3 rounded-t-[7px] px-[11px]"
+        style={{ background: "color-mix(in oklab, var(--meta) 7%, var(--well))" }}
+      >
+        <span className="flex gap-[4px]" aria-hidden>
+          {[0, 1, 2, 3].map((k) => (
+            <span key={k} className="size-[5px] rounded-full bg-meta" style={{ opacity: 0.8 + (k % 3) * 0.07 }} />
+          ))}
+        </span>
+        <span className="ml-auto text-12 font-medium text-hi">{title}</span>
+      </div>
       {children}
     </div>
   );
 }
 
+// a reference: a slot dot, a short run of dots, then the object's name. re-keyed on change so
+// the run lights up again, from the slot outwards, whenever the arrow is re-pointed.
 const Arrow = ({ to, tone = "ref" }: { to: string; tone?: "ref" | "dead" }) => (
-  <span style={{ color: `var(--${tone})` }}>→ {to}</span>
+  <span key={to} className="inline-flex items-center gap-1.5" style={{ color: `var(--${tone})` }}>
+    <span className="jle-wire on !flex w-[38px] gap-[3px]" aria-hidden>
+      {[0, 1, 2, 3, 4].map((j) => (
+        <i
+          key={j}
+          className={j === 0 ? "!size-[7px]" : "!size-[3.5px]"}
+          style={{ ["--n" as string]: j, ["--c" as string]: `var(--${tone})`, background: `var(--${tone})`, animationName: "jle-ref-in" } as React.CSSProperties}
+        />
+      ))}
+    </span>
+    {to}
+  </span>
 );
 
 export function ValueVsReference() {
@@ -101,11 +125,21 @@ export function ValueVsReference() {
               <div className="flex flex-wrap gap-2 text-12">
                 <span className="rounded-md px-2.5 py-1 shadow-[inset_0_0_0_1px_var(--line-2)]">
                   Box <span className="text-hi">99</span>
-                  {!byVal && <span className="text-dead"> unreachable</span>}
+                  {!byVal && (
+                    <span className="text-dead">
+                      {" "}
+                      <span className="jle-ring inline-block size-[7px] align-[0.05em] text-dead" aria-hidden /> unreachable
+                    </span>
+                  )}
                 </span>
                 <span className="rounded-md px-2.5 py-1 shadow-[inset_0_0_0_1px_var(--line-2)]">
                   Box <span className="text-hi">-1</span>
-                  {byVal && <span className="text-dead"> garbage after return</span>}
+                  {byVal && (
+                    <span className="text-dead">
+                      {" "}
+                      <span className="jle-ring inline-block size-[7px] align-[0.05em] text-dead" aria-hidden /> garbage after return
+                    </span>
+                  )}
                 </span>
               </div>
             </>

@@ -171,8 +171,8 @@ export function Philosophers() {
         <svg viewBox="0 0 300 300" className="mx-auto block w-full max-w-[320px]" style={{ fontFamily: "var(--font-code)" }} role="img" aria-label="five philosophers around a table, forks between them">
           <defs>
             {["dead", "mute"].map((c) => (
-              <marker key={c} id={`${id}-${c}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-                <path d="M0 0.5 L7.5 4 L0 7.5 z" fill={`var(--${c})`} />
+              <marker key={c} id={`${id}-${c}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+                <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke={`var(--${c})`} strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
               </marker>
             ))}
           </defs>

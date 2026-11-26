@@ -71,8 +71,8 @@ export function FlatArray() {
         <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block transition-[height] duration-200" style={{ fontFamily: "var(--font-code)" }} role="img"
           aria-label={`${info.label}: ${info.bytes} bytes per element`}>
           <defs>
-            <marker id={`${uid}-r`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+            <marker id={`${uid}-r`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
           </defs>
           <text x={pad} y={14} fontSize={10} fill="var(--faint)">

@@ -1,11 +1,14 @@
 "use client";
 
-import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { comet } from "./comet";
 import { isRef, type Frame, type HeapObject, type Step, type Trace, type Value } from "@/lib/trace";
 import { StepControls, useStepper } from "./stepper";
 
-// code on the left, stack + heap on the right, blue arrows for references.
-// objects that stop being reachable linger for one step as red "unreachable" ghosts.
+// code on the left, stack + heap on the right, on the dot grid of the address space.
+// a reference is a run of blue dots ending in a chevron; when one appears, a comet runs
+// along it (the reference being followed). objects that stop being reachable linger for
+// one step as "unreachable" ghosts: their fill drains and the outline stays.
 
 type Props = {
   trace: Trace;
@@ -126,8 +129,30 @@ type Arrow = { key: string; d: string; dead?: boolean };
 
 export function MemoryPane({ step, prev }: { step: Step; prev?: Step }) {
   const root = useRef<HTMLDivElement>(null);
-  const [arrows, setArrows] = useState<Arrow[]>([]);
+  const [drawn, setDrawn] = useState<{ step: Step | null; list: Arrow[] }>({ step: null, list: [] });
+  const arrows = drawn.list;
   const marker = useId().replace(/:/g, "");
+  const svgRef = useRef<SVGSVGElement>(null);
+  const cometHost = useRef<SVGGElement>(null);
+  const seen = useRef<{ step: Step; keys: Set<string> } | null>(null);
+
+  // a comet along every reference that wasn't there last step: the arrow being followed.
+  // the first frame (server-rendered, then measured) never animates.
+  useEffect(() => {
+    if (!drawn.step) return;
+    const keys = new Set(drawn.list.map((a) => a.key));
+    const before = seen.current;
+    seen.current = { step: drawn.step, keys };
+    // first measure, or a re-measure of the same step (a resize): nothing moved
+    if (!before || before.step === drawn.step || !svgRef.current || !cometHost.current) return;
+    const stops: (() => void)[] = [];
+    arrows.forEach((a) => {
+      if (before.keys.has(a.key)) return;
+      const el = svgRef.current!.querySelector<SVGPathElement>(`path[data-k="${CSS.escape(a.key)}"]`);
+      if (el) stops.push(comet(el, cometHost.current!, { r: 3.4 }));
+    });
+    return () => stops.forEach((f) => f());
+  }, [drawn, arrows]);
 
   // objects that were reachable last step and aren't now
   const ghosts = useMemo(() => {
@@ -164,12 +189,14 @@ export function MemoryPane({ step, prev }: { step: Step; prev?: Step }) {
           const n = incoming.get(to) ?? 0;
           incoming.set(to, n + 1);
           const ty2 = ty + (n % 4) * 5;
-          const out2 = Math.max(tx, fx) + 22 + (lane++ % 6) * 9;
+          // the lanes squeeze into the figure's padding when the heap column is full width (phones)
+          const room = Math.max(12, rb.width + 14 - Math.max(tx, fx));
+          const out2 = Math.max(tx, fx) + Math.min(22, room * 0.45) + (lane++ % 6) * Math.min(9, (room * 0.55) / 6);
           d = `M ${fx} ${fy} C ${out2} ${fy}, ${out2} ${ty2}, ${tx} ${ty2}`;
         }
         out.push({ key: `${src.dataset.from}->${to}`, d });
       });
-      setArrows(out);
+      setDrawn({ step, list: out });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -182,11 +209,11 @@ export function MemoryPane({ step, prev }: { step: Step; prev?: Step }) {
   const frames = [...stepFrames].reverse(); // newest on top
 
   return (
-    <div ref={root} className="relative grid min-w-0 grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)] gap-x-9 self-start">
-      <div className="min-w-0">
+    <div ref={root} className="relative grid min-w-0 grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)] gap-x-7 self-stretch">
+      <div className="flex min-w-0 flex-col">
         <PaneTitle>stack</PaneTitle>
-        <div className="flex flex-col gap-2.5">
-          {frames.length === 0 && <div className="text-12 text-faint">empty. main returned.</div>}
+        <div className="dotgrid flex min-h-[96px] flex-1 flex-col gap-2.5 rounded-lg p-2">
+          {frames.length === 0 && <div className="w-fit rounded-sm bg-well px-1.5 text-12 text-faint">empty. main returned.</div>}
           {frames.map((f, idx) => {
             const depth = stepFrames.length - 1 - idx;
             const pf = prev?.frames?.[depth];
@@ -195,11 +222,11 @@ export function MemoryPane({ step, prev }: { step: Step; prev?: Step }) {
           })}
         </div>
       </div>
-      <div className="min-w-0">
+      <div className="flex min-w-0 flex-col">
         <PaneTitle>heap</PaneTitle>
-        <div className="flex flex-col items-start gap-2.5">
+        <div className="dotgrid flex min-h-[96px] flex-1 flex-col items-start gap-2.5 rounded-lg p-2">
           {Object.keys(stepHeap).length === 0 && ghosts.length === 0 && (
-            <div className="text-12 text-faint">nothing allocated yet.</div>
+            <div className="w-fit rounded-sm bg-well px-1.5 text-12 text-faint">nothing allocated yet.</div>
           )}
           {Object.entries(stepHeap).map(([id, o]) => (
             <ObjectBox key={id} id={id} o={o} prev={prev?.heap?.[id]} isNew={!!prev && !(id in (prev.heap ?? {}))} />
@@ -209,43 +236,77 @@ export function MemoryPane({ step, prev }: { step: Step; prev?: Step }) {
           ))}
         </div>
       </div>
-      <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
+      <svg ref={svgRef} className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
         <defs>
-          <marker id={`ah-${marker}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+          <marker id={`ah-${marker}`} viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+            <path d="M2 1.2 L8.6 5 L2 8.8" fill="none" stroke="var(--ref)" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" />
           </marker>
         </defs>
         {arrows.map((a) => (
           <path
             key={a.key}
+            data-k={a.key}
             d={a.d}
             fill="none"
             stroke="var(--ref)"
-            strokeWidth={1.25}
+            strokeWidth={2.3}
+            strokeDasharray="0 4.6"
+            strokeLinecap="round"
             markerEnd={`url(#ah-${marker})`}
             className="arrow-in"
           />
         ))}
+        <g ref={cometHost} className="lit" />
       </svg>
     </div>
   );
 }
 
 function PaneTitle({ children }: { children: React.ReactNode }) {
-  return <div className="mb-2.5 border-b border-line pb-1.5 text-11 text-faint">{children}</div>;
+  return <div className="mb-2.5 font-[family-name:var(--inst-font-ui)] text-12 text-faint">{children}</div>;
+}
+
+/**
+ * the header strip every frame and object wears: a row of meta dots (machinery)
+ * and the title. on a garbage object the dots drain one by one into rings.
+ * on a narrow box the tag gives way first (it truncates to nothing), then the title truncates.
+ */
+function Header({ title, tag, tone, dead, dim }: { title: React.ReactNode; tag?: React.ReactNode; tone?: "dead" | "hot"; dead?: boolean; dim?: boolean }) {
+  return (
+    <div
+      className="-mx-[10.5px] -mt-[6.5px] mb-1.5 flex h-[24px] items-center gap-3 rounded-t-[6.5px] px-[10.5px]"
+      style={{ background: dead ? "transparent" : "color-mix(in oklab, var(--meta) 7%, var(--well))" }}
+    >
+      <span className="flex shrink-0 items-center gap-[4px]" aria-hidden>
+        {[0, 1, 2, 3, 4].map((k) => (
+          <span
+            key={k}
+            className="size-[5px] rounded-full transition-[background-color,box-shadow] duration-300"
+            style={
+              {
+                background: dead ? "transparent" : "var(--meta)",
+                boxShadow: dead ? "inset 0 0 0 1.2px var(--dead)" : "none",
+                opacity: dim ? 0.55 : 0.78 + (k % 3) * 0.08,
+                transitionDelay: dead ? `${k * 70}ms` : "0ms",
+              } as CSSProperties
+            }
+          />
+        ))}
+      </span>
+      <span title={typeof title === "string" ? title : undefined} className={`ml-auto min-w-0 truncate text-12 font-medium ${tone === "dead" ? "text-dead" : dim ? "text-mute" : "text-hi"}`}>{title}</span>
+      {tag && <span title={typeof tag === "string" ? tag : undefined} className={`min-w-0 shrink-[100] truncate text-11 ${tone === "dead" ? "text-dead" : tone === "hot" ? "text-hot" : "text-faint"}`}>{tag}</span>}
+    </div>
+  );
 }
 
 function FrameBox({ f, top, prevFrame, path }: { f: Frame; top: boolean; prevFrame?: Frame; path: string }) {
   return (
     <div
-      className={`frame-in rounded-xs bg-well px-3 py-2 ${
-        top ? "shadow-[inset_0_0_0_1px_var(--line-2)]" : "opacity-70 shadow-[inset_0_0_0_1px_var(--line)]"
+      className={`frame-in rounded-lg bg-well px-3 py-2 ${
+        top ? "shadow-[inset_0_0_0_1px_var(--line-2)]" : "opacity-75 shadow-[inset_0_0_0_1px_var(--line)]"
       }`}
     >
-      <div className={`mb-1 flex items-baseline justify-between gap-3 text-12 ${top ? "text-hi" : "text-mute"}`}>
-        <span className="truncate">{f.name}</span>
-        {f.line !== undefined && <span className="text-11 text-faint tabular">line {f.line}</span>}
-      </div>
+      <Header title={f.name} dim={!top} tag={f.line !== undefined ? <span className="tabular">line {f.line}</span> : undefined} />
       {Object.keys(f.locals).length === 0 ? (
         <div className="text-11 text-faint">no locals yet</div>
       ) : (
@@ -283,7 +344,7 @@ function ValueView({ v, from }: { v: Value; from: string }) {
   if (isRef(v))
     return (
       <span data-from={from} data-to={v.ref} className="inline-flex h-[1.4em] w-4 items-center justify-center" aria-label={`reference to ${v.ref}`}>
-        <span className="size-[7px] rounded-full bg-ref" />
+        <span className="size-[8px] rounded-full bg-ref" />
       </span>
     );
   if (typeof v === "boolean") return <span className="text-hi">{String(v)}</span>;
@@ -292,18 +353,24 @@ function ValueView({ v, from }: { v: Value; from: string }) {
 
 function ObjectBox({ id, o, prev, ghost, isNew }: { id: string; o: HeapObject; prev?: HeapObject; ghost?: boolean; isNew?: boolean }) {
   const dead = ghost || o.state === "dead";
+  const fresh = !dead && (isNew || o.state === "new");
+  // dead: the outline stays, the fill drains. new: hot, a touch heavier.
   const border = dead
-    ? "shadow-[inset_0_0_0_1px_var(--dead)] opacity-60"
-    : isNew || o.state === "new"
-      ? "shadow-[inset_0_0_0_1px_var(--hot)]"
-      : "shadow-[inset_0_0_0_1px_var(--line-2)]";
+    ? "bg-transparent shadow-[inset_0_0_0_1.5px_color-mix(in_oklab,var(--dead)_80%,transparent)]"
+    : fresh
+      ? "bg-well shadow-[inset_0_0_0_1.5px_var(--hot)]"
+      : "bg-well shadow-[inset_0_0_0_1px_var(--line-2)]";
   return (
-    <div data-obj={ghost ? undefined : id} className={`obj-in max-w-full rounded-xs bg-well px-3 py-2 ${border}`}>
-      <div className="mb-1 flex items-baseline gap-3 text-12">
-        <span className={dead ? "text-dead" : "text-hi"}>{o.type}</span>
-        {(ghost || o.tag) && <span className={`text-11 ${ghost ? "text-dead" : "text-faint"}`}>{ghost ? "unreachable" : o.tag}</span>}
+    <div data-obj={ghost ? undefined : id} className={`obj-in max-w-full rounded-lg px-3 py-2 transition-[background-color,box-shadow] duration-300 ${border}`}>
+      <Header
+        title={o.type}
+        dead={dead}
+        tone={dead ? "dead" : fresh ? "hot" : undefined}
+        tag={ghost ? "unreachable" : o.tag ? o.tag : fresh ? "new" : undefined}
+      />
+      <div className={dead ? "opacity-70" : ""}>
+        <ObjectBody id={id} o={o} prev={prev} />
       </div>
-      <ObjectBody id={id} o={o} prev={prev} />
     </div>
   );
 }
@@ -323,12 +390,13 @@ function ObjectBody({ id, o, prev }: { id: string; o: HeapObject; prev?: HeapObj
   }
   if (o.items) {
     if (o.items.length === 0) return <div className="text-11 text-faint">empty</div>;
+    // collapsed 1px borders, no filled backdrop, so a short last row does not leave a grey block
     return (
-      <div className="flex flex-wrap gap-px bg-line p-px">
+      <div className="flex flex-wrap pt-px pl-px">
         {o.items.map((v, i) => {
           const changed = !!prev?.items && !same(prev.items[i], v);
           return (
-            <div key={i} className="flex min-w-7 flex-col items-center bg-well px-1.5 pt-1">
+            <div key={i} className="-mt-px -ml-px flex min-w-11 flex-col items-center border border-line bg-well px-1.5 pt-1">
               <span key={changed ? JSON.stringify(v) : "s"} className={`flex h-[1.5em] items-center text-12 ${changed ? "flash" : ""}`}>
                 <ValueView v={v} from={`${id}[${i}]`} />
               </span>

@@ -1,0 +1,609 @@
+/* the home page: a title page with one lit instrument, then a quiet descent. */
+
+/* ------------------------------------------------------------------ hero */
+
+.hero {
+  overflow-x: clip; /* the glow may reach past the column, never past the page */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 40px;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: clamp(32px, 6vw, 72px) var(--gutter) 24px;
+}
+@media (min-width: 1024px) {
+  .hero {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: clamp(40px, 4vw, 64px);
+    align-items: center;
+    padding-top: clamp(56px, 6vw, 88px);
+  }
+}
+
+.title {
+  font-family: var(--font-title-eroded);
+  font-weight: 400;
+  font-size: clamp(44px, 3.2vw + 20px, 72px);
+  line-height: 0.98;
+  letter-spacing: -0.03em;
+  color: var(--hi);
+  text-wrap: balance;
+  margin: 0;
+}
+.byline {
+  margin-top: 18px;
+  font-family: var(--font-body);
+  font-size: 18px;
+  font-style: italic;
+  color: var(--mute);
+}
+.byline a {
+  font-style: normal;
+}
+.lede {
+  margin-top: 28px;
+  max-width: 31rem;
+  font-family: var(--font-body);
+  font-size: 19.5px;
+  line-height: 1.62;
+  color: var(--ink);
+  text-wrap: pretty;
+}
+.acts {
+  margin-top: 32px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  color: var(--hi);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 450;
+  white-space: nowrap;
+  text-decoration: none;
+  transition-property: scale, background-color, border-color;
+  transition-duration: 120ms;
+  transition-timing-function: var(--ease);
+}
+.btn:hover {
+  background: var(--well-2);
+}
+.btn:active {
+  scale: 0.96;
+}
+.solid {
+  background: var(--hi);
+  border-color: var(--hi);
+  color: var(--bg);
+}
+.solid:hover {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.cont {
+  margin-top: 18px;
+  min-height: 1.6em;
+  font-family: var(--font-body);
+  font-size: 16.5px;
+  font-style: italic;
+  color: var(--mute);
+}
+.cont a {
+  font-style: normal;
+}
+
+/* ------------------------------------------------------------------ the instrument */
+
+.instrument {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+}
+
+/* the one authored glow on the site: dawn, pooled behind the dots, cut off above the readout */
+@media (max-width: 640px) {
+  /* on a phone the field runs nearly edge to edge so the dots stay legible */
+  .fieldwrap {
+    margin: 0 calc(8px - var(--gutter));
+  }
+}
+.fieldwrap {
+  --dawn-rose: #f3a2c0;
+  --dawn-apricot: #f8c79d;
+  --dawn-butter: #f2e3a6;
+  --dawn-mauve: #ecc6e0;
+  position: relative;
+  isolation: isolate;
+}
+:global(:root[data-theme="dark"]) .fieldwrap {
+  --dawn-rose: #7d2246;
+  --dawn-apricot: #6e3a18;
+  --dawn-butter: #57461a;
+  --dawn-mauve: #5a2450;
+}
+.glow {
+  /* a box big enough for the blur to fade out on its own; the mask then ends it above the readout */
+  position: absolute;
+  inset: -24% -18% 0 -18%;
+  z-index: -1;
+  pointer-events: none;
+  mask-image: linear-gradient(to bottom, #000 74%, transparent 100%);
+}
+.bloom {
+  position: absolute;
+  inset: 16.1% 8.8% 8.1% 10.3%;
+  filter: blur(46px);
+  opacity: 0.62;
+  transform: translateZ(0);
+}
+:global(:root[data-theme="dark"]) .bloom {
+  opacity: 0.55;
+  filter: blur(52px);
+}
+.bloom span {
+  position: absolute;
+  border-radius: 50%;
+}
+.ga {
+  background: var(--dawn-rose);
+  left: 8%;
+  top: 6%;
+  width: 58%;
+  height: 70%;
+}
+.gb {
+  background: var(--dawn-apricot);
+  left: 44%;
+  top: 30%;
+  width: 52%;
+  height: 64%;
+}
+.gc {
+  background: var(--dawn-butter);
+  left: 20%;
+  top: 58%;
+  width: 46%;
+  height: 40%;
+}
+.gd {
+  background: var(--dawn-mauve);
+  left: 62%;
+  top: 0%;
+  width: 34%;
+  height: 40%;
+}
+
+.field {
+  position: relative;
+  aspect-ratio: 48 / 34;
+  border-radius: 6px;
+  outline-offset: 6px;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.field:focus-visible {
+  outline: 2px solid var(--book);
+}
+.svg,
+.canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.svg[data-off] {
+  visibility: hidden;
+}
+.canvas {
+  visibility: hidden;
+}
+.canvas[data-on] {
+  visibility: visible;
+}
+.gridDot {
+  fill: var(--grid);
+}
+:global(:root[data-theme="dark"]) .lit {
+  filter: url(#jle-heap-glow);
+}
+
+/* the load wave: objects light up from the stack frames outward, along their references.
+   colour and opacity only, once. the svg is the first frame, so nothing waits for js. */
+.w {
+  animation: wave 300ms cubic-bezier(0.2, 0, 0, 1) both;
+  animation-delay: var(--d, 0ms);
+}
+@keyframes wave {
+  from {
+    opacity: 0.12;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w {
+    animation-delay: 0ms;
+  }
+}
+
+/* readout: geist pixel at its round-dot setting, the only place it appears */
+.readout {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 20px;
+  min-height: 36px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--mute);
+}
+.count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 6.4rem;
+}
+.num {
+  display: inline-block;
+  min-width: 1.15em;
+  font-family: var(--font-pixel);
+  font-variation-settings: "ELSH" 25;
+  font-weight: 400;
+  font-size: 32px;
+  line-height: 1;
+  text-align: right;
+  font-variant-numeric: lining-nums tabular-nums;
+  transition: color 200ms var(--ease);
+}
+
+.steps {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.stepWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chev {
+  color: var(--faint);
+  flex: none;
+}
+.step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 450;
+  cursor: pointer;
+  transition-property: scale, background-color, border-color, color, opacity;
+  transition-duration: 120ms;
+  transition-timing-function: var(--ease);
+}
+.step:hover:not(:disabled) {
+  background: var(--well-2);
+  border-color: var(--edge);
+}
+.step:active:not(:disabled) {
+  scale: 0.96;
+}
+.step:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.step[data-next] {
+  background: var(--hi);
+  border-color: var(--hi);
+  color: var(--bg);
+}
+.step[data-next]:hover {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.step[data-running] {
+  border-color: var(--edge);
+  color: var(--hi);
+}
+.lamp {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.2px currentColor;
+  opacity: 0.55;
+  transition: background-color 200ms var(--ease), box-shadow 200ms var(--ease), opacity 200ms var(--ease);
+}
+.step[data-next] .lamp {
+  opacity: 0.9;
+}
+.step[data-running] .lamp {
+  background: var(--hot);
+  box-shadow: none;
+  opacity: 1;
+}
+.step[data-done] .lamp {
+  background: var(--live);
+  box-shadow: none;
+  opacity: 1;
+}
+
+.caption {
+  margin-top: 14px;
+  min-height: 3.2em;
+  max-width: 36rem;
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.55;
+  font-style: italic;
+  color: var(--mute);
+  text-wrap: pretty;
+}
+@media (max-width: 520px) {
+  .caption {
+    min-height: 4.7em;
+  }
+}
+
+.legend {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--mute);
+}
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.legend i.ring {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.4px var(--dead);
+}
+
+/* ------------------------------------------------------------------ section heads */
+
+.head {
+  max-width: 40rem;
+}
+.h2 {
+  margin: 0;
+  font-family: var(--font-title);
+  font-weight: 400;
+  font-size: clamp(28px, 1.2vw + 20px, 34px);
+  line-height: 1.12;
+  letter-spacing: -0.012em;
+  color: var(--hi);
+  text-wrap: balance;
+}
+.sub {
+  margin-top: 12px;
+  font-family: var(--font-body);
+  font-size: 18px;
+  line-height: 1.6;
+  font-style: italic;
+  color: var(--mute);
+  text-wrap: pretty;
+}
+
+/* ------------------------------------------------------------------ the descent */
+
+.descent {
+  max-width: 1180px;
+  margin: clamp(72px, 10vw, 136px) auto 0;
+  padding: 0 var(--gutter);
+}
+.layers {
+  margin: 40px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.layer {
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  column-gap: 20px;
+  padding: 36px 0;
+  border-top: 1px solid var(--line);
+}
+@media (min-width: 1024px) {
+  .layer {
+    grid-template-columns: 112px minmax(0, 0.92fr) minmax(0, 1.08fr);
+    column-gap: 40px;
+    padding: 48px 0;
+  }
+}
+.art {
+  grid-row: span 2;
+  padding-top: 4px;
+}
+@media (min-width: 1024px) {
+  .art {
+    grid-row: auto;
+  }
+}
+.art svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.depth {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--faint);
+  font-variant-numeric: lining-nums tabular-nums;
+}
+.h3 {
+  margin: 6px 0 0;
+  font-family: var(--font-title);
+  font-weight: 400;
+  font-size: 26px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--hi);
+}
+.text {
+  margin-top: 12px;
+  max-width: 32rem;
+  font-family: var(--font-body);
+  font-size: 18px;
+  line-height: 1.62;
+  color: var(--ink);
+  text-wrap: pretty;
+}
+.text code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  color: var(--hi);
+  background: var(--well-2);
+  border-radius: 4px;
+  padding: 0.08em 0.32em;
+  white-space: nowrap;
+}
+.read {
+  display: inline-block;
+  margin-top: 14px;
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+}
+.panel {
+  grid-column: 1 / -1;
+  margin-top: 24px;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 22px 24px;
+  border-radius: 12px;
+  background: var(--well);
+  box-shadow: var(--rim);
+}
+@media (min-width: 1024px) {
+  .panel {
+    grid-column: auto;
+    margin-top: 0;
+    align-self: start;
+  }
+}
+@media (min-width: 640px) and (max-width: 1023px) {
+  .panel {
+    grid-column: 2;
+  }
+}
+
+/* dot art: unlit (the address space) until the reader scrolls past, then lit once.
+   colour only. without js, or above the fold, it is lit from the start. */
+.art circle {
+  transition: fill 420ms var(--ease), fill-opacity 420ms var(--ease), stroke 420ms var(--ease);
+  transition-delay: var(--d, 0ms);
+}
+.layer[data-armed] .art circle:not([data-grid]) {
+  fill: var(--grid);
+  stroke: var(--grid);
+  transition: none;
+}
+.layer[data-armed] .art circle[data-ring] {
+  fill-opacity: 0;
+}
+:global(:root[data-theme="dark"]) .layer:not([data-armed]) .artLit {
+  filter: url(#jle-dot-glow);
+}
+@media (prefers-reduced-motion: reduce) {
+  .art circle {
+    transition-delay: 0ms;
+  }
+}
+
+/* ------------------------------------------------------------------ book + rules */
+
+.section {
+  max-width: 1180px;
+  margin: clamp(80px, 11vw, 144px) auto 0;
+  padding: 0 var(--gutter);
+}
+.rules {
+  margin: 32px 0 0;
+  max-width: 40rem;
+}
+.rule {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 20px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.rule dt {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  color: var(--mute);
+  padding-top: 3px;
+}
+.rule dd {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.endActs {
+  margin-top: 36px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* ------------------------------------------------------------------ phone: the instrument keeps one row of counters and one row of steps */
+
+@media (max-width: 520px) {
+  .readout {
+    gap: 6px 14px;
+    flex-wrap: nowrap;
+  }
+  .count {
+    min-width: 0;
+    gap: 6px;
+  }
+  .num {
+    font-size: 28px;
+    min-width: 0;
+  }
+  .steps {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+  .stepWrap {
+    flex: 1 1 auto;
+  }
+  .chev {
+    display: none;
+  }
+  .step {
+    width: 100%;
+    justify-content: center;
+    gap: 6px;
+    padding: 0 8px;
+    font-size: 13.5px;
+  }
+}

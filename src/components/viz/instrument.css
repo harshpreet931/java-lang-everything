@@ -1,0 +1,367 @@
+/* ---------------------------------------------------------------------------
+   the instrument kit. every figure on the site is drawn inside a lit well:
+   a step brighter than the paper in light, a step darker than the room in dark,
+   with an inset rim of the book colour. labels are Geist Mono with lining,
+   tabular figures; controls are Geist with 44px targets; captions are Piazzolla
+   italic. the dot-field figures (DotField.tsx) live in the same well.
+
+   loaded once, from src/components/viz/index.ts (mdx-components imports it),
+   so every chapter page gets it. everything sits in @layer components, same as
+   globals.css, and is scoped to figures, so site chrome is never touched.
+   --------------------------------------------------------------------------- */
+
+@layer components {
+  /* ---- shared constants ---------------------------------------------------- */
+  :root {
+    --inst-font-label: var(--font-mono, var(--font-code)), "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --inst-font-ui: var(--font-ui, var(--font-code)), "Geist", ui-sans-serif, system-ui, sans-serif;
+    --inst-font-cap: var(--font-body, var(--font-serif)), "Piazzolla", Georgia, serif;
+    --inst-grid: var(--grid, var(--line-2));
+    --inst-edge: var(--edge, var(--faint));
+    --inst-rim: var(--rim, inset 0 0 0 1px var(--line));
+    --inst-pitch: 12px;
+    --inst-target: 44px;
+    --inst-ease: var(--ease, cubic-bezier(0.2, 0, 0, 1));
+    --inst-d: 320ms;
+  }
+
+  /* ---- the well -------------------------------------------------------------- */
+  .figure-body.ticks,
+  .jle-inst {
+    border-radius: 12px;
+    background-color: var(--well);
+    box-shadow: var(--inst-rim);
+  }
+  /* a fine dot grid behind pure drawings (a figure whose body is one svg), and
+     anywhere a figure asks for it with .dotgrid. never behind text-heavy figures. */
+  .figure-body.ticks:has(> svg:only-child),
+  .figure-body.ticks:has(> div:only-child > svg:only-child),
+  .dotgrid {
+    background-image: radial-gradient(circle, var(--inst-grid) 0 1.05px, transparent 1.35px);
+    background-size: var(--inst-pitch) var(--inst-pitch);
+    background-position: calc(var(--inst-pitch) / 2) calc(var(--inst-pitch) / 2);
+  }
+
+  /* ---- labels: Geist Mono, lining tabular figures ------------------------------ */
+  .figure-body,
+  .memstep,
+  .memory,
+  .slides,
+  .flow,
+  .bits,
+  .jle-inst,
+  [data-stepper] {
+    font-family: var(--inst-font-label);
+    font-variant-numeric: lining-nums tabular-nums;
+  }
+  .figure-body svg text,
+  .memstep svg text,
+  .jle-inst svg text {
+    font-family: var(--inst-font-label);
+    font-variant-numeric: lining-nums tabular-nums;
+  }
+  /* long notes inside a figure stay in the reading face */
+  .figure-body .font-serif,
+  .memstep .font-serif {
+    font-family: var(--inst-font-cap);
+  }
+
+  /* ---- captions: Piazzolla italic ------------------------------------------- */
+  figure.figure > figcaption {
+    font-family: var(--inst-font-cap);
+    font-style: italic;
+    color: var(--mute);
+    text-wrap: pretty;
+  }
+  figure.figure > figcaption code {
+    font-style: normal;
+  }
+
+  /* ---- controls: Geist, 44px targets ----------------------------------------- */
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .act {
+    min-height: var(--inst-target);
+    padding: 0 16px;
+    border-radius: 8px;
+    border-color: var(--inst-edge);
+    background: transparent;
+    color: var(--hi);
+    font-family: var(--inst-font-ui);
+    font-size: 14px;
+    font-weight: 450;
+    letter-spacing: 0;
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .act:hover {
+    border-color: var(--inst-edge);
+    background: var(--well-2);
+    color: var(--hi);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .act.solid {
+    background: var(--hi);
+    border-color: var(--hi);
+    color: var(--bg);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .act.solid:hover {
+    background: var(--ink);
+    border-color: var(--ink);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .act:disabled {
+    opacity: 0.38;
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .word {
+    min-height: 40px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font-family: var(--inst-font-ui);
+    font-size: 13.5px;
+    color: var(--mute);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .word:hover {
+    color: var(--hi);
+    background: color-mix(in oklab, var(--well-2) 60%, transparent);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .word[aria-pressed="true"],
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .word[aria-selected="true"],
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) .word[data-on] {
+    background: var(--well-2);
+    color: var(--hi);
+    box-shadow: inset 0 0 0 1px var(--inst-edge);
+  }
+  /* option words that are code stay in code */
+  :is(.figure-body, .memstep, .jle-inst) .word.font-mono,
+  :is(.figure-body, .memstep, .jle-inst) .word code {
+    font-family: var(--inst-font-label);
+  }
+
+  /* scrubber + sliders: a tall hit area, a dotted track, a solid thumb */
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) input[type="range"]:is(.scrub, .slider) {
+    height: var(--inst-target);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) input[type="range"]:is(.scrub, .slider)::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background:
+      radial-gradient(circle, var(--inst-edge) 0 1.3px, transparent 1.6px) 0 50% / 8px 4px repeat-x;
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) input[type="range"]:is(.scrub, .slider)::-moz-range-track {
+    height: 4px;
+    background:
+      radial-gradient(circle, var(--inst-edge) 0 1.3px, transparent 1.6px) 0 50% / 8px 4px repeat-x;
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) input[type="range"]:is(.scrub, .slider)::-webkit-slider-thumb {
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    background: var(--hi);
+    box-shadow:
+      0 0 0 3px var(--well),
+      0 0 0 4px var(--inst-edge);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst, [data-stepper]) input[type="range"]:is(.scrub, .slider)::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    background: var(--hi);
+    box-shadow:
+      0 0 0 3px var(--well),
+      0 0 0 4px var(--inst-edge);
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst) input[type="range"]:focus-visible {
+    outline: 2px solid var(--book, var(--hi));
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst) :is(button, [role="button"]):focus-visible {
+    outline: 2px solid var(--book, var(--hi));
+    outline-offset: 2px;
+  }
+  [data-stepper]:focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--book, var(--hi)) 70%, transparent);
+    outline-offset: 8px;
+    border-radius: 10px;
+  }
+  /* step counters and other small readouts */
+  :is(.figure-body, .memstep, .memory, .jle-inst) .tabular {
+    font-variant-numeric: lining-nums tabular-nums;
+  }
+
+  /* ---- semantic shapes, kit-wide ---------------------------------------------
+     a reference arrow anywhere in a figure is a run of dots ending in its head:
+     every svg stroke in --ref that carries an arrowhead becomes dotted. */
+  :is(.figure-body, .memstep, .memory, .jle-inst) :is(path, line, polyline)[stroke="var(--ref)"][marker-end] {
+    stroke-dasharray: 0 4.2;
+    stroke-linecap: round;
+    stroke-width: 1.9px;
+  }
+  /* hot: a touch larger than its neighbours. dead: the fill drains, the outline stays */
+  .jle-ring {
+    background: transparent !important;
+    box-shadow: inset 0 0 0 1.5px currentColor;
+    border-radius: 999px;
+  }
+}
+
+/* ---- the dot field ----------------------------------------------------------- */
+
+/* in a layer, so tailwind's hidden / sm:block on a field still win */
+@layer components {
+  .jle-dots {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+}
+.jle-dots .g-grid circle {
+  fill: var(--inst-grid);
+}
+.jle-dots circle.d {
+  fill: var(--c);
+  stroke: var(--c);
+  opacity: var(--o, 1);
+  transition-property: fill, stroke, fill-opacity, stroke-opacity, opacity;
+  transition-duration: var(--inst-d);
+  transition-timing-function: var(--inst-ease);
+  transition-delay: var(--dl, 0ms);
+}
+.jle-dots circle.d.ring {
+  fill-opacity: 0;
+}
+.jle-dots circle.d.off {
+  opacity: 0;
+}
+.jle-dots circle.d.dim {
+  opacity: calc(var(--o, 1) * 0.28);
+}
+.jle-dots .comet circle {
+  pointer-events: none;
+}
+.jle-dots text {
+  font-family: var(--inst-font-label);
+  font-variant-numeric: lining-nums tabular-nums;
+  /* a halo in the well colour knocks the address-space dots out from behind labels */
+  paint-order: stroke;
+  stroke: var(--well);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+}
+.jle-dots .lbl {
+  font-family: var(--inst-font-ui);
+  font-size: 12px;
+  fill: var(--faint);
+}
+.jle-dots .val {
+  font-size: 13px;
+  fill: var(--hi);
+  font-weight: 500;
+}
+.jle-dots .key {
+  font-size: 13px;
+  fill: var(--ink);
+}
+/* the lab: lit dots glow (2.4px gaussian), only in the dark theme */
+:root[data-theme="dark"] .jle-dots .lit {
+  filter: var(--jle-glow);
+}
+/* a snapshot of a theme switch should not animate */
+.no-tr .jle-dots circle.d {
+  transition: none;
+}
+
+/* reduced motion keeps the states (colour, fill, opacity) and drops the travel:
+   no stagger, no comet (DotField skips it), no scale */
+@media (prefers-reduced-motion: reduce) {
+  .jle-dots circle.d {
+    transition-delay: 0ms !important;
+  }
+  :is(.figure-body, .memstep, .memory, .jle-inst) .act:active {
+    scale: 1;
+  }
+}
+
+/* ---- the dot legend ---------------------------------------------------------- */
+.jle-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-family: var(--inst-font-ui);
+  font-size: 13px;
+  color: var(--mute);
+}
+.jle-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.jle-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c);
+}
+.jle-legend i.ref {
+  width: 18px;
+  height: 8px;
+  border-radius: 0;
+  background: radial-gradient(circle, var(--ref) 0 1.6px, transparent 2px) 0 50% / 6px 8px repeat-x;
+}
+.jle-legend i.ring {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.4px var(--c);
+}
+.jle-legend i.meta {
+  width: 5px;
+  height: 12px;
+  border-radius: 3px;
+}
+.jle-legend i.hot {
+  width: 10px;
+  height: 10px;
+}
+
+/* ---- wires: a short run of dots that lights up in order, once per key ----------
+   (a value travelling between two parts of a figure). colour and opacity only. */
+@keyframes jle-wire {
+  0% {
+    background-color: var(--c);
+    opacity: 1;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--c) 25%, transparent);
+  }
+  100% {
+    background-color: var(--grid);
+    opacity: 1;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.jle-wire {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+}
+.jle-wire > i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--grid);
+}
+.jle-wire.on > i {
+  animation: jle-wire 520ms var(--inst-ease) both;
+  animation-delay: calc(var(--n) * 55ms);
+}
+@media (prefers-reduced-motion: reduce) {
+  .jle-wire.on > i {
+    animation-delay: 0ms;
+  }
+}
+/* a reference run being (re)drawn: each dot arrives in order, from the slot outwards */
+@keyframes jle-ref-in {
+  0% {
+    opacity: 0.15;
+  }
+  100% {
+    opacity: 1;
+  }
+}

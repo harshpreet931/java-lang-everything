@@ -91,7 +91,7 @@ export function IndyLink() {
 
       <div className="mt-3 text-12 text-mute break-words">{site.source}</div>
 
-      <div className="mt-3 flex flex-col gap-1.5">
+      <div className="mt-3 flex min-w-0 flex-col gap-1.5 [overflow-wrap:anywhere]">
         <div className="rounded-md bg-well px-3 py-2 transition-[box-shadow] duration-200 ease-jle" style={box("site")}>
           <div className="flex items-baseline justify-between gap-2 text-11">
             <span className="text-faint">the call site</span>

@@ -96,8 +96,8 @@ export function NavigableLine() {
       <div ref={wrap} className="min-w-0">
       <svg viewBox={`0 0 ${W} 130`} fontFamily="var(--font-code)" className="block w-full" role="img" aria-label={`keys 10 to 70. x is ${x}. floor ${floor}, ceiling ${ceil}`}>
         <defs>
-          <marker id={`nl-${uid}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-            <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+          <marker id={`nl-${uid}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
           </marker>
         </defs>
         <line x1={sx(MIN)} y1={lineY} x2={sx(MAX)} y2={lineY} stroke="var(--line-2)" />

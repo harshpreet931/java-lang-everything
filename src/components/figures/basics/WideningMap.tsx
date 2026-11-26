@@ -24,11 +24,11 @@ export function WideningMap() {
       {/* wide: one row, skip arcs above */}
       <svg fontFamily="var(--font-code), monospace" viewBox="0 0 660 160" className="hidden w-full @[560px]:block" role="img" aria-label="widening conversions: byte to short to int to long to float to double, and char to int">
         <defs>
-          <marker id="wm-ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-            <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--mute)" />
+          <marker id="wm-ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--mute)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
           </marker>
-          <marker id="wm-ah-hot" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-            <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--hot)" />
+          <marker id="wm-ah-hot" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--hot)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
           </marker>
         </defs>
         {CHAIN.map((t, i) => {

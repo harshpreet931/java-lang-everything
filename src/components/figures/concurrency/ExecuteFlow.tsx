@@ -9,12 +9,12 @@ const RUNGS: { q: string; yes: string; tone: "live" | "mute" | "hot" }[] = [
 
 export function ExecuteFlow() {
   return (
-    <div className="font-mono text-12" role="img" aria-label="execute: core threads first, then the queue, then extra threads, then rejection">
+    <div className="font-mono text-12 [overflow-wrap:anywhere]" role="img" aria-label="execute: core threads first, then the queue, then extra threads, then rejection">
       <div className="mb-3 inline-flex rounded-md bg-well px-3 py-1.5 text-hi shadow-[inset_0_0_0_1px_var(--ink)]">execute(task)</div>
       {RUNGS.map((r, i) => (
         <div key={r.q} className="relative pl-5">
           <span aria-hidden className="absolute top-0 bottom-0 left-2 w-px bg-line-2" />
-          <div className="grid items-center gap-x-3 gap-y-1.5 py-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+          <div className="grid grid-cols-[minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 py-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
             <div className="rounded-md bg-well px-3 py-2 text-ink shadow-[inset_0_0_0_1px_var(--line-2)]">
               <span className="mr-2 text-faint tabular">{i + 1}.</span>
               {r.q}
@@ -34,7 +34,7 @@ export function ExecuteFlow() {
         </div>
       ))}
       <div className="relative pl-5">
-        <div className="grid items-center gap-x-3 gap-y-1.5 py-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+        <div className="grid grid-cols-[minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 py-2 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
           <div className="rounded-md bg-well px-3 py-2 text-ink shadow-[inset_0_0_0_1px_var(--line-2)]">
             <span className="mr-2 text-faint tabular">4.</span>
             the pool is saturated

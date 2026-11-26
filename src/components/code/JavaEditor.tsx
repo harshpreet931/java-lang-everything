@@ -32,18 +32,18 @@ const highlight = HighlightStyle.define([
 ]);
 
 const theme = EditorView.theme({
-  "&": { color: "var(--ink)", backgroundColor: "transparent", fontSize: "13px", height: "100%" },
+  "&": { color: "var(--code-fg)", backgroundColor: "transparent", fontSize: "14px", height: "100%" },
   "&.cm-focused": { outline: "none" },
-  ".cm-scroller": { fontFamily: "var(--font-code), ui-monospace, monospace", lineHeight: "1.75", overflow: "auto" },
-  ".cm-content": { padding: "14px 0", caretColor: "var(--hi)" },
+  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.65", overflow: "auto" },
+  ".cm-content": { padding: "16px 0", caretColor: "var(--book)" },
   ".cm-line": { padding: "0 20px 0 14px" },
-  ".cm-gutters": { backgroundColor: "transparent", border: "none", color: "var(--faint)" },
-  ".cm-lineNumbers .cm-gutterElement": { padding: "0 0 0 12px", minWidth: "3ch", opacity: "0.6" },
-  ".cm-activeLine": { backgroundColor: "color-mix(in srgb, var(--ink) 4%, transparent)" },
+  ".cm-gutters": { backgroundColor: "transparent", border: "none", color: "var(--code-cmt)" },
+  ".cm-lineNumbers .cm-gutterElement": { padding: "0 0 0 12px", minWidth: "3ch" },
+  ".cm-activeLine": { backgroundColor: "color-mix(in oklab, var(--hot) 9%, transparent)", boxShadow: "inset 2px 0 0 var(--hot)" },
   ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--ink)" },
-  ".cm-cursor": { borderLeftColor: "var(--hi)", borderLeftWidth: "1.5px" },
+  ".cm-cursor": { borderLeftColor: "var(--book)", borderLeftWidth: "1.5px" },
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
-    backgroundColor: "color-mix(in srgb, var(--ref) 28%, transparent) !important",
+    backgroundColor: "color-mix(in oklab, var(--book) 22%, transparent) !important",
   },
   ".cm-matchingBracket": { backgroundColor: "color-mix(in srgb, var(--hot) 20%, transparent)", outline: "none" },
 });

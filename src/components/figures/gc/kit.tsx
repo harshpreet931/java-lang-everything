@@ -47,7 +47,7 @@ export function Row({ k, children, kw = "11ch", last }: { k: string; children: R
       className={`grid items-center gap-x-3 py-2 text-13 ${last ? "" : "border-b border-line"}`}
       style={{ gridTemplateColumns: `${kw} minmax(0,1fr)` }}
     >
-      <span className="text-faint">{k} =</span>
+      <span className="whitespace-nowrap text-faint">{k} =</span>
       <div className="flex min-w-0 flex-wrap items-center gap-1">{children}</div>
     </div>
   );
@@ -83,12 +83,20 @@ export function Words<T extends string | number>({
 /** a row of tone chips: what each colour means in this figure */
 export function Legend({ items, className = "" }: { items: [Tone | "mute", string][]; className?: string }) {
   return (
-    <div className={`flex flex-wrap gap-x-4 gap-y-1 text-11 text-faint ${className}`}>
+    <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 font-ui text-12 text-mute ${className}`}>
       {items.map(([t, label]) => (
         <span key={label} className="inline-flex items-center gap-1.5">
           <span
-            className="inline-block size-2 rounded-[1px]"
-            style={{ background: t === "mute" ? "var(--line-2)" : tv(t) }}
+            className="inline-block rounded-full"
+            style={
+              t === "ref"
+                ? { width: 16, height: 8, borderRadius: 0, background: "radial-gradient(circle, var(--ref) 0 1.6px, transparent 2px) 0 50% / 5.33px 8px repeat-x" }
+                : t === "dead"
+                  ? { width: 8, height: 8, boxShadow: "inset 0 0 0 1.4px var(--dead)" }
+                  : t === "meta"
+                    ? { width: 5, height: 11, borderRadius: 3, background: tv(t) }
+                    : { width: t === "hot" ? 10 : 8, height: t === "hot" ? 10 : 8, background: t === "mute" ? "var(--line-2)" : tv(t) }
+            }
           />
           {label}
         </span>
@@ -122,7 +130,8 @@ export function Stat({ k, v, tone }: { k: string; v: ReactNode; tone?: Tone }) {
   );
 }
 
-/** svg arrowhead markers, one per tone. ids are prefixed so figures never clash. */
+/** svg arrowhead markers, one per tone: an open chevron, fixed size whatever the stroke.
+ *  ids are prefixed so figures never clash. */
 export function Heads({ id, tones = ["ref"] }: { id: string; tones?: (Tone | "mute")[] }) {
   return (
     <defs>
@@ -130,14 +139,22 @@ export function Heads({ id, tones = ["ref"] }: { id: string; tones?: (Tone | "mu
         <marker
           key={t}
           id={`${id}-${t}`}
-          viewBox="0 0 8 8"
-          refX="7"
-          refY="4"
-          markerWidth="6"
-          markerHeight="6"
+          viewBox="0 0 10 10"
+          refX="8.4"
+          refY="5"
+          markerWidth="9"
+          markerHeight="9"
+          markerUnits="userSpaceOnUse"
           orient="auto-start-reverse"
         >
-          <path d="M0 0.5 L7.5 4 L0 7.5 z" fill={t === "mute" ? "var(--line-2)" : tv(t)} />
+          <path
+            d="M2.2 1.4 L8.4 5 L2.2 8.6"
+            fill="none"
+            stroke={t === "mute" ? "var(--line-2)" : tv(t)}
+            strokeWidth={1.6}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </marker>
       ))}
     </defs>

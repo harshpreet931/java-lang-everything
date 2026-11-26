@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { parts, pad2 } from "@/content/curriculum";
 import { useProgress } from "@/lib/progress";
+import { PartSwatch } from "@/components/learn/covers/PartSwatch";
 
 /** the file-tree sidebar. one part open at a time, lamps for progress. */
 export function Rail({ available }: { available: string[] }) {
@@ -50,41 +51,48 @@ export function Rail({ available }: { available: string[] }) {
   return (
     <>
       {drawer && (
-        <div className="fixed inset-0 z-30 bg-[rgb(0_0_0/0.6)] lg:hidden" onClick={() => setDrawer(false)} />
+        <div className="fixed inset-0 z-30 bg-[var(--scrim)] lg:hidden" onClick={() => setDrawer(false)} aria-hidden />
       )}
       <nav
         ref={nav}
         aria-label="contents"
-        className={`fixed top-[var(--bar-h)] bottom-0 left-0 z-30 w-[288px] overflow-y-auto overscroll-contain border-r border-line bg-bg pt-6 pb-24 transition-transform duration-200 ease-jle lg:sticky lg:z-0 lg:h-[calc(100dvh-var(--bar-h))] lg:w-[280px] lg:shrink-0 lg:translate-x-0 ${
+        className={`fixed top-[var(--bar-h)] bottom-0 left-0 z-30 w-[min(300px,86vw)] overflow-y-auto overscroll-contain border-r border-line bg-bg pt-3 pb-24 font-ui text-14 transition-transform duration-200 ease-sfe lg:sticky lg:z-0 lg:h-[calc(100dvh-var(--bar-h))] lg:w-[264px] lg:shrink-0 lg:translate-x-0 ${
           drawer ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        <Link href="/learn" className="mb-3 flex items-center justify-between px-5 font-display text-[1.05rem] text-mute italic hover:text-hi">
+        <Link
+          href="/learn"
+          className="mx-2 mb-1 flex min-h-10 items-center justify-between rounded-sm px-3 text-mute transition-colors duration-150 hover:bg-well-2 hover:text-hi"
+        >
           <span>contents</span>
-          <span className="font-sans text-13 not-italic tabular">{Object.keys(progress).length} read</span>
+          <span className="text-12 text-faint tabular">{Object.keys(progress).length} read</span>
         </Link>
-        <ol>
+        <ol className="border-t border-line">
           {parts.map((p) => {
             const isOpen = open.has(p.slug);
+            const here = current === p.slug;
             const done = p.chapters.filter((c) => progress[`/learn/${p.slug}/${c.slug}`]).length;
             return (
-              <li key={p.slug} className="border-t border-line first:border-t-0">
+              <li key={p.slug} className="border-b border-line">
                 <button
                   onClick={() => toggle(p.slug)}
                   aria-expanded={isOpen}
-                  className={`grid w-full grid-cols-[3ch_1fr_auto] items-baseline gap-x-2 px-5 py-3 text-left text-[1.02rem] transition-colors duration-150 ${
-                    current === p.slug ? "text-hi" : "text-mute hover:text-hi"
+                  className={`grid min-h-11 w-full grid-cols-[30px_1fr_auto] items-baseline gap-x-1 py-2.5 pr-4 pl-[18px] text-left leading-[1.3] transition-colors duration-150 ${
+                    here || isOpen ? "font-medium text-hi" : "text-ink hover:text-hi"
                   }`}
                 >
-                  <span className="font-mono text-12 text-faint tabular">{pad2(p.n)}</span>
-                  <span>{p.title}</span>
-                  <span className="font-mono text-11 text-faint tabular">
+                  <span className="text-12 font-normal text-faint tabular">{pad2(p.n)}</span>
+                  <span className="flex items-baseline gap-2.5">
+                    <PartSwatch part={p.slug} size={14} className="shrink-0 self-center" />
+                    <span>{p.title}</span>
+                  </span>
+                  <span className="text-12 font-normal text-faint tabular">
                     {done > 0 ? `${done}/` : ""}
                     {p.chapters.length}
                   </span>
                 </button>
                 {isOpen && (
-                  <ol className="pb-3">
+                  <ol className="pb-2.5">
                     {p.chapters.map((c, i) => {
                       const href = `/learn/${p.slug}/${c.slug}`;
                       const here = path === href;
@@ -92,30 +100,20 @@ export function Rail({ available }: { available: string[] }) {
                       const read = !!progress[href];
                       return (
                         <li key={c.slug}>
-                          {
-                            <Link
-                              href={href}
-                              aria-current={here ? "page" : undefined}
-                              className={`mx-2 grid grid-cols-[3ch_1fr_auto] items-baseline gap-x-2 rounded-sm px-3 py-[6px] text-[0.98rem] leading-snug transition-colors duration-120 ${
-                                here ? "bg-well-2 text-hi shadow-[inset_2px_0_0_var(--accent)]" : "text-mute hover:text-hi"
-                              }`}
-                            >
-                              <span className={`font-mono text-11 tabular ${here ? "text-accent" : "text-faint"}`}>
-                                {pad2(i + 1)}
-                              </span>
-                              <span className={has || here ? "" : "opacity-55"}>{c.title}</span>
-                              {has ? (
-                                <span
-                                  aria-label={read ? "read" : undefined}
-                                  className={`size-[5px] self-center rounded-full ${
-                                    read ? "bg-accent" : "bg-line-2"
-                                  }`}
-                                />
-                              ) : (
-                                <span className="text-[10px] opacity-60">soon</span>
-                              )}
-                            </Link>
-                          }
+                          <Link
+                            href={href}
+                            aria-current={here ? "page" : undefined}
+                            className={`mx-2 grid min-h-10 grid-cols-[30px_1fr_10px] items-center gap-x-1 rounded-sm py-1.5 pr-3.5 pl-2.5 leading-[1.3] transition-colors duration-120 hover:bg-well-2 ${
+                              here ? "bg-well-2 text-hi" : "text-ink hover:text-hi"
+                            }`}
+                          >
+                            <span className="text-12 text-faint tabular">{pad2(i + 1)}</span>
+                            <span className={has || here ? "" : "text-mute"}>
+                              {c.title}
+                              {!has && !here && <span className="sr-only"> (soon)</span>}
+                            </span>
+                            <Lamp state={here ? "here" : !has ? "soon" : read ? "read" : "unread"} />
+                          </Link>
                         </li>
                       );
                     })}
@@ -127,5 +125,25 @@ export function Rail({ available }: { available: string[] }) {
         </ol>
       </nav>
     </>
+  );
+}
+
+/** progress lamps: an unlit ring, a small filled dot once read, the book colour where you are,
+ *  and a faint dash for chapters not written yet */
+function Lamp({ state }: { state: "here" | "read" | "unread" | "soon" }) {
+  if (state === "soon")
+    return <span aria-hidden className="h-px w-[6px] justify-self-center bg-line-2" title="soon" />;
+  return (
+    <span
+      {...(state === "read" ? { role: "img", "aria-label": "read" } : { "aria-hidden": true })}
+      className={`justify-self-center rounded-full ${state === "read" ? "size-[5px] bg-faint" : "size-[6px]"}`}
+      style={
+        state === "here"
+          ? { background: "var(--book)", boxShadow: "0 0 0 3px color-mix(in oklab, var(--book) 22%, transparent)" }
+          : state === "unread"
+            ? { boxShadow: "inset 0 0 0 1px var(--edge)" }
+            : undefined
+      }
+    />
   );
 }

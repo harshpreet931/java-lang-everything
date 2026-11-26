@@ -1,0 +1,381 @@
+/* part covers: a printed board in the dot language, a spine, a pasted label.
+   the cover grounds and inks come from spec.ts as --g --ink --lit (print colours, not theme
+   tokens). everything else here is built from the theme tokens. */
+
+.cover,
+.swatch {
+  --cv-title: var(--font-title, var(--font-display)), Georgia, serif;
+  --cv-mono: var(--font-mono, var(--font-code)), ui-monospace, monospace;
+  --cv-ease: var(--ease, cubic-bezier(0.2, 0, 0, 1));
+  /* the dark end of the cover, used for the progress rule on the label */
+  --cv-deep: var(--cv-k);
+  --cv-label: var(--well);
+  --cv-label-ink: var(--hi);
+  --cv-label-mute: var(--mute);
+  --cv-shadow-tint: 58 38 24;
+}
+.cover[data-deep] {
+  --cv-deep: var(--cv-g);
+}
+:global([data-theme="dark"]) .cover {
+  /* the label stays paper at night, dimmed like the board it is pasted on */
+  --cv-shadow-tint: 0 0 0;
+  --cv-label: color-mix(in oklab, var(--ink) 92%, var(--bg));
+  --cv-label-ink: var(--bg);
+  --cv-label-mute: color-mix(in oklab, var(--bg) 68%, var(--ink));
+}
+
+/* ---- the object ---- */
+
+.cover {
+  --u: 22px;
+  position: relative;
+  aspect-ratio: 5 / 7;
+  border-radius: 3px 7px 7px 3px;
+  box-shadow:
+    0 1px 1px rgb(var(--cv-shadow-tint) / 0.1),
+    0 3px 6px rgb(var(--cv-shadow-tint) / 0.08),
+    0 14px 24px -10px rgb(var(--cv-shadow-tint) / 0.22),
+    0 30px 50px -28px rgb(var(--cv-shadow-tint) / 0.3);
+  transition:
+    transform 220ms var(--cv-ease),
+    box-shadow 220ms var(--cv-ease);
+}
+.large {
+  --u: 30px;
+}
+:global([data-theme="dark"]) .cover {
+  /* in the dark the covers are lit objects: a rim of light on the edge, a pool of their own colour below */
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.05),
+    0 1px 1px rgb(0 0 0 / 0.5),
+    0 6px 12px rgb(0 0 0 / 0.35),
+    0 22px 40px -18px color-mix(in oklab, var(--cv-g) 34%, transparent);
+}
+:global([data-theme="dark"]) .cover[data-deep] {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--cv-k) 16%, transparent),
+    0 1px 1px rgb(0 0 0 / 0.5),
+    0 6px 12px rgb(0 0 0 / 0.35),
+    0 22px 44px -18px color-mix(in oklab, var(--cv-k) 26%, transparent);
+}
+
+.face {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--cv-g);
+}
+.cover[data-deep] .face {
+  /* a dark display: a soft pool of its own light from the top */
+  background:
+    radial-gradient(120% 70% at 35% 0%, color-mix(in oklab, var(--cv-k) 13%, transparent), transparent 70%),
+    var(--cv-g);
+}
+:global([data-theme="dark"]) .cover:not([data-deep]) .face {
+  filter: brightness(0.8) saturate(0.88);
+}
+
+/* ---- the dots: three inks drawing the same planes ---- */
+
+.ink {
+  position: absolute;
+  inset: 0;
+}
+.plane {
+  position: absolute;
+  inset: 0;
+}
+.plane[data-i="0"] {
+  background-image: var(--p0i);
+  background-size: var(--p0s);
+  background-position: var(--p0p);
+  background-repeat: var(--p0r);
+  mask-image: var(--p0mi, none);
+  mask-size: var(--p0ms, auto);
+  mask-position: var(--p0mp, 0 0);
+  mask-composite: var(--p0mc, add);
+  opacity: var(--p0a, 1);
+}
+.plane[data-i="1"] {
+  background-image: var(--p1i);
+  background-size: var(--p1s);
+  background-position: var(--p1p);
+  background-repeat: var(--p1r);
+  mask-image: var(--p1mi, none);
+  mask-size: var(--p1ms, auto);
+  mask-position: var(--p1mp, 0 0);
+  mask-composite: var(--p1mc, add);
+  opacity: var(--p1a, 1);
+}
+.plane[data-i="2"] {
+  background-image: var(--p2i);
+  background-size: var(--p2s);
+  background-position: var(--p2p);
+  background-repeat: var(--p2r);
+  mask-image: var(--p2mi, none);
+  mask-size: var(--p2ms, auto);
+  mask-position: var(--p2mp, 0 0);
+  mask-composite: var(--p2mc, add);
+  opacity: var(--p2a, 1);
+}
+
+.rest {
+  color: var(--cv-k);
+}
+.cover[data-deep] .rest,
+.swatch[data-deep] .rest {
+  /* at rest the deep covers glow low, like a display on standby */
+  color: color-mix(in oklab, var(--cv-k) 74%, var(--cv-g));
+  filter: drop-shadow(0 0 2px color-mix(in oklab, var(--cv-k) 45%, transparent));
+}
+.swatch[data-deep] .rest {
+  color: var(--cv-k);
+}
+
+/* lit: the same dots in the lit colour, revealed by a soft edge that runs away from the spine */
+.lit,
+.crest {
+  mask-image: linear-gradient(90deg, #000 0 44%, transparent 56%);
+  mask-size: 300% 100%;
+  mask-repeat: no-repeat;
+  mask-position: 100% 0;
+}
+.lit {
+  color: var(--cv-lit);
+  filter: drop-shadow(0 0 2px color-mix(in oklab, var(--cv-lit) 50%, transparent));
+  transition: mask-position 260ms var(--cv-ease);
+  /* the wave: steady across the board, settling at the far edge */
+}
+.cover[data-deep] .lit {
+  filter: drop-shadow(0 0 3px var(--cv-lit)) drop-shadow(0 0 8px color-mix(in oklab, var(--cv-lit) 40%, transparent));
+}
+/* the crest: a brighter band riding the front of the wave, gone once it has passed */
+.crest {
+  color: color-mix(in oklab, var(--cv-lit) 45%, #fff);
+  filter: drop-shadow(0 0 4px var(--cv-lit));
+  mask-image: linear-gradient(90deg, transparent 38%, #000 50%, transparent 62%);
+  opacity: 0;
+}
+
+.spine {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: clamp(12px, calc(var(--u) * 0.82), 26px);
+  border-radius: 3px 0 0 3px;
+  /* nextjs.org/learn: two sheens at 29% and 91% over a band shaded at both edges */
+  background:
+    linear-gradient(90deg, transparent 12%, rgb(255 255 255 / 0.24) 29%, transparent 50%, transparent 75%, rgb(255 255 255 / 0.2) 91%, transparent),
+    linear-gradient(to right in oklab, rgb(0 0 0 / 0.22), rgb(0 0 0 / 0.07) 50%, rgb(0 0 0 / 0.18));
+  box-shadow:
+    1px 0 0 rgb(0 0 0 / 0.12),
+    2px 0 0 rgb(255 255 255 / 0.1);
+}
+.finish {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(to right bottom, rgb(255 255 255 / 0.13), transparent 42%, rgb(0 0 0 / 0.07));
+  box-shadow:
+    inset 0 0 0 1px rgb(0 0 0 / 0.07),
+    inset 0 1px 0 rgb(255 255 255 / 0.22);
+  pointer-events: none;
+}
+
+/* ---- the label ---- */
+
+.label {
+  position: absolute;
+  left: 12%;
+  right: 6.5%;
+  bottom: 7%;
+  padding: 8px 9px 9px;
+  border-radius: 3px;
+  background: var(--cv-label);
+  color: var(--cv-label-ink);
+  box-shadow:
+    0 0 0 1px rgb(var(--cv-shadow-tint) / 0.08),
+    0 1px 2px rgb(var(--cv-shadow-tint) / 0.2),
+    0 4px 10px -4px rgb(var(--cv-shadow-tint) / 0.18);
+}
+:global([data-theme="dark"]) .label {
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.4),
+    0 4px 10px -4px rgb(0 0 0 / 0.5);
+}
+.n {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font: 400 11px/1.2 var(--cv-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--cv-label-mute);
+}
+.t {
+  margin: 4px 0 0;
+  font: 400 17px/1.06 var(--cv-title);
+  letter-spacing: -0.005em;
+  color: var(--cv-label-ink);
+  text-wrap: balance;
+  hyphens: manual;
+  hyphenate-limit-chars: 12 5 5;
+  overflow-wrap: break-word;
+}
+.large .label {
+  left: 13%;
+  right: 9%;
+  bottom: 8%;
+  padding: 12px 14px 14px;
+}
+.large .n {
+  font-size: 12px;
+}
+.large .t {
+  margin-top: 6px;
+  font-size: 23px;
+}
+.rule {
+  position: relative;
+  height: 2px;
+  margin-top: 9px;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--cv-label-ink) 11%, transparent);
+  overflow: hidden;
+}
+.rule i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--cv-deep);
+  transition: width 400ms var(--cv-ease);
+}
+
+/* ---- the host: anything wrapping a cover that should light it ---- */
+
+.host {
+  display: block;
+  -webkit-tap-highlight-color: transparent;
+}
+@media (hover: hover) {
+  .host:hover .cover {
+    transform: translateY(-2px);
+    box-shadow:
+      0 1px 1px rgb(var(--cv-shadow-tint) / 0.1),
+      0 4px 8px rgb(var(--cv-shadow-tint) / 0.09),
+      0 20px 30px -10px rgb(var(--cv-shadow-tint) / 0.26),
+      0 40px 60px -30px rgb(var(--cv-shadow-tint) / 0.34);
+  }
+  :global([data-theme="dark"]) .host:hover .cover {
+    box-shadow:
+      0 0 0 1px rgb(255 255 255 / 0.07),
+      0 1px 1px rgb(0 0 0 / 0.5),
+      0 8px 16px rgb(0 0 0 / 0.4),
+      0 26px 50px -16px color-mix(in oklab, var(--cv-lit) 34%, transparent);
+  }
+}
+.host:focus-visible .cover {
+  transform: translateY(-2px);
+}
+.host:active .cover {
+  transform: translateY(0);
+  transition-duration: 90ms;
+}
+.host:hover .lit,
+.host:focus-visible .lit {
+  mask-position: 0 0;
+  transition-duration: 420ms;
+  transition-timing-function: cubic-bezier(0.35, 0.1, 0.35, 1);
+}
+.host:hover .crest,
+.host:focus-visible .crest {
+  animation: crest 440ms cubic-bezier(0.35, 0.1, 0.35, 1);
+}
+@keyframes crest {
+  0% {
+    opacity: 1;
+    mask-position: 100% 0;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    mask-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* no movement: the cover stays put and the dots switch on at once */
+  .cover,
+  .host:hover .cover,
+  .host:focus-visible .cover {
+    transform: none;
+  }
+  .lit,
+  .host:hover .lit,
+  .host:focus-visible .lit {
+    transition: none;
+  }
+  .crest {
+    display: none;
+  }
+}
+
+/* ---- phone: the shelf becomes a stack of spines, darker towards the bottom ---- */
+
+@media (max-width: 559px) {
+  .shelf,
+  .large {
+    --u: 18px;
+    aspect-ratio: auto;
+    height: 84px;
+  }
+  .shelf .label,
+  .large .label {
+    left: max(24px, calc(var(--u) * 0.82 + 12px));
+    right: auto;
+    top: 50%;
+    bottom: auto;
+    width: min(66%, 240px);
+    translate: 0 -50%;
+    padding: 7px 10px 8px;
+  }
+  .large .n {
+    font-size: 11px;
+  }
+  .shelf .t,
+  .large .t {
+    font-size: 16px;
+    margin-top: 3px;
+  }
+  .shelf .rule,
+  .large .rule {
+    margin-top: 6px;
+  }
+}
+
+/* ---- the swatch: a cover the size of a letter ---- */
+
+.swatch {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  overflow: hidden;
+  vertical-align: middle;
+  border-radius: 1.5px 3px 3px 1.5px;
+  background: var(--cv-g);
+  box-shadow:
+    inset 0 0 0 1px rgb(0 0 0 / 0.1),
+    0 1px 1px rgb(var(--cv-shadow-tint) / 0.16);
+}
+.swatch .spine {
+  width: 22%;
+  border-radius: 0;
+}
+:global([data-theme="dark"]) .swatch {
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.08);
+}
+:global([data-theme="dark"]) .swatch:not([data-deep]) {
+  filter: brightness(0.82) saturate(0.9);
+}

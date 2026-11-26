@@ -220,8 +220,8 @@ export function DequeRing() {
       <div ref={wrap} className={`grid items-center gap-6 ${side ? "grid-cols-[320px_minmax(0,1fr)]" : ""}`}>
         <svg fontFamily="var(--font-code)" viewBox="-36 -14 372 328" className={`block w-full ${side ? "" : "mx-auto max-w-[320px]"}`} role="img" aria-label={`a ring of ${n} slots. head at ${s.head}, tail at ${s.tail}, holding ${size} elements`}>
           <defs>
-            <marker id={`dr-${uid}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+            <marker id={`dr-${uid}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
           </defs>
           {s.es.map((v, i) => {

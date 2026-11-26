@@ -87,8 +87,8 @@ export function RefStrength() {
               <span className="truncate text-11 text-mute sm:order-2">{r.code}</span>
               <svg viewBox="0 0 64 16" className="hidden h-4 w-16 sm:order-3 sm:block" aria-hidden>
                 <defs>
-                  <marker id={`rs-${r.k}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-                    <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+                  <marker id={`rs-${r.k}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+                    <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
                   </marker>
                 </defs>
                 <line

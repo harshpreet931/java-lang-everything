@@ -1,5 +1,6 @@
 node_modules
 .next
+.next-*
 out
 *.tsbuildinfo
 next-env.d.ts
@@ -13,3 +14,6 @@ VOICE.md
 AGENTS.md
 CLAUDE.md
 .claude/
+
+# local-only: the launch video (remotion project)
+video/

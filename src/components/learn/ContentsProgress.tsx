@@ -13,7 +13,7 @@ export function ContentsProgress() {
   const lastChapter = flat.find((c) => c.href === last);
   if (!read && !lastChapter) return null;
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-12">
+    <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 font-ui text-13">
       <span className="text-faint tabular">
         {read} of {totalChapters} read
       </span>

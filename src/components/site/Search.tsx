@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { flat, pad2, parts } from "@/content/curriculum";
 import { glossary } from "@/content/glossary";
 import { track } from "@/lib/analytics";
+import { Arrow } from "./Arrow";
 
 // ⌘K. chapters + glossary are searched instantly in memory. full text comes
 // from pagefind, which only exists after `pnpm build` (it indexes the html).
@@ -199,15 +200,18 @@ export function Search() {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center bg-[rgb(20_18_16/0.35)] px-4 pt-[12vh] backdrop-blur-[2px]"
+      className="fixed inset-0 z-[60] flex items-start justify-center bg-[var(--scrim)] px-3 pt-[12vh] max-sm:pt-3"
       onMouseDown={(e) => e.target === e.currentTarget && close()}
       role="dialog"
       aria-modal="true"
       aria-label="search"
     >
-      <div className="w-full max-w-[640px] overflow-hidden rounded-lg bg-bg shadow-[0_0_0_1px_var(--line-2),0_24px_60px_-12px_rgb(0_0_0/0.25)]">
+      <div className="w-full max-w-[640px] overflow-hidden rounded-lg bg-bg font-ui shadow-[var(--overlay)]">
         <div className="flex items-center gap-3 border-b border-line px-4">
-          <span className="font-display text-[1.05rem] text-accent italic">find</span>
+          <svg className="shrink-0 text-mute" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+            <circle cx="7" cy="7" r="4.5" />
+            <path d="m10.5 10.5 3 3" strokeLinecap="round" />
+          </svg>
           <input
             ref={input}
             value={q}
@@ -225,31 +229,37 @@ export function Search() {
               if (e.key === "Enter") go(hits[active]);
             }}
             placeholder="hashmap, volatile, records…"
-            className="h-13 w-full bg-transparent text-[1.08rem] text-hi outline-none placeholder:text-faint"
+            className="h-14 w-full bg-transparent font-body text-[1.125rem] text-hi outline-none placeholder:text-faint"
             spellCheck={false}
             autoComplete="off"
             aria-controls="search-results"
+            aria-label="search the book"
           />
           <kbd>esc</kbd>
         </div>
         <ul ref={list} id="search-results" className="max-h-[60vh] overflow-y-auto py-1.5" role="listbox">
           {hits.length === 0 && (
-            <li className="px-4 py-6 text-13 text-mute">nothing matches that. try a broader word.</li>
+            <li className="px-4 py-6 text-14 text-mute">nothing matches that. try a broader word.</li>
           )}
           {hits.map((h, i) => (
             <li key={h.href + i} data-i={i} role="option" aria-selected={i === active}>
               <button
                 onMouseMove={() => setActive(i)}
                 onClick={() => go(h)}
-                className={`grid w-full grid-cols-[6ch_1fr] gap-x-3 px-4 py-2.5 text-left transition-colors duration-100 ${
+                className={`grid min-h-11 w-full grid-cols-[3.25rem_1fr] gap-x-3 px-4 py-2.5 text-left transition-colors duration-100 ${
                   i === active ? "bg-well-2 text-hi" : "text-ink"
                 }`}
               >
-                <span className={`font-mono text-11 leading-6 ${i === active ? "text-accent" : "text-faint"}`}>
+                <span className={`flex items-center gap-2 text-12 leading-6 ${i === active ? "text-hi" : "text-faint"}`}>
+                  <span
+                    aria-hidden
+                    className="size-[6px] shrink-0 rounded-full"
+                    style={i === active ? { background: "var(--book)" } : { boxShadow: "inset 0 0 0 1px var(--edge)" }}
+                  />
                   {h.kind === "chapter" ? "page" : h.kind === "term" ? "term" : "text"}
                 </span>
                 <span className="min-w-0">
-                  <span className="block truncate text-[1.02rem]">{h.title}</span>
+                  <span className="block truncate font-body text-[1.0625rem]">{h.title}</span>
                   {(h.sub || h.excerpt) && (
                     <span
                       className={`mt-0.5 block truncate text-14 text-mute [&_mark]:bg-transparent [&_mark]:text-current [&_mark]:underline`}
@@ -263,14 +273,23 @@ export function Search() {
             </li>
           ))}
         </ul>
-        <div className="flex items-center gap-4 border-t border-line px-4 py-2 text-11 text-faint">
-          <span>
-            <kbd>↑</kbd> <kbd>↓</kbd> move
+        <div className="flex items-center gap-4 border-t border-line px-4 py-2.5 text-12 text-faint">
+          <span className="flex items-center gap-1">
+            <kbd aria-label="up">
+              <Arrow dir="up" />
+            </kbd>
+            <kbd aria-label="down">
+              <Arrow dir="down" />
+            </kbd>
+            <span className="ml-1">move</span>
           </span>
-          <span>
-            <kbd>↵</kbd> open
+          <span className="flex items-center gap-1">
+            <kbd aria-label="enter">
+              <Arrow dir="enter" />
+            </kbd>
+            <span className="ml-1">open</span>
           </span>
-          <span className="ml-auto">full text search works on the built site</span>
+          <span className="ml-auto max-sm:hidden">full text search works on the built site</span>
         </div>
       </div>
     </div>

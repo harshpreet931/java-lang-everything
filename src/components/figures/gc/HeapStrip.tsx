@@ -1,28 +1,38 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
+import { comet } from "@/components/viz/comet";
 import type { ObjState, ObjView, View } from "./heap";
 import { Heads } from "./kit";
 
-// draws one View from heap.ts: roots on top, the heap as a row of cells, references as
-// arcs underneath. the layout is fixed per figure (lanes, pointer row, arc depth) so the
-// height never jumps between frames. objects slide (css transform) when their address changes.
+// draws one View from heap.ts: roots on top, the heap as a strip of memory drawn in dots,
+// references as dotted arcs underneath. the unlit grid dots are free address space; an
+// object is a block of dots with a meta header column. marking turns its dots live in a
+// wave, sweeping drains them to rings (garbage keeps its outline until the space is reused).
+// when the marker reaches an object, a comet runs down the reference it followed.
+// the layout is fixed per figure (lanes, pointer row, arc depth) so the height never jumps
+// between frames. objects slide (css transform) when their address changes.
 
-const STRIP_H = 30;
+const STRIP_H = 42;
+/** dot pitch inside the strip, and the three dot rows under the label */
+const DP = 8;
+const ROWS = [21, 29, 37];
 const LANE_H = 18;
 const RULER_H = 13;
 const PTR_H = 16;
 
-type Style = { stroke: string; fill: string; text: string; dash?: string };
+type Style = { tone: string; ring?: boolean; dim?: boolean; text: string; big?: boolean };
 
+// each state is a tone and a shape: grey waits on the mark stack (hot, faint), hot is
+// being scanned (hot, bigger), live is marked, dead is a ring, fwd is a forwarding stub.
 const STYLES: Record<ObjState, Style> = {
-  plain: { stroke: "var(--line-2)", fill: "var(--well-2)", text: "var(--ink)" },
-  grey: { stroke: "var(--hot)", fill: "transparent", text: "var(--hot)", dash: "3 2" },
-  hot: { stroke: "var(--hot)", fill: "color-mix(in srgb, var(--hot) 22%, transparent)", text: "var(--hot)" },
-  live: { stroke: "var(--live)", fill: "color-mix(in srgb, var(--live) 12%, transparent)", text: "var(--live)" },
-  dead: { stroke: "var(--dead)", fill: "color-mix(in srgb, var(--dead) 10%, transparent)", text: "var(--dead)", dash: "3 2" },
-  fwd: { stroke: "var(--meta)", fill: "transparent", text: "var(--meta)", dash: "2 2" },
-  new: { stroke: "var(--hot)", fill: "color-mix(in srgb, var(--hot) 22%, transparent)", text: "var(--hot)" },
+  plain: { tone: "var(--dot)", text: "var(--ink)" },
+  grey: { tone: "var(--hot)", dim: true, text: "var(--hot)" },
+  hot: { tone: "var(--hot)", text: "var(--hot)", big: true },
+  live: { tone: "var(--live)", text: "var(--live)" },
+  dead: { tone: "var(--dead)", ring: true, text: "var(--dead)" },
+  fwd: { tone: "var(--meta)", ring: true, dim: true, text: "var(--meta)" },
+  new: { tone: "var(--hot)", text: "var(--hot)", big: true },
 };
 
 export type StripLayout = {
@@ -85,10 +95,36 @@ export function HeapStrip({
     .map((r) => ({ ...r, t: r.to ? byId.get(r.to) : undefined }))
     .sort((a, b) => (b.t ? center(b.t) : -1) - (a.t ? center(a.t) : -1));
 
+  // the marker reaching an object follows a reference: run a comet down every live
+  // reference (or root) into an object the moment it turns hot
+  const svgRef = useRef<SVGSVGElement>(null);
+  const host = useRef<SVGGElement>(null);
+  const hotNow = view.objs.filter((o) => o.state === "hot").map((o) => o.id).join(",");
+  const lastHot = useRef<string | null>(null);
+  useEffect(() => {
+    const before = lastHot.current;
+    lastHot.current = hotNow;
+    if (before === null || !hotNow || before === hotNow || !svgRef.current || !host.current) return;
+    const stops: (() => void)[] = [];
+    for (const idh of hotNow.split(",")) {
+      if (before.split(",").includes(idh)) continue;
+      svgRef.current.querySelectorAll<SVGPathElement>(`path[data-to="${CSS.escape(idh)}"]`).forEach((el) => {
+        const from = el.dataset.from;
+        const src = from === "root" ? null : byId.get(from ?? "");
+        if (src && src.state !== "live" && src.state !== "hot") return;
+        stops.push(comet(el, host.current!, { r: 3.2, ms: 520 }));
+      });
+    }
+    return () => stops.forEach((f) => f());
+    // byId is derived from view; hotNow is the trigger
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hotNow]);
+
   return (
     <div className="min-w-0">
       {(label ?? view.label) && <div className="mb-1 text-11 text-faint">{label ?? view.label}</div>}
       <svg
+        ref={svgRef}
         width={W}
         height={H}
         viewBox={`0 0 ${W} ${H}`}
@@ -99,36 +135,26 @@ export function HeapStrip({
       >
         <Heads id={id} tones={["ref", "meta"]} />
 
-        {/* empty cells */}
-        {Array.from({ length: cells }, (_, i) => (
-          <rect
-            key={`c${i}`}
-            x={x(i) + 0.5}
-            y={sy + 0.5}
-            width={cw - 1}
-            height={STRIP_H - 1}
-            rx={1.5}
-            fill="var(--bg)"
-            stroke="var(--line-2)"
-            strokeOpacity={0.6}
-          />
+        {/* the address space: unlit grid dots under the whole strip */}
+        <g className="g-grid">
+          {Array.from({ length: Math.floor(W / DP) }, (_, i) =>
+            ROWS.map((ry) => <circle key={`g${i}-${ry}`} cx={i * DP + DP / 2} cy={sy + ry} r={0.95} fill="var(--grid)" />),
+          )}
+        </g>
+        {/* cell boundaries: a faint tick per word of memory */}
+        {Array.from({ length: cells + 1 }, (_, i) => (
+          <line key={`t${i}`} x1={x(i)} x2={x(i)} y1={sy + 15} y2={sy + STRIP_H - 1} stroke="var(--line)" strokeWidth={1} />
         ))}
 
         {/* free list runs: GC machinery */}
         {view.free?.map(([a, n]) => (
           <g key={`f${a}`}>
-            <rect
-              x={x(a) + 1.5}
-              y={sy + 1.5}
-              width={n * cw - 3}
-              height={STRIP_H - 3}
-              rx={1.5}
-              fill="color-mix(in srgb, var(--meta) 8%, transparent)"
-              stroke="var(--meta)"
-              strokeDasharray="2 3"
-            />
+            <rect x={x(a) + 1.5} y={sy + 14} width={n * cw - 3} height={STRIP_H - 15} rx={4} fill="var(--well)" />
+            {Array.from({ length: Math.max(1, Math.floor((n * cw - 6) / DP)) }, (_, i) =>
+              ROWS.map((ry) => <circle key={`${i}-${ry}`} cx={x(a) + 4 + i * DP + DP / 2} cy={sy + ry} r={1.6} fill="var(--meta)" opacity={0.75} />),
+            )}
             {n * cw > 34 && (
-              <text x={x(a) + (n * cw) / 2} y={sy + 19} textAnchor="middle" fontSize={10} fill="var(--meta)">
+              <text x={x(a) + (n * cw) / 2} y={sy + 10} textAnchor="middle" fontSize={10} fill="var(--meta)">
                 free {n}
               </text>
             )}
@@ -157,6 +183,8 @@ export function HeapStrip({
             return (
               <path
                 key={`${o.id}-${t}-${k}`}
+                data-from={o.id}
+                data-to={t}
                 d={`M ${x1} ${sy + STRIP_H} L ${x1} ${arcY} C ${x1} ${arcY + depth}, ${x2} ${arcY + depth}, ${x2} ${arcY} L ${x2} ${sy + STRIP_H + 2}`}
                 fill="none"
                 stroke="var(--ref)"
@@ -188,13 +216,13 @@ export function HeapStrip({
                 {r.label}
               </text>
               {path && (
-                <path d={path} fill="none" stroke="var(--ref)" strokeWidth={1.2} markerEnd={`url(#${id}-ref)`} />
+                <path d={path} data-from="root" data-to={r.to ?? ""} fill="none" stroke="var(--ref)" strokeWidth={1.2} markerEnd={`url(#${id}-ref)`} />
               )}
             </g>
           );
         })}
 
-        {/* objects */}
+        {/* objects: a block of dots with a meta header column */}
         {view.objs.map((o) => {
           const st = STYLES[o.state];
           const w = o.size * cw;
@@ -203,35 +231,41 @@ export function HeapStrip({
             transition: "transform 450ms cubic-bezier(0.2,0,0,1)",
           };
           const showFwd = o.fwd !== undefined;
+          const n = Math.max(2, Math.floor((w - 6) / DP));
+          const x0 = (w - n * DP) / 2 + DP / 2;
           return (
             <g key={o.id} style={style}>
-              <rect x={2} y={3} width={w - 4} height={STRIP_H - 6} rx={2} fill="var(--bg)" />
-              <rect
-                x={2}
-                y={3}
-                width={w - 4}
-                height={STRIP_H - 6}
-                rx={2}
-                fill={st.fill}
-                stroke={st.stroke}
-                strokeWidth={o.state === "hot" || o.state === "new" ? 1.6 : 1.2}
-                strokeDasharray={st.dash}
-                style={{ transition: "fill 200ms, stroke 200ms" }}
-              />
-              <text
-                x={w / 2}
-                y={showFwd ? 14 : 19}
-                textAnchor="middle"
-                fontSize={o.id.length > 2 ? 9 : 12}
-                fill={st.text}
-              >
+              <rect x={1.5} y={13} width={w - 3} height={STRIP_H - 14} rx={4} fill="var(--well)" />
+              <g className="lit">
+                {Array.from({ length: n }, (_, c) =>
+                  ROWS.map((ry, r) => {
+                    const head = c === 0;
+                    const tone = head && o.state !== "dead" && o.state !== "fwd" ? "var(--meta)" : st.tone;
+                    const rr = st.big && !head ? 2.75 : 2.45;
+                    return (
+                      <circle
+                        key={`${c}-${r}`}
+                        cx={x0 + c * DP}
+                        cy={ry}
+                        r={st.ring ? 2.2 : rr}
+                        style={{
+                          fill: tone,
+                          stroke: tone,
+                          strokeWidth: st.ring ? 1.1 : 0,
+                          fillOpacity: st.ring ? 0 : 1,
+                          opacity: (st.dim ? 0.42 : 1) * (0.82 + (((c * 7 + r * 3 + o.addr) % 5) * 0.045)),
+                          transition: "fill 300ms, stroke 300ms, fill-opacity 300ms, opacity 300ms, r 200ms",
+                          transitionDelay: `${c * 32}ms`,
+                        }}
+                      />
+                    );
+                  }),
+                )}
+              </g>
+              <text x={4} y={10} fontSize={o.id.length > 2 ? 9.5 : 11.5} fontWeight={500} fill={st.text} style={{ transition: "fill 300ms" }}>
                 {o.id === "new" ? "new" : o.id}
+                {showFwd && <tspan fill="var(--meta)" fontWeight={400}>{` to ${o.fwd}`}</tspan>}
               </text>
-              {showFwd && (
-                <text x={w / 2} y={25} textAnchor="middle" fontSize={9} fill="var(--meta)">
-                  →{o.fwd}
-                </text>
-              )}
             </g>
           );
         })}
@@ -263,10 +297,11 @@ export function HeapStrip({
               strokeDasharray="4 3"
             />
             <text x={(view.ghost.size * cw) / 2} y={16} textAnchor="middle" fontSize={10} fill={view.ghost.ok ? "var(--live)" : "var(--dead)"}>
-              new({view.ghost.size}) {view.ghost.ok ? "fits" : "✗"}
+              new({view.ghost.size}) {view.ghost.ok ? "fits" : "doesn't fit"}
             </text>
           </g>
         )}
+        <g ref={host} className="lit" aria-hidden />
       </svg>
     </div>
   );

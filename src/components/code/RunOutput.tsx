@@ -25,9 +25,9 @@ export function RunOutput({
   if (nothingYet) {
     if (!expected) return null;
     return (
-      <div className="border-t border-line px-4 py-3">
-        <div className="mb-1 font-display text-[0.95rem] text-accent italic">output</div>
-        <pre className="overflow-x-auto text-13 leading-[1.7] whitespace-pre text-hi">{expected}</pre>
+      <div className="border-t border-line px-4 pt-3 pb-4">
+        <div className="mb-1.5 font-ui text-[0.78125rem] text-mute">output</div>
+        <pre className="overflow-x-auto text-[0.84375rem] leading-[1.65] whitespace-pre text-hi tabular">{expected}</pre>
       </div>
     );
   }
@@ -38,13 +38,13 @@ export function RunOutput({
   const matches = expected !== undefined && result?.ok ? norm(stdout) === norm(expected) : undefined;
 
   return (
-    <div className={`border-t border-line px-4 py-3 ${compact ? "" : "min-h-[5.5rem]"}`} aria-live="polite">
+    <div className={`border-t border-line px-4 pt-3 pb-4 ${compact ? "" : "min-h-[5.5rem]"}`} aria-live="polite">
       <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <span className="font-display text-[0.95rem] text-accent italic">
+        <span className="font-ui text-[0.78125rem] text-mute">
           {running ? (status === "loading" ? "loading the compiler…" : "running…") : "output"}
         </span>
         {result && (
-          <span className="font-mono text-11 text-faint tabular">
+          <span className="font-ui text-12 text-faint tabular">
             {result.error
               ? "the runtime failed"
               : `compiled in ${Math.round(result.compileMs)} ms · ran in ${Math.round(result.runMs)} ms`}
@@ -61,7 +61,7 @@ export function RunOutput({
           ))}
         </ul>
       ) : (
-        <pre className="max-h-[22rem] overflow-auto text-13 leading-[1.7] whitespace-pre-wrap text-hi">
+        <pre className="max-h-[22rem] overflow-auto text-[0.84375rem] leading-[1.65] whitespace-pre-wrap text-hi tabular">
           {stdout}
           {stderr && <span className="text-dead">{stderr}</span>}
           {!stdout && !stderr && !running && <span className="text-faint">(no output)</span>}
@@ -85,7 +85,7 @@ export function RunOutput({
           <p className="text-14 text-mute italic">
             the browser runtime (javac + TeaVM, not a real JVM) disagrees with real java here. jdk 25 prints:
           </p>
-          <pre className="mt-1.5 overflow-x-auto text-13 leading-[1.7] whitespace-pre text-hi">{expected}</pre>
+          <pre className="mt-1.5 overflow-x-auto text-[0.84375rem] leading-[1.65] whitespace-pre text-hi tabular">{expected}</pre>
         </div>
       )}
     </div>

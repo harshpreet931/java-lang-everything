@@ -26,7 +26,7 @@ export function Wall({ available }: { available: string[] }) {
               <Glyph name={p.glyph} className="lineart-glyph mt-1 size-[40px] shrink-0 text-ref opacity-80 group-hover:opacity-100" />
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline justify-between gap-3">
-                  <span className="font-display text-[1.05rem] text-accent italic">part {roman[p.n - 1]}</span>
+                  <span className="font-ui text-13 text-mute">part {roman[p.n - 1]}</span>
                   <span className="font-mono text-11 text-faint tabular">
                     {read > 0 ? `${read}/${p.chapters.length} read` : written < p.chapters.length ? `${written}/${p.chapters.length}` : `${p.chapters.length} ch`}
                   </span>
@@ -35,7 +35,7 @@ export function Wall({ available }: { available: string[] }) {
                 <p className="mt-2 text-[0.98rem] leading-[1.55] text-mute">{p.blurb}</p>
                 {read > 0 && (
                   <div className="mt-3 h-px bg-line">
-                    <div className="h-px bg-accent" style={{ width: `${(read / p.chapters.length) * 100}%` }} />
+                    <div className="h-px bg-book" style={{ width: `${(read / p.chapters.length) * 100}%` }} />
                   </div>
                 )}
               </div>

@@ -1,5 +1,5 @@
 import { renderOg, ogSize } from "@/lib/og";
-import { flat, getChapter, pad2 } from "@/content/curriculum";
+import { flat, getChapter } from "@/content/curriculum";
 
 export const alt = "a chapter of java.lang.everything";
 export const size = ogSize;
@@ -13,11 +13,5 @@ export function generateStaticParams() {
 export default async function Image({ params }: { params: Promise<{ part: string; chapter: string }> }) {
   const { part, chapter } = await params;
   const c = getChapter(part, chapter)!;
-  const i = c.part.chapters.findIndex((x) => x.slug === c.slug) + 1;
-  return renderOg({
-    address: c.address,
-    title: c.title,
-    blurb: c.blurb,
-    foot: `part ${pad2(c.part.n)}, ${c.part.title}`,
-  });
+  return renderOg({ address: c.address, title: c.title, blurb: c.blurb, glyph: c.part.glyph });
 }

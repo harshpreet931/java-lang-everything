@@ -190,8 +190,8 @@ export function Chip({ children, tone, className = "" }: { children: ReactNode; 
 /** svg arrowhead marker. give each figure its own id. */
 export function Arrowhead({ id, color = "var(--ref)" }: { id: string; color?: string }) {
   return (
-    <marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0.5 L7.5 4 L0 7.5 z" fill={color} />
+    <marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke={color} strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
     </marker>
   );
 }

@@ -33,16 +33,22 @@ export function Quiz({
   const right = picked === answer;
 
   return (
-    <div className="quiz measure mx-auto my-12 rounded-lg bg-well px-5 py-6 shadow-[inset_0_0_0_1px_var(--line)] sm:px-7" role="group" aria-labelledby={id}>
+    <div className="quiz measure mx-auto my-12 rounded-[10px] px-4 pt-5 pb-6 shadow-[inset_0_0_0_1px_var(--line-2)] sm:px-[22px]" role="group" aria-labelledby={id}>
       <div id={id} className="mb-3 flex items-baseline justify-between gap-4">
-        <span className="font-display text-[1.15rem] text-hot italic">{label}</span>
+        <span className="flex items-baseline gap-2.5 text-hi">
+          <span
+            aria-hidden
+            className="size-[9px] shrink-0 self-center rounded-full bg-hot shadow-[0_0_0_3px_color-mix(in_oklab,var(--hot)_24%,transparent)]"
+          />
+          <span className="font-ui text-13 font-medium">{label}</span>
+        </span>
         {revealed && (
-          <span className="text-15 italic" style={{ color: right ? "var(--live)" : "var(--dead)" }}>{right ? "yep." : "not quite."}</span>
+          <span className="text-[1.0625rem] italic" style={{ color: right ? "var(--live)" : "var(--dead)" }}>{right ? "yep." : "not quite."}</span>
         )}
       </div>
       {question && <div className="mb-4 text-[1.12rem] leading-[1.6] text-hi">{question}</div>}
       <Revealed.Provider value={revealed}>
-        <div className="[&_.code-frame]:my-4 [&_.code-frame]:bg-bg">{children}</div>
+        <div className="[&_.code-frame]:my-4">{children}</div>
       </Revealed.Provider>
       <div className="mt-4 flex flex-wrap gap-2" role="radiogroup">
         {options.map((o, i) => {
@@ -58,7 +64,7 @@ export function Quiz({
                 setPicked(i);
                 track("quiz_answered", { correct: i === answer, kind: label });
               }}
-              className="act !min-h-9 !text-13 disabled:!pointer-events-none disabled:!opacity-100"
+              className="act !h-auto !min-h-10 max-w-full min-w-0 !py-2 text-left [overflow-wrap:anywhere] !font-mono !text-13 !leading-[1.4] !whitespace-normal disabled:!pointer-events-none disabled:!opacity-100"
               style={
                 isAnswer
                   ? { borderColor: "var(--live)", color: "var(--live)" }
@@ -74,7 +80,7 @@ export function Quiz({
           );
         })}
         {revealed && (
-          <button onClick={() => setPicked(null)} className="word ml-auto !text-12">
+          <button onClick={() => setPicked(null)} className="word ml-auto">
             try again
           </button>
         )}
@@ -148,10 +154,17 @@ function Side({ children, label, tone }: { children: ReactNode; label?: string; 
   return (
     <div className="min-w-0 [&_.code-frame]:my-0 [&_.code-frame]:mt-3">
       <div className="flex items-baseline gap-2.5">
-        <span className="font-display text-[1.15rem] italic" style={{ color: `var(--${tone})` }}>{tone === "dead" ? "don't" : "do"}</span>
-        {label && <span className="text-15 text-mute">{label}</span>}
+        <span className="flex items-baseline gap-2" style={{ color: `var(--${tone})` }}>
+          <span
+            aria-hidden
+            className="size-[9px] shrink-0 self-center rounded-full"
+            style={tone === "dead" ? { boxShadow: "inset 0 0 0 1.5px var(--dead)" } : { background: "var(--live)" }}
+          />
+          <span className="font-ui text-13 font-medium">{tone === "dead" ? "don't" : "do"}</span>
+        </span>
+        {label && <span className="text-[1.0625rem] text-mute italic">{label}</span>}
       </div>
-      <div className="text-[1.04rem] leading-[1.7] [&>p]:mt-3">{children}</div>
+      <div className="text-[1.06rem] leading-[1.6] [&>p]:mt-3">{children}</div>
     </div>
   );
 }

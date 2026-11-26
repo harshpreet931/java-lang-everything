@@ -1,10 +1,13 @@
 "use client";
 
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { comet } from "@/components/viz/comet";
 
 // happens-before, drawn. two threads as columns of actions. grey arrows are program
 // order. the amber arrow is the synchronizes-with edge each rule adds. when there's a
 // chain from the write of data to the read of data, the read is guaranteed to see it.
+// picking a rule (or replay) walks the chain: a comet runs along each edge in order, the
+// edge turns live behind it, and the read only lights when the chain reaches it.
 
 type Ev = { lane: 0 | 1; row: number; label: string; sub?: string; role?: "w" | "r" };
 type Sc = {
@@ -99,7 +102,7 @@ const SCENES: Sc[] = [
   },
 ];
 
-type Path = { d: string; kind: "po" | "sw" | "none"; on: boolean; lx?: number; ly?: number; label?: string };
+type Path = { d: string; kind: "po" | "sw" | "none"; on: boolean; a: number; b: number; lx?: number; ly?: number; label?: string };
 
 export function HappensBefore() {
   const [k, setK] = useState(0);
@@ -108,6 +111,46 @@ export function HappensBefore() {
   const [paths, setPaths] = useState<Path[]>([]);
   const id = useId().replace(/:/g, "");
   const rows = Math.max(...sc.events.map((e) => e.row)) + 1;
+
+  // walking the chain: run = how many chain edges are lit so far (null = all, at rest)
+  const [run, setRun] = useState<{ k: number; lit: number; n: number } | null>(null);
+  const svg = useRef<SVGSVGElement>(null);
+  const host = useRef<SVGGElement>(null);
+  const seq = (sc.chain.length ? sc.chain.slice(0, -1).map((a, j) => [a, sc.chain[j + 1]] as const) : sc.none ? [[sc.none[0] - 1, sc.none[0]] as const] : []).filter(
+    ([a, b]) => a >= 0 && paths.some((p) => p.a === a && p.b === b),
+  );
+  const pick = (j: number) => {
+    setK(j);
+    setRun({ k: j, lit: 0, n: -1 });
+  };
+  useEffect(() => {
+    if (!run || run.k !== k || !paths.length || !svg.current || !host.current) return;
+    if (run.lit >= seq.length) {
+      setRun(null);
+      return;
+    }
+    const [a, b] = seq[run.lit];
+    const el = svg.current.querySelector<SVGPathElement>(`path[data-ab="${a}-${b}"]`);
+    if (!el) {
+      setRun(null);
+      return;
+    }
+    const sw = paths.find((p) => p.a === a && p.b === b)?.kind === "sw";
+    return comet(el, host.current, {
+      colour: sw ? "var(--hot)" : sc.ok ? "var(--live)" : "var(--ink)",
+      r: 3.2,
+      ms: sw ? 620 : 360,
+      onDone: () => setRun((r) => (r && r.k === k ? { ...r, lit: r.lit + 1 } : r)),
+    });
+    // seq is derived from sc and paths
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run, k, paths]);
+  const litEdge = (p: Path) => {
+    if (!run) return true;
+    const j = seq.findIndex(([a, b]) => a === p.a && b === p.b);
+    return j < 0 || j < run.lit;
+  };
+  const settled = !run;
 
   useLayoutEffect(() => {
     const el = box.current;
@@ -134,7 +177,7 @@ export function HappensBefore() {
         for (let j = 0; j + 1 < ids.length; j++) {
           const a = r(ids[j]);
           const b = r(ids[j + 1]);
-          out.push({ d: `M ${a.cx} ${a.b + 2} L ${b.cx} ${b.t - 3}`, kind: "po", on: inChain(ids[j], ids[j + 1]) });
+          out.push({ d: `M ${a.cx} ${a.b + 2} L ${b.cx} ${b.t - 3}`, kind: "po", on: inChain(ids[j], ids[j + 1]), a: ids[j], b: ids[j + 1] });
         }
       }
       const cross = (pair: [number, number], kind: "sw" | "none", label: string) => {
@@ -149,6 +192,8 @@ export function HappensBefore() {
           d: `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`,
           kind,
           on: kind === "sw",
+          a: pair[0],
+          b: pair[1],
           lx: mx,
           ly: (y1 + y2) / 2,
           label,
@@ -168,10 +213,13 @@ export function HappensBefore() {
     <div>
       <div className="mb-5 flex flex-wrap gap-1" role="tablist" aria-label="happens-before rules">
         {SCENES.map((x, j) => (
-          <button key={x.key} role="tab" aria-selected={k === j} className="word" onClick={() => setK(j)}>
+          <button key={x.key} role="tab" aria-selected={k === j} className="word" onClick={() => pick(j)}>
             {x.key}
           </button>
         ))}
+        <button className="act ml-auto" onClick={() => pick(k)} disabled={!!run}>
+          walk the chain
+        </button>
       </div>
 
       <div ref={box} className="relative">
@@ -182,15 +230,15 @@ export function HappensBefore() {
             </div>
           ))}
           {sc.events.map((e, i) => {
-            const tone = e.role === "r" ? (sc.ok ? "var(--live)" : "var(--dead)") : e.role === "w" ? "var(--ink)" : undefined;
+            const tone = e.role === "r" ? (settled ? (sc.ok ? "var(--live)" : "var(--dead)") : undefined) : e.role === "w" ? "var(--ink)" : undefined;
             return (
               <div key={`${sc.key}-${i}`} className="flex items-center justify-center py-2.5" style={{ gridColumn: e.lane + 1, gridRow: e.row + 2 }}>
                 <div
                   data-ev={i}
-                  className="obj-in min-w-0 rounded-md bg-well px-2.5 py-1.5 text-center"
+                  className="obj-in min-w-0 rounded-lg bg-well px-2.5 py-1.5 text-center transition-[box-shadow] duration-300"
                   style={{ boxShadow: `inset 0 0 0 1px ${tone ?? "var(--line-2)"}` }}
                 >
-                  <div className="text-12 whitespace-nowrap" style={{ color: tone ?? "var(--hi)" }}>
+                  <div className="text-[11px] whitespace-nowrap transition-colors duration-300 sm:text-12" style={{ color: tone ?? "var(--hi)" }}>
                     {e.label}
                   </div>
                   {e.sub && <div className="text-[10px] leading-3 text-faint">{e.sub}</div>}
@@ -199,26 +247,41 @@ export function HappensBefore() {
             );
           })}
         </div>
-        <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
+        <svg ref={svg} className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
           <defs>
             {(["po", "on", "sw", "none"] as const).map((m) => (
-              <marker key={m} id={`${id}-${m}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <marker key={m} id={`${id}-${m}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
                 <path
-                  d="M0 0.5 L7.5 4 L0 7.5 z"
-                  fill={m === "po" ? "var(--line-2)" : m === "on" ? "var(--live)" : m === "sw" ? "var(--hot)" : "var(--dead)"}
+                  d="M1.6 1.2 L7 4 L1.6 6.8"
+                  fill="none"
+                  strokeWidth={1.3}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  stroke={m === "po" ? "var(--edge)" : m === "on" ? "var(--live)" : m === "sw" ? "var(--hot)" : "var(--dead)"}
                 />
               </marker>
             ))}
           </defs>
           {paths.map((p, i) => {
-            const stroke = p.kind === "sw" ? "var(--hot)" : p.kind === "none" ? "var(--dead)" : p.on ? "var(--live)" : "var(--line-2)";
-            const m = p.kind === "sw" ? "sw" : p.kind === "none" ? "none" : p.on ? "on" : "po";
+            const lit = litEdge(p);
+            const stroke = p.kind === "sw" ? (lit ? "var(--hot)" : "var(--line-2)") : p.kind === "none" ? "var(--dead)" : p.on && lit ? "var(--live)" : "var(--line-2)";
+            const m = p.kind === "sw" ? (lit ? "sw" : "po") : p.kind === "none" ? "none" : p.on && lit ? "on" : "po";
             return (
               <g key={`${sc.key}-${i}`} className="arrow-in">
-                <path d={p.d} fill="none" stroke={stroke} strokeWidth={p.kind === "po" ? 1.2 : 1.5} strokeDasharray={p.kind === "none" ? "4 4" : undefined} markerEnd={`url(#${id}-${m})`} />
+                <path
+                  data-ab={`${p.a}-${p.b}`}
+                  d={p.d}
+                  fill="none"
+                  stroke={stroke}
+                  strokeWidth={p.kind === "po" ? 1.2 : 1.5}
+                  strokeDasharray={p.kind === "none" ? "4 4" : undefined}
+                  markerEnd={`url(#${id}-${m})`}
+                  style={{ transition: "stroke 300ms" }}
+                />
               </g>
             );
           })}
+          <g ref={host} className="lit" />
         </svg>
         {paths
           .filter((p) => p.label)
@@ -235,7 +298,9 @@ export function HappensBefore() {
 
       <div className="mt-5 flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-line pt-3 text-13">
         <span className="text-faint">result:</span>
-        <span style={{ color: sc.ok ? "var(--live)" : "var(--dead)" }}>{sc.result}</span>
+        <span className="transition-colors duration-300" style={{ color: !settled ? "var(--faint)" : sc.ok ? "var(--live)" : "var(--dead)" }}>
+          {settled ? sc.result : "following the chain..."}
+        </span>
       </div>
       <p className="mt-2 min-h-[3.2em] font-serif text-17 leading-[1.6] text-ink" aria-live="polite">
         {sc.rule}

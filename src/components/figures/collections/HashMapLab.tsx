@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { reducedMotion } from "@/components/viz/comet";
 import { Console, Row, bits32, useReducedMotion, useTimers, useWidth } from "./kit";
 import * as H from "./hashmapSim";
 
@@ -379,6 +380,40 @@ function Table({ s, focus, flash }: { s: H.HState; focus: Focus; flash: string[]
   const step = colW >= 22 ? 1 : colW >= 11 ? 4 : 8;
   const fb = focus?.index ?? -1;
 
+  // following a bucket's reference: a comet drops from the bucket slot down the chain to
+  // the node this operation reached (the new node on put, the node equals() matched on get)
+  const comet = useRef<HTMLSpanElement>(null);
+  const chain = fb >= 0 ? (s.table?.[fb]?.nodes ?? []) : [];
+  const targetK = !focus
+    ? -1
+    : focus.mode === "get"
+      ? focus.checked !== undefined
+        ? Math.max(0, (focus.tree ? 1 : focus.checked) - 1)
+        : -1
+      : focus.mode === "put"
+        ? chain.findIndex((e) => e.key === focus.key)
+        : -1;
+  const sig = focus ? `${focus.mode}:${focus.key}:${fb}:${targetK}:${n}` : "";
+  const lastSig = useRef(sig);
+  useEffect(() => {
+    if (sig === lastSig.current) return;
+    lastSig.current = sig;
+    const el = comet.current;
+    if (!el || fb < 0 || targetK < 0 || reducedMotion()) return;
+    const x = fb * colW + colW / 2 - 4;
+    const y0 = 14 + slotH / 2 - 4;
+    const y1 = top + targetK * (nodeH + gap) + nodeH / 2 - 4;
+    const a = el.animate(
+      [
+        { transform: `translate(${x}px, ${y0}px)`, opacity: 1 },
+        { transform: `translate(${x}px, ${y1}px)`, opacity: 1, offset: 0.85 },
+        { transform: `translate(${x}px, ${y1}px)`, opacity: 0 },
+      ],
+      { duration: 260 + targetK * 90, easing: "cubic-bezier(0.2,0,0,1)" },
+    );
+    return () => a.cancel();
+  }, [sig, fb, targetK, colW, top, nodeH, gap]);
+
   return (
     <div ref={wrap} className="relative w-full" style={{ height }} aria-label={`hash table with ${n} buckets`} role="img">
       {/* bucket index labels */}
@@ -393,7 +428,8 @@ function Table({ s, focus, flash }: { s: H.HState; focus: Focus; flash: string[]
           </span>
         ) : null,
       )}
-      {/* slots */}
+      {/* slots: one dot per bucket. empty = unlit grid dot, a chain = a ref dot (the bucket
+          holds a reference to its first node), the bucket being looked at = a hot ring */}
       {Array.from({ length: n }, (_, j) => {
         const bin = s.table?.[j];
         const has = !!bin?.nodes.length;
@@ -401,22 +437,21 @@ function Table({ s, focus, flash }: { s: H.HState; focus: Focus; flash: string[]
         return (
           <div
             key={`s${j}`}
-            className="absolute flex items-center justify-center transition-[left,width] duration-300 ease-jle"
+            className="absolute flex items-center justify-center rounded-full transition-[left,width,box-shadow] duration-300 ease-jle"
             style={{
-              left: j * colW,
-              width: colW + 1,
+              left: j * colW + (colW - Math.min(colW, slotH)) / 2,
+              width: Math.min(colW, slotH),
               top: 14,
-              height: slotH,
-              boxShadow: `inset 0 0 0 1px ${isF ? "var(--hot)" : "var(--line-2)"}`,
-              background: isF ? "color-mix(in srgb, var(--hot) 10%, transparent)" : undefined,
+              height: Math.min(colW, slotH),
+              boxShadow: isF ? "inset 0 0 0 1.5px var(--hot)" : "none",
               opacity: s.table ? 1 : 0.4,
               zIndex: isF ? 2 : 1,
             }}
           >
             {has ? (
-              <span className="size-[6px] rounded-full bg-ref" />
+              <span className={`rounded-full bg-ref ${colW >= 14 ? "size-[8px]" : "size-[5px]"}`} />
             ) : (
-              <span className="text-[10px] text-faint">{colW > 8 ? "·" : ""}</span>
+              <span className={`rounded-full bg-grid ${colW >= 14 ? "size-[4px]" : "size-[3px]"}`} />
             )}
           </div>
         );
@@ -447,22 +482,31 @@ function Table({ s, focus, flash }: { s: H.HState; focus: Focus; flash: string[]
               title={`${e.key}=${e.value} (hash ${e.hash})`}
             >
               {full && (
-                <span className="absolute left-1/2 w-px bg-ref" style={{ top: -gap - (k === 0 ? 4 : 0), height: gap + (k === 0 ? 4 : 0) }} />
+                <span
+                  className="absolute left-1/2 w-[4px] -translate-x-1/2"
+                  style={{
+                    top: -gap - (k === 0 ? 6 : 0),
+                    height: gap + (k === 0 ? 6 : 0),
+                    background: "radial-gradient(circle, var(--ref) 0 1.4px, transparent 1.8px) 50% 0 / 4px 4px repeat-y",
+                  }}
+                />
               )}
               <div
-                className="flex h-full w-full items-center justify-center overflow-hidden rounded-[1px] text-[11px] whitespace-nowrap"
+                className={`flex h-full w-full items-center overflow-hidden text-[11px] whitespace-nowrap transition-[background-color,box-shadow,color] duration-300 ${full ? "justify-start rounded-[6px]" : "justify-center rounded-full"}`}
                 style={{
-                  boxShadow: `inset 0 0 0 1px ${tone ? `var(--${tone})` : bin.tree ? "var(--ink)" : "var(--line-2)"}`,
-                  background: full ? "var(--bg)" : tone ? `var(--${tone})` : bin.tree ? "var(--ink)" : "var(--mute)",
+                  boxShadow: full ? `inset 0 0 0 ${tone ? 1.5 : 1}px ${tone ? `var(--${tone})` : bin.tree ? "var(--ink)" : "var(--line-2)"}` : "none",
+                  background: full ? "var(--well)" : tone ? `var(--${tone})` : bin.tree ? "var(--ink)" : "var(--dot)",
                   color: tone ? `var(--${tone})` : "var(--hi)",
                 }}
               >
-                {full ? <span className="truncate px-1">{e.key}</span> : null}
+                {full && <span className="ml-[4px] h-[12px] w-[3px] shrink-0 rounded-full bg-meta opacity-80" aria-hidden />}
+                {full ? <span className="truncate px-1.5">{e.key}</span> : null}
               </div>
             </div>
           );
         }),
       )}
+      <span ref={comet} className="pointer-events-none absolute top-0 left-0 z-10 size-[8px] rounded-full bg-ref opacity-0" style={{ boxShadow: "0 0 0 3px color-mix(in oklab, var(--ref) 22%, transparent)" }} aria-hidden />
       {/* tree labels */}
       {(s.table ?? []).map((bin, j) =>
         bin.tree ? (

@@ -106,11 +106,11 @@ export function ThreadStates() {
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
         <svg viewBox="0 0 424 252" className="block w-full max-w-[560px]" style={{ fontFamily: "var(--font-code)" }} role="img" aria-label="the six thread states and the eight transitions between them">
           <defs>
-            <marker id={`${id}-a`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--line-2)" />
+            <marker id={`${id}-a`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--line-2)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
-            <marker id={`${id}-h`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--hot)" />
+            <marker id={`${id}-h`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--hot)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
           </defs>
 

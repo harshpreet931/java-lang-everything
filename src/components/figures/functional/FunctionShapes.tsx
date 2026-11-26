@@ -214,7 +214,7 @@ export function FunctionGrid() {
   const total = GRID.reduce((a, r) => a + r.cells.filter(Boolean).length + (r.alt ? 1 : 0), 0);
 
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
       <div className="overflow-x-auto pb-1">
         <table className="w-full min-w-[620px] table-fixed border-collapse text-11">
           <thead>

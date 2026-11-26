@@ -1,11 +1,15 @@
 import { Rail } from "@/components/learn/Rail";
+import { Footer } from "@/components/site/Footer";
 import { availableHrefs } from "@/lib/content";
 
 export default function BookLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mx-auto flex max-w-[1600px]">
-      <Rail available={availableHrefs()} />
-      <div className="min-w-0 flex-1">{children}</div>
-    </div>
+    <>
+      <div className="mx-auto flex max-w-[1600px]">
+        <Rail available={availableHrefs()} />
+        <div className="min-w-0 flex-1">{children}</div>
+      </div>
+      <Footer />
+    </>
   );
 }

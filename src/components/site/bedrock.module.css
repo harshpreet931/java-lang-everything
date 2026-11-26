@@ -1,0 +1,114 @@
+/* the floor at the bottom of every page (Bedrock.tsx). the band is its own size container: the dot
+   pitch is the band's width over the layout's visible columns, so the height is known before any js
+   runs and nothing shifts. */
+
+.band {
+  container-type: inline-size;
+  /* the unlit floor: paper-quiet. structure a step over the address space, the word a step over that */
+  --bk-1: color-mix(in srgb, var(--edge) 55%, var(--faint));
+  --bk-2: color-mix(in srgb, var(--line-2) 60%, var(--edge));
+  --bk-3: color-mix(in srgb, var(--line-2) 88%, var(--edge));
+  --bk-4: var(--bk-3);
+  --bk-5: var(--bk-3);
+  --bk-6: var(--bk-3);
+  --bk-7: color-mix(in srgb, var(--line-2) 70%, var(--edge));
+  --bk-8: var(--line-2);
+  --bk-9: var(--line-2);
+  --bk-10: color-mix(in srgb, var(--line-2) 80%, var(--edge));
+  /* the one reference from the stack into the word: visible before the lamp finds it */
+  --bk-11: color-mix(in oklab, var(--ref) 62%, var(--bg));
+  /* and the stack frame it leaves from */
+  --bk-13: color-mix(in srgb, var(--line-2) 35%, var(--edge));
+  --bk-14: color-mix(in srgb, var(--line-2) 60%, var(--edge));
+}
+:root[data-theme="dark"] .band {
+  --bk-1: color-mix(in srgb, var(--edge) 65%, var(--mute));
+  --bk-2: color-mix(in srgb, var(--line-2) 55%, var(--edge));
+  --bk-3: color-mix(in srgb, var(--line-2) 84%, var(--edge));
+  --bk-10: color-mix(in srgb, var(--line-2) 75%, var(--edge));
+  --bk-11: color-mix(in oklab, var(--ref) 68%, var(--bg));
+}
+
+.floor {
+  position: relative;
+  overflow: hidden;
+  touch-action: pan-y;
+  cursor: crosshair;
+  -webkit-tap-highlight-color: transparent;
+  --p: calc(100cqw / var(--vc-p));
+  height: calc(var(--p) * var(--rows-p));
+}
+@container (min-width: 640px) {
+  .floor {
+    --p: calc(100cqw / var(--vc-t));
+    height: calc(var(--p) * var(--rows-t));
+  }
+}
+@container (min-width: 1100px) {
+  .floor {
+    --p: min(calc(100cqw / var(--vc-d)), 9px);
+    height: calc(var(--p) * var(--rows-d));
+  }
+}
+
+/* the static frame: the same picture the canvas lights, drawn from public/bedrock.svg.
+   the top six rows fade up out of the paper */
+.paper {
+  position: absolute;
+  inset: 0;
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.16), black calc(var(--p) * 6));
+  mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.16), black calc(var(--p) * 6));
+}
+.paper svg {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  height: 100%;
+  translate: -50% 0;
+  display: none;
+  overflow: visible;
+}
+.paper .p {
+  display: block;
+  width: calc(var(--p) * var(--dc-p));
+}
+@container (min-width: 640px) {
+  .paper .p {
+    display: none;
+  }
+  .paper .t {
+    display: block;
+    width: calc(var(--p) * var(--dc-t));
+  }
+}
+@container (min-width: 1100px) {
+  .paper .t {
+    display: none;
+  }
+  .paper .d {
+    display: block;
+    width: calc(var(--p) * var(--dc-d));
+  }
+}
+
+/* the lamp (bedrock-lamp.ts) adds this canvas once the footer nears the viewport */
+.floor canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* the line between paper and floor: a pointer hint, or a tap hint on touch screens */
+.hintTap {
+  display: none;
+}
+@media (hover: none) {
+  .hintTap {
+    display: inline;
+  }
+  .hintLamp {
+    display: none;
+  }
+}

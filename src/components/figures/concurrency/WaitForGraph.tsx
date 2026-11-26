@@ -19,11 +19,11 @@ export function WaitForGraph() {
   return (
     <svg viewBox="0 0 360 200" className="mx-auto block w-full max-w-[520px]" style={{ fontFamily: "var(--font-code)" }} role="img" aria-label="alice holds account A and waits for account B; bob holds B and waits for A: a cycle">
       <defs>
-        <marker id={`${id}-m`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-          <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--meta)" />
+        <marker id={`${id}-m`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+          <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--meta)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
         </marker>
-        <marker id={`${id}-d`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-          <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--dead)" />
+        <marker id={`${id}-d`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+          <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--dead)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
         </marker>
       </defs>
       {box(70, 45, "alice", "thread", "var(--dead)")}

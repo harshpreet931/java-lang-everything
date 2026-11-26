@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { LaneTable, type LaneRow } from "./Lanes";
 import { Narrate, Row, Words, rng, useReducedMotion, useTicker } from "./ui";
 
@@ -104,6 +104,20 @@ export function RaceSim() {
   const reduce = useReducedMotion();
 
   const total = 2 * iters;
+  // what the last step moved: a read pulls count into a thread's r, a write pushes r back
+  const prevS = useRef(s);
+  const move = useMemo(() => {
+    const p = prevS.current;
+    for (const i of [0, 1] as const) {
+      if (p.th[i].pc === 0 && s.th[i].pc === 1) return { i, kind: "read" as const, k: s.rows.length };
+      if (p.th[i].pc === 2 && s.th[i].done > p.th[i].done) return { i, kind: "write" as const, k: s.rows.length };
+    }
+    return null;
+  }, [s]);
+  useEffect(() => {
+    prevS.current = s;
+  }, [s]);
+  const done = s.th[0].done + s.th[1].done;
   const finished = s.th[0].done >= iters && s.th[1].done >= iters;
 
   const reset = (m = mode, it = iters) => {
@@ -177,21 +191,42 @@ export function RaceSim() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:gap-5">
         <ThreadPanel i={0} s={s} iters={iters} mode={mode} onStep={() => go(0)} className="order-2 sm:order-1" />
         <div className="order-1 col-span-2 flex flex-col items-center justify-center sm:order-2 sm:col-span-1">
-          <div className="text-11 text-faint">shared · heap</div>
-          <div
-            className="mt-1.5 flex min-w-[96px] flex-col items-center rounded-md bg-well px-5 py-3"
-            style={{
-              boxShadow: `inset 0 0 0 1px ${verdict?.k === "dead" || s.lost ? "var(--dead)" : verdict ? "var(--live)" : "var(--line-2)"}`,
-            }}
-          >
-            <span className="text-12 text-mute">count</span>
-            <span
-              key={s.count + ":" + s.lost}
-              className="flash mt-0.5 text-28 leading-none font-light text-hi tabular"
-              style={{ color: s.lost ? "var(--dead)" : undefined }}
+          <div className="font-ui text-12 text-faint">shared, on the heap</div>
+          <div className="mt-1.5 flex items-center gap-2">
+            <Wire on={move?.i === 0} k={move?.i === 0 ? move.k : 0} back={move?.kind === "read"} />
+            <div
+              className="flex min-w-[112px] flex-col items-center rounded-lg bg-well px-4 py-3 transition-[box-shadow] duration-300"
+              style={{
+                boxShadow: `inset 0 0 0 ${s.lost || verdict ? 1.5 : 1}px ${verdict?.k === "dead" || s.lost ? "var(--dead)" : verdict ? "var(--live)" : "var(--line-2)"}`,
+              }}
             >
-              {s.count}
-            </span>
+              <span className="font-ui text-12 text-mute">count</span>
+              <span
+                key={s.count + ":" + s.lost}
+                className="flash mt-0.5 text-28 leading-none font-light text-hi tabular"
+                style={{ color: s.lost ? "var(--dead)" : undefined }}
+              >
+                {s.count}
+              </span>
+              {/* one dot per count++ that has finished: lit live if it landed, a dead ring if it was lost */}
+              <span className="mt-2 flex gap-[5px]" aria-label={`${s.count} of ${done} increments landed`}>
+                {Array.from({ length: total }, (_, k) => {
+                  const landed = k < s.count;
+                  const lost = !landed && k < done;
+                  return (
+                    <span
+                      key={k}
+                      className="size-[7px] rounded-full transition-[background-color,box-shadow] duration-300"
+                      style={{
+                        background: landed ? "var(--live)" : lost ? "transparent" : "var(--grid)",
+                        boxShadow: lost ? "inset 0 0 0 1.4px var(--dead)" : "none",
+                      }}
+                    />
+                  );
+                })}
+              </span>
+            </div>
+            <Wire on={move?.i === 1} k={move?.i === 1 ? move.k : 0} back={move?.kind === "write"} />
           </div>
           {mode === "synchronized" && (
             <div className="mt-2 text-11" style={{ color: s.lock === -1 ? "var(--faint)" : "var(--meta)" }}>
@@ -277,5 +312,18 @@ function ThreadPanel({
         {done ? "done" : blocked ? "blocked" : `step ${NAMES[i]}`}
       </button>
     </div>
+  );
+}
+
+/** a short run of dots between a thread and count. it lights in order when a value moves:
+ *  towards count on a write, towards the thread on a read. hidden on phones (stacked layout). */
+function Wire({ on, k, back }: { on: boolean; k: number; back?: boolean }) {
+  const n = 5;
+  return (
+    <span key={on ? k : "idle"} className={`jle-wire hidden w-[44px] sm:flex ${on ? "on" : ""}`} aria-hidden>
+      {Array.from({ length: n }, (_, j) => (
+        <i key={j} style={{ ["--n" as string]: back ? n - 1 - j : j, ["--c" as string]: "var(--hot)" } as CSSProperties} />
+      ))}
+    </span>
   );
 }

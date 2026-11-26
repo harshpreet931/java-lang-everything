@@ -167,11 +167,11 @@ export function LinkedNodes() {
       <div ref={wrap} className="min-w-0">
         <svg fontFamily="var(--font-code)" viewBox={`0 0 ${vbW} ${vbH}`} className={`block w-full ${narrow ? "max-w-[320px]" : ""}`} role="img" aria-label={`a LinkedList with ${size} nodes, each linked to the next and the previous`}>
           <defs>
-            <marker id={ah} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+            <marker id={ah} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
-            <marker id={ahDim} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--dead)" />
+            <marker id={ahDim} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--dead)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
           </defs>
 

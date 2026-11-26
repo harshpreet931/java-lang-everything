@@ -26,6 +26,8 @@ const nextConfig = {
   images: { unoptimized: true },
   pageExtensions: ["ts", "tsx", "mdx"],
   reactStrictMode: true,
+  // lets several dev servers share the folder without fighting over .next (NEXT_DIST_DIR=.next-b pnpm dev:poll -p 3124)
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
 };
 
 export default withMDX(nextConfig);

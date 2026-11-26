@@ -1,0 +1,288 @@
+/* layout for /learn (the shelf) and /learn/[part] (the opener). the covers style themselves. */
+
+.page {
+  --pg-title: var(--font-title, var(--font-display)), Georgia, serif;
+  --pg-body: var(--font-body, var(--font-serif)), Georgia, serif;
+  --pg-ui: var(--font-ui, var(--font-serif)), system-ui, sans-serif;
+  --pg-mono: var(--font-mono, var(--font-code)), ui-monospace, monospace;
+}
+
+/* ---- /learn ---- */
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px 32px;
+  margin-bottom: 40px;
+}
+.h1 {
+  margin: 0;
+  font: 400 clamp(2.5rem, 1.6rem + 2.4vw, 3.5rem) / 1.02 var(--pg-title);
+  letter-spacing: -0.018em;
+  color: var(--hi);
+  text-wrap: balance;
+}
+/* the lede's column has a fixed measure, not 46ch: ch is the fallback face's until piazzolla loads, and the
+   box (and the shelf under it) would change size on the swap */
+.head > div {
+  flex: 0 1 30.5rem;
+  min-width: 0;
+}
+.lede {
+  margin: 0;
+  font: italic 400 17px/1.55 var(--pg-body);
+  color: var(--mute);
+  text-wrap: pretty;
+}
+.lede :global(a) {
+  font-style: normal;
+}
+
+.shelf {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 36px 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.vol {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 6px;
+  outline-offset: 6px;
+}
+.blurb {
+  display: -webkit-box;
+  margin: 14px 2px 0 0;
+  overflow: hidden;
+  font: 400 14.5px/1.45 var(--pg-body);
+  color: var(--mute);
+  text-wrap: pretty;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.vol:hover .blurb {
+  color: var(--ink);
+}
+
+/* the first visit only: the covers are shelved one after another. an inline script sets
+   html[data-shelve] before the shelf paints, so without js (or on a second visit) the
+   covers simply are there. 17 x 18ms + 260ms stays under 600ms. */
+:global(html[data-shelve]) .shelf > li {
+  animation: shelve 260ms var(--ease, cubic-bezier(0.2, 0, 0, 1)) both;
+  animation-delay: calc(var(--i) * 18ms);
+}
+@keyframes shelve {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  :global(html[data-shelve]) .shelf > li {
+    animation: none;
+  }
+}
+
+.foot {
+  margin: 48px 0 0;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  font: 400 13px/1.6 var(--pg-ui);
+  color: var(--faint);
+}
+
+@media (max-width: 1099px) {
+  .shelf {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@media (max-width: 759px) {
+  .shelf {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 28px 16px;
+  }
+}
+@media (max-width: 559px) {
+  .head {
+    margin-bottom: 28px;
+  }
+  .shelf {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .blurb {
+    display: none;
+  }
+}
+
+/* ---- /learn/[part] ---- */
+
+.opener {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 48px;
+  align-items: end;
+}
+.openerCover {
+  width: 248px;
+}
+.crumb {
+  font: 400 13px/1.4 var(--pg-mono);
+  color: var(--faint);
+}
+.crumb a {
+  color: var(--mute);
+  text-decoration: none;
+}
+.crumb a:hover {
+  color: var(--hi);
+}
+.partTitle {
+  margin: 14px 0 0;
+  max-width: 9.5em; /* 16ch of redaction, in em so the fallback face does not change the measure */
+  font: 400 clamp(2.4rem, 1.7rem + 2vw, 3.25rem) / 1.03 var(--pg-title);
+  letter-spacing: -0.018em;
+  color: var(--hi);
+  text-wrap: balance;
+}
+.partBlurb {
+  max-width: 29.75em; /* 50ch of piazzolla, in em for the same reason */
+  margin: 18px 0 0;
+  font: 400 19px/1.55 var(--pg-body);
+  color: var(--ink);
+  text-wrap: pretty;
+}
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  margin-top: 26px;
+  font: 400 13px/1.4 var(--pg-ui);
+  color: var(--mute);
+}
+.meta .num {
+  font-family: var(--pg-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.chapters {
+  margin: 56px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.chapters li {
+  border-bottom: 1px solid var(--line);
+}
+.row {
+  display: grid;
+  grid-template-columns: 4.5ch minmax(0, 1fr);
+  gap: 0 18px;
+  padding: 18px 10px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 4px;
+  transition: background-color 150ms var(--ease, ease);
+}
+.row:hover {
+  background: var(--well-2);
+}
+.rowN {
+  font: 400 13px/26px var(--pg-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+.rowT {
+  display: block;
+  font: 400 18px/26px var(--pg-body);
+  color: var(--ink);
+}
+.row:hover .rowT {
+  color: var(--hi);
+}
+.rowT[data-soon] {
+  color: var(--faint);
+}
+.tag {
+  margin-left: 10px;
+  font: 400 12px/1 var(--pg-ui);
+  color: var(--faint);
+}
+.rowB {
+  display: block;
+  margin-top: 3px;
+  font: 400 14.5px/1.55 var(--pg-body);
+  color: var(--mute);
+}
+
+.parts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 40px;
+}
+.near {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 72px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  color: inherit;
+  text-decoration: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+  transition: background-color 150ms var(--ease, ease);
+}
+.near:hover {
+  background: var(--well-2);
+}
+.near[data-next] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  text-align: right;
+}
+.near[data-next] > :first-child {
+  order: 2;
+}
+.nearK {
+  display: block;
+  font: 400 12px/1.4 var(--pg-ui);
+  color: var(--faint);
+}
+.nearT {
+  display: block;
+  margin-top: 2px;
+  font: 400 18px/1.25 var(--pg-title);
+  color: var(--hi);
+}
+
+@media (max-width: 899px) {
+  .opener {
+    grid-template-columns: 168px minmax(0, 1fr);
+    gap: 28px;
+  }
+  .openerCover {
+    width: 168px;
+  }
+}
+@media (max-width: 559px) {
+  .opener {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+  .openerCover {
+    width: 100%;
+  }
+  .partBlurb {
+    font-size: 18px;
+  }
+  .parts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

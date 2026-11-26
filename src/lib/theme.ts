@@ -5,8 +5,12 @@ import { useEffect, useState } from "react";
 export type Theme = "dark" | "light";
 const KEY = "jle-theme";
 
+/** switch themes. the change snaps: transitions are off for two frames while every token flips. */
 export function setTheme(t: Theme) {
-  document.documentElement.dataset.theme = t;
+  const root = document.documentElement;
+  root.classList.add("no-tr");
+  root.dataset.theme = t;
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove("no-tr")));
   try {
     localStorage.setItem(KEY, t);
   } catch {}

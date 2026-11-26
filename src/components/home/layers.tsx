@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { DotArt } from "./DotArt";
 
 // the descent: one line of java, followed all the way down.
 // every artifact here is real output from jdk 25 (temurin 25.0.4, macOS aarch64),
@@ -12,6 +13,9 @@ export type Layer = {
   href: string;
   linkLabel: string;
   stage: ReactNode;
+  /** a small dot drawing of this depth, on the hero's grid (see DotArt) */
+  art: string[];
+  artLabel: string;
 };
 
 const k = (s: string) => <span className="text-hi">{s}</span>;
@@ -21,14 +25,14 @@ const hot = (s: string) => <span className="text-hot">{s}</span>;
 
 function Panel({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex h-full flex-col justify-center pb-4 font-mono text-13">
-      <div className="mb-6 text-12 text-faint">{label}</div>
+    <div className="font-mono text-13 text-ink">
+      <div className="mb-4 font-[family-name:var(--font-addr)] text-11 text-faint">{label}</div>
       <div className="min-h-0 overflow-x-auto overflow-y-hidden">{children}</div>
     </div>
   );
 }
 
-const pre = "whitespace-pre text-13 leading-[1.85] sm:text-14";
+const pre = "whitespace-pre text-13 leading-[1.8]";
 
 export const layers: Layer[] = [
   {
@@ -42,9 +46,11 @@ export const layers: Layer[] = [
     ),
     href: "/learn/start/hello-world",
     linkLabel: "hello, world",
+    art: [".........", "oooo.ooo.", "..ooohhh.", "o........", "........."],
+    artLabel: "three rows of dots for three lines of code, the string hello lit",
     stage: (
       <Panel label="Main.java">
-        <pre className="text-15 leading-[1.85] whitespace-pre sm:text-[clamp(1rem,0.6rem+0.9vw,1.375rem)]">
+        <pre className="text-15 leading-[1.8] whitespace-pre sm:text-17">
           {k("void")} main() {d("{")}
           {"\n    "}IO.println({lit('"hello"')});
           {"\n"}
@@ -64,6 +70,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/start/compile-and-run",
     linkLabel: "compile and run",
+    art: ["o.oo.o.hh", ".........", "mmm......", ".rRoo....", "..rRooo..", "...rRhh.."],
+    artLabel: "a row of tokens, then a tree: class, method, call, literal",
     stage: (
       <Panel label="tokens → tree">
         <div className="flex flex-wrap gap-1.5 text-13">
@@ -95,6 +103,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/jvm/bytecode",
     linkLabel: "bytecode",
+    art: [".........", "m.hhh.oo.", "m.oooooo.", "m.oooo...", "........."],
+    artLabel: "three instructions, the first one lit",
     stage: (
       <Panel label="javap -c Main.class">
         <pre className={pre}>
@@ -124,6 +134,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/jvm/class-file-format",
     linkLabel: "the class file",
+    art: [".........", "hhhhmmmm.", "oooooooo.", "oooooooo.", "ooooo...."],
+    artLabel: "bytes in rows: four magic bytes lit, four version bytes in the header colour",
     stage: (
       <Panel label="xxd Main.class">
         <pre className={`${pre} !text-12 sm:!text-13`}>
@@ -163,6 +175,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/jvm/classloaders",
     linkLabel: "class loaders",
+    art: [".........", "moooooo..", "rRmooo...", "..rRmhh..", "........."],
+    artLabel: "three class loaders, each a child of the one above, Main lit in the last",
     stage: (
       <Panel label="java -Xlog:class+load Main">
         <pre className={`${pre} !text-12 sm:!text-13`}>
@@ -196,6 +210,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/jvm/bytecode",
     linkLabel: "bytecode, stepped",
+    art: [".........", "oRrrrRmhh", "oo....mhh", "oo.......", "oo......."],
+    artLabel: "an operand stack whose top slot points at the hello string",
     stage: (
       <Panel label="operand stack">
         <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-8">
@@ -230,6 +246,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/jvm/interpreter-and-jit",
     linkLabel: "the interpreter and the JIT",
+    art: ["oo.......", "ooo......", "oooo.....", "ooooo....", "hhhhhhh.."],
+    artLabel: "five tiers as bars, the last and longest lit",
     stage: (
       <Panel label="java -XX:+PrintCompilation Main">
         <pre className={`${pre} !text-12 sm:!text-13`}>
@@ -279,6 +297,8 @@ export const layers: Layer[] = [
     ),
     href: "/learn/jvm/jit-optimizations",
     linkLabel: "JIT optimizations",
+    art: [".........", "h.hh.h.hh", "o.oo..o.o", ".........", "........."],
+    artLabel: "two machine instructions as rows of bits",
     stage: (
       <Panel label="arm64, simplified">
         <pre className={pre}>
@@ -309,33 +329,27 @@ export const layers: Layer[] = [
     ),
     href: "/learn/gc/gc-fundamentals",
     linkLabel: "how garbage collection works",
+    art: ["mll..mxx.", "mll..mxx.", ".........", "mxx.mlll.", "....mlll."],
+    artLabel: "a small heap: live objects filled, garbage as hollow rings, free dots between",
     stage: (
-      <Panel label="heap">
-        <div className="grid max-w-[440px] grid-cols-12 gap-1" aria-hidden>
-          {Array.from({ length: 72 }, (_, i) => {
-            const dead = [3, 7, 9, 14, 18, 21, 26, 29, 33, 38, 41, 45, 50, 55, 58, 63, 66, 70].includes(i);
-            const free = [5, 11, 23, 35, 44, 47, 52, 61, 69, 71].includes(i);
-            return (
-              <div
-                key={i}
-                className={`aspect-square rounded-xs ${dead ? "gc-dead" : ""}`}
-                style={{
-                  boxShadow: `inset 0 0 0 1px ${free ? "var(--line)" : dead ? "var(--dead)" : "var(--live)"}`,
-                  background: free
-                    ? "transparent"
-                    : dead
-                      ? "color-mix(in srgb, var(--dead) 16%, transparent)"
-                      : "color-mix(in srgb, var(--live) 14%, transparent)",
-                  animationDelay: `${(i % 12) * 70}ms`,
-                }}
-              />
-            );
-          })}
+      <Panel label="the heap, drawn mid-collection">
+        <div className="max-w-[460px]">
+          <DotArt
+            label="a heap of objects: most are live and filled, some are garbage drawn as hollow rings, and free dots sit between them"
+            rows={[
+              "mlll.mxx..mllll.mxxx.mll",
+              "mlll.mxx..mllll.mxxx.mll",
+              "..........mllll.........",
+              "mxxx.mllll....mll.mxx...",
+              "mxxx.mllll....mll.mxx.ml",
+              "..............mll.....ml",
+            ]}
+          />
         </div>
-        <div className="mt-5 flex gap-5 text-11">
-          <span className="text-live">reachable</span>
-          <span className="text-dead">garbage</span>
-          <span className="text-faint">free</span>
+        <div className="mt-5 flex flex-wrap gap-x-5 gap-y-1 font-[family-name:var(--font-ui)] text-12">
+          <span className="text-live">reachable, kept</span>
+          <span className="text-dead">garbage, about to be freed</span>
+          <span className="text-mute">free</span>
         </div>
       </Panel>
     ),

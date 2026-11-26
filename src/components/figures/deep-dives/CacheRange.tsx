@@ -107,8 +107,8 @@ export function CacheRange() {
 
         <svg viewBox="0 0 300 112" className="block w-full max-w-[340px]" role="img" aria-label={hit ? "a and b point at one cached Integer" : "a and b point at two different Integers"}>
           <defs>
-            <marker id={`cr-${id}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+            <marker id={`cr-${id}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
           </defs>
           {[

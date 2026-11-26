@@ -1,5 +1,9 @@
 // generic figures, available in every mdx file without an import.
 // chapter-specific figures go in src/components/figures/<part>/ and get imported.
+// instrument.css is the figure kit (well, labels, controls, dot fields); importing it
+// here puts it on every chapter page, because mdx-components imports this file.
+
+import "./instrument.css";
 
 import { ArrayViz } from "./ArrayViz";
 import { Bars } from "./Bars";

@@ -110,7 +110,16 @@ export function useStepper(count: number, opts: { interval?: number; loop?: bool
 
 export type Stepper = ReturnType<typeof useStepper>;
 
-/** play / back / step / reset, a counter, and a scrubber. */
+/** a chevron drawn in svg (the ui faces have no arrow glyphs). */
+export function Chevron({ dir = 1, size = 12 }: { dir?: 1 | -1; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden className="shrink-0" style={{ transform: dir < 0 ? "scaleX(-1)" : undefined }}>
+      <path d="M4.2 2.2 L8 6 L4.2 9.8" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** play / back / step / reset, a counter, and a scrubber. 44px targets. */
 export function StepControls({
   s,
   label = "step",
@@ -124,11 +133,11 @@ export function StepControls({
 }) {
   return (
     <div className={`flex flex-wrap items-center gap-x-1.5 gap-y-2 ${className}`}>
-      <button className="act !px-2.5" onClick={s.prev} disabled={s.atStart} aria-label="previous step">
-        ←
+      <button className="act !w-11 !px-0" onClick={s.prev} disabled={s.atStart} aria-label="previous step">
+        <Chevron dir={-1} />
       </button>
       <button className="act solid min-w-[7.5ch]" onClick={s.next} disabled={s.atEnd} aria-label="next step">
-        step →
+        step <Chevron />
       </button>
       {!compact && (
         <button className="act min-w-[7ch]" onClick={s.toggle} aria-label={s.playing ? "pause" : "play"}>
@@ -148,7 +157,7 @@ export function StepControls({
           aria-label="scrub through steps"
           className="scrub hidden min-w-0 flex-1 sm:block"
         />
-        <span className="ml-auto text-12 whitespace-nowrap text-faint tabular">
+        <span className="ml-auto font-ui text-12 whitespace-nowrap text-faint tabular">
           {label} {s.i + 1}/{s.count}
         </span>
       </div>

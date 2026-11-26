@@ -1,78 +1,171 @@
 @import "tailwindcss";
 
+/* piazzolla fallback, measured against times new roman per style at the 17-19px prose sizes (piazzolla has an
+   optical size axis, so its width drifts with size: normal 106%, italic 101% as wide as times).
+   the overrides are piazzolla's ascent 1.11 and descent 0.31 divided by size-adjust, so the swap does not reflow. */
+@font-face {
+  font-family: "jle body fallback";
+  src: local("Times New Roman"), local("TimesNewRomanPSMT");
+  font-style: normal;
+  size-adjust: 106.2%;
+  ascent-override: 104.52%;
+  descent-override: 29.19%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "jle body fallback";
+  src: local("Times New Roman Italic"), local("TimesNewRomanPS-ItalicMT");
+  font-style: italic;
+  size-adjust: 101%;
+  ascent-override: 109.9%;
+  descent-override: 30.69%;
+  line-gap-override: 0%;
+}
+
 /* ---------------------------------------------------------------------------
    java.lang.everything
-   a book you can poke at. warm paper, a serif for reading, mono for code and
-   figures, and five colours that each mean exactly one thing. see DESIGN.md.
+   lit instruments: quiet paper for reading, lit instruments for seeing. a warm
+   grey paper, one reading face, five colours that each mean exactly one thing,
+   and the book colour for wayfinding only. see DESIGN.md.
    --------------------------------------------------------------------------- */
 
 :root,
 :root[data-theme="light"] {
-  /* paper */
-  --bg: #fdfbf7;
-  --ink: #2a2723; /* body text */
-  --hi: #141210; /* headings, emphasis, the active thing */
-  --mute: #6d675f; /* secondary text */
-  --faint: #8c8579; /* labels, hints, line numbers */
-  --line: #ece6dc; /* hairlines */
-  --line-2: #ddd5c8; /* stronger lines, outlines */
-  --well: #f7f3ec; /* figure panels */
-  --well-2: #efe9de; /* nested panels, selected options */
-  --accent: #8b7355; /* ornaments, drop caps */
-  --accent-2: #b09a7e;
-  --link: #4f6f80;
-  --link-hover: #2f4f60;
+  /* paper: warm grey, not cream */
+  --bg: #f7f6f2;
+  --ink: #26241f; /* body text */
+  --hi: #141311; /* headings, emphasis, the active thing */
+  --mute: #5c5850; /* secondary text */
+  --faint: #6b665d; /* labels, hints, line numbers, comments. still 4.5:1 */
+  --line: #e6e3dc; /* hairlines */
+  --line-2: #d3cfc6; /* stronger lines, outlines */
+  --edge: #8a857b; /* control boundaries, 3:1 (non-text only) */
+  --well: #fdfcfa; /* instrument face and code: a step brighter than the page, so it reads lit */
+  --well-2: #efede7; /* nested chips, the active rail row, inline code */
+  --grid: #d6d2c8; /* unlit dots: the address space */
+  --dot: #3b3832; /* neutral lit dots: structure */
 
-  /* semantic: each colour means exactly one thing, everywhere */
-  --ref: #3a74ad; /* a reference / pointer / "points at" */
-  --live: #3b8556; /* reachable, valid, correct */
-  --dead: #b5473c; /* garbage, bug, race, exception */
-  --meta: #7552ad; /* runtime machinery: class metadata, locks, loaders */
-  --hot: #b06f12; /* look here: current line, the thing that changed */
+  /* semantic: each colour means exactly one thing, everywhere, and each has a shape */
+  --ref: #2a5fa6; /* points at. a run of small dots ending in a bigger one */
+  --live: #2b7448; /* valid, visible, reachable. a filled dot */
+  --dead: #b0362f; /* garbage, error, thrown out. a hollow ring */
+  --meta: #6a45ad; /* machinery: headers, locks, catalog. the header column */
+  --hot: #94580a; /* look here: the current line, the thing that changed. a bigger dot */
 
-  --code-lit: #8b6237;
-  --code-kw: #4f6878;
-  --code-str: #55704a;
-  --code-ty: #6e5444;
-  --code-fn: #6a4f3c;
-  --code-cmt: #a09888;
-  --code-punc: #8a7e72;
-  --ease: cubic-bezier(0.2, 0, 0, 1);
-  --gutter: clamp(16px, 4vw, 40px);
-  --bar-h: 60px;
+  /* the two books. --book is this book's colour: wayfinding only, never a meaning in a figure */
+  --java: #b0305f;
+  --sql: #0b736f;
+  --java-hi: #8f2449;
+  --sql-hi: #085c59;
+
+  /* legacy names, kept so existing figures keep working. */
+  --accent: #7a5c3a;
+  --accent-2: #a8997f;
+  --link: var(--ink);
+  --link-hover: var(--hi);
+
+  /* code */
+  --code-fg: #26241f;
+  --code-kw: #3b5878;
+  --code-ty: #6a4a39;
+  --code-fn: #3d362e;
+  --code-str: #45663a;
+  --code-lit: #87552a;
+  --code-cmt: #6b665d;
+  --code-punc: #6b665d;
+
+  /* the instrument rim: an inset ring, a top highlight, and a faint inner light in the book colour */
+  --rim:
+    inset 0 0 0 1px var(--line), inset 0 1px 0 #ffffff,
+    inset 0 0 26px -10px color-mix(in oklab, var(--book) 30%, transparent);
+  /* a surface one step off the paper: 1px ring and a 1px contact shadow */
+  --surface: inset 0 0 0 1px var(--line), 0 1px 2px rgb(40 30 20 / 0.06);
+  /* floating things: search, menus */
+  --overlay:
+    0 0 0 1px rgb(20 18 16 / 0.06), 0 1px 2px -1px rgb(20 18 16 / 0.06), 0 12px 32px -12px rgb(20 18 16 / 0.18);
+  --scrim: rgb(20 18 16 / 0.32);
+
+  --lh-body: 1.62;
+  --track-body: 0;
+  --w-body: 400;
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  /* night: warm, never pure black */
-  --bg: #191816;
-  --ink: #e4ded3;
-  --hi: #f6f1e8;
-  --mute: #a69f93;
-  --faint: #857e73;
-  --line: #2b2925;
-  --line-2: #3b3833;
-  --well: #201f1c;
-  --well-2: #2a2824;
-  --accent: #c2a47e;
-  --accent-2: #9c8467;
-  --link: #95b4c6;
-  --link-hover: #c0d6e2;
+  /* a dim lab: warm, never pure black */
+  --bg: #161513;
+  --ink: #e3ded5;
+  --hi: #f6f2eb;
+  --mute: #aca59a;
+  --faint: #948d82;
+  --line: #2a2825;
+  --line-2: #3a3834;
+  --edge: #77716a;
+  --well: #0e0e0d; /* display glass: darker than the room, so the dots can glow */
+  --well-2: #22211e;
+  --grid: #2a2825;
+  --dot: #d9d3c8;
 
-  --ref: #7aaad8;
-  --live: #78bd8a;
-  --dead: #e2806f;
-  --meta: #b49bdc;
-  --hot: #e2a94e;
+  --ref: #82b2ee;
+  --live: #6dd29a;
+  --dead: #f2846f;
+  --meta: #bea0f4;
+  --hot: #f0b453;
 
-  --code-lit: #d9b285;
-  --code-kw: #a3b8c4;
-  --code-str: #b3c49a;
-  --code-ty: #dcc6ad;
-  --code-fn: #e8d2b8;
-  --code-cmt: #857e73;
-  --code-punc: #a0968a;
+  --java: #f17ca8;
+  --sql: #4fd0c5;
+  --java-hi: #f8a9c6;
+  --sql-hi: #8fe3db;
+
+  --accent: #c9a57a;
+  --accent-2: #6f6556;
+
+  --code-fg: #e3ded5;
+  --code-kw: #9fb8d0;
+  --code-ty: #d8c4ad;
+  --code-fn: #ebe3d6;
+  --code-str: #b6cc9a;
+  --code-lit: #ddb487;
+  --code-cmt: #948d82;
+  --code-punc: #a49c90;
+
+  --rim:
+    inset 0 0 0 1px var(--line), inset 0 1px 0 rgb(255 255 255 / 0.04),
+    inset 0 0 34px -8px color-mix(in oklab, var(--book) 26%, transparent);
+  --surface: inset 0 0 0 1px var(--line), 0 1px 2px rgb(0 0 0 / 0.4);
+  --overlay: 0 0 0 1px rgb(255 255 255 / 0.08), 0 16px 40px -12px rgb(0 0 0 / 0.6);
+  --scrim: rgb(0 0 0 / 0.55);
+
+  --lh-body: 1.68;
+  --track-body: 0.004em;
+  --w-body: 380;
   color-scheme: dark;
+}
+
+:root {
+  --book: var(--java);
+  --book-hi: var(--java-hi);
+
+  /* type. next/font sets the --nf-* faces on <html> (layout.tsx); every family keeps a system stack */
+  --font-title: var(--nf-sym), var(--nf-title), "Iowan Old Style", Georgia, serif; /* Redaction: titles, section heads */
+  --font-title-eroded: var(--nf-sym), var(--nf-title-eroded), var(--nf-title), Georgia, serif; /* Redaction 20: 40px+, once a page */
+  --font-body: var(--nf-sym), var(--nf-body), "Iowan Old Style", Georgia, serif; /* Piazzolla: prose */
+  --font-ui: var(--nf-sym), var(--nf-ui), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; /* Geist: nav, labels, buttons */
+  --font-mono: var(--nf-sym-mono), var(--nf-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace; /* Geist Mono: code, values */
+  --font-pixel: var(--nf-pixel), var(--nf-sym-mono), var(--nf-mono), ui-monospace, monospace; /* Geist Pixel: hero readouts only */
+  --font-addr: var(--nf-addr), var(--nf-mono), ui-monospace, monospace; /* Departure Mono: 11px or 22px only */
+  /* legacy names: figures still say var(--font-code) and friends */
+  --font-serif: var(--font-body);
+  --font-display: var(--font-title);
+  --font-code: var(--font-mono);
+
+  --measure: 37.5rem;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --d-fast: 120ms;
+  --d-ui: 200ms;
+  --d-fig: 320ms;
+  --gutter: clamp(16px, 4vw, 40px);
+  --bar-h: 60px;
 }
 
 @theme inline {
@@ -86,8 +179,13 @@
   --color-faint: var(--faint);
   --color-line: var(--line);
   --color-line-2: var(--line-2);
+  --color-edge: var(--edge);
   --color-well: var(--well);
   --color-well-2: var(--well-2);
+  --color-grid: var(--grid);
+  --color-dot: var(--dot);
+  --color-book: var(--book);
+  --color-book-hi: var(--book-hi);
   --color-accent: var(--accent);
   --color-accent-2: var(--accent-2);
   --color-link: var(--link);
@@ -98,10 +196,17 @@
   --color-hot: var(--hot);
 
   --font-*: initial;
-  --font-serif: var(--font-serif), "Iowan Old Style", Georgia, serif;
-  --font-display: var(--font-display), var(--font-serif), Georgia, serif;
-  --font-mono: var(--font-code), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --font-sans: var(--font-serif), Georgia, serif;
+  --font-title: var(--nf-sym), var(--nf-title), "Iowan Old Style", Georgia, serif;
+  --font-title-eroded: var(--nf-sym), var(--nf-title-eroded), var(--nf-title), Georgia, serif;
+  --font-body: var(--nf-sym), var(--nf-body), "Iowan Old Style", Georgia, serif;
+  --font-ui: var(--nf-sym), var(--nf-ui), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--nf-sym-mono), var(--nf-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-pixel: var(--nf-pixel), var(--nf-sym-mono), var(--nf-mono), ui-monospace, monospace;
+  --font-addr: var(--nf-addr), var(--nf-mono), ui-monospace, monospace;
+  /* legacy utilities: font-serif and font-sans are the reading face, font-display the title face */
+  --font-serif: var(--nf-sym), var(--nf-body), "Iowan Old Style", Georgia, serif;
+  --font-sans: var(--nf-sym), var(--nf-body), "Iowan Old Style", Georgia, serif;
+  --font-display: var(--nf-sym), var(--nf-title), "Iowan Old Style", Georgia, serif;
 
   --text-11: 0.6875rem;
   --text-12: 0.75rem;
@@ -116,12 +221,12 @@
   --text-28: 1.75rem;
   --text-40: 2.5rem;
 
-  --radius-xs: 3px;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
 
-  --ease-jle: cubic-bezier(0.2, 0, 0, 1);
+  --ease-sfe: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* ---- base ---------------------------------------------------------------- */
@@ -130,17 +235,20 @@
   html {
     background: var(--bg);
     -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
     scroll-padding-top: calc(var(--bar-h) + 24px);
   }
   body {
     background: var(--bg);
     color: var(--ink);
-    font-family: var(--font-serif), Georgia, serif;
+    font-family: var(--font-body);
+    font-weight: var(--w-body);
     font-size: 1.0625rem;
     line-height: 1.6;
+    font-optical-sizing: auto;
+    caret-color: var(--book);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    text-rendering: optimizeLegibility;
     font-feature-settings: "kern" 1, "liga" 1;
   }
   code,
@@ -148,19 +256,19 @@
   pre,
   samp,
   .font-mono {
-    font-family: var(--font-code), ui-monospace, "SF Mono", Menlo, monospace;
-    font-feature-settings: "zero" 1, "calt" 0;
+    font-family: var(--font-mono);
+    font-feature-settings: "liga" 0, "calt" 0;
   }
   ::selection {
-    background: color-mix(in srgb, var(--accent-2) 40%, transparent);
+    background: color-mix(in oklab, var(--book) 22%, transparent);
     color: var(--hi);
   }
   a {
     color: inherit;
   }
   :focus-visible {
-    outline: 1.5px solid var(--link);
-    outline-offset: 3px;
+    outline: 2px solid var(--book);
+    outline-offset: 2px;
     border-radius: 3px;
   }
   h1,
@@ -170,7 +278,8 @@
     text-wrap: balance;
   }
   p,
-  li {
+  li,
+  figcaption {
     text-wrap: pretty;
   }
   button {
@@ -180,38 +289,53 @@
     scrollbar-width: thin;
     scrollbar-color: var(--line-2) transparent;
   }
+  input,
+  textarea {
+    caret-color: var(--book);
+  }
 }
 
 /* ---- shared bits ----------------------------------------------------------- */
 
 @layer components {
   .link {
-    color: var(--link);
-    text-decoration: none;
-    border-bottom: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
+    color: var(--ink);
+    text-decoration-line: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.22em;
+    text-decoration-color: color-mix(in oklab, var(--book) 55%, transparent);
     transition:
-      color 200ms var(--ease),
-      border-color 200ms var(--ease);
+      color var(--d-fast) var(--ease),
+      text-decoration-color var(--d-fast) var(--ease);
   }
   .link:hover {
-    color: var(--link-hover);
-    border-bottom-color: var(--link-hover);
+    color: var(--hi);
+    text-decoration-color: var(--book);
   }
 
-  /* small mono words used as tabs/options. selected = a soft filled chip */
+  /* small words used as tabs/options. selected = a soft filled chip */
   .word {
+    position: relative;
     display: inline-flex;
     align-items: center;
-    min-height: 30px;
-    padding: 0 9px;
+    min-height: 32px;
+    padding: 0 10px;
     border-radius: var(--radius-sm);
     color: var(--mute);
-    font-family: var(--font-code), ui-monospace, monospace;
-    font-size: var(--text-12);
+    font-family: var(--font-ui);
+    font-size: var(--text-13);
+    font-weight: 450;
     transition:
-      color 120ms var(--ease),
-      background-color 120ms var(--ease),
-      box-shadow 120ms var(--ease);
+      color var(--d-fast) var(--ease),
+      background-color var(--d-fast) var(--ease),
+      box-shadow var(--d-fast) var(--ease);
+  }
+  /* the hit area is 40px tall even when the chip is not */
+  .word::after,
+  .act::after {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
   }
   .word:hover {
     color: var(--hi);
@@ -226,18 +350,20 @@
 
   /* actions */
   .act {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
-    min-height: 32px;
+    min-height: 34px;
     padding: 0 12px;
-    border: 1px solid var(--line-2);
-    border-radius: var(--radius-sm);
-    background: var(--bg);
-    color: var(--ink);
-    font-family: var(--font-code), ui-monospace, monospace;
-    font-size: var(--text-12);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--hi);
+    font-family: var(--font-ui);
+    font-size: 0.84rem;
+    font-weight: 450;
     white-space: nowrap;
     user-select: none;
     transition:
@@ -247,8 +373,7 @@
       scale 150ms var(--ease);
   }
   .act:hover {
-    border-color: var(--mute);
-    color: var(--hi);
+    background: var(--well-2);
   }
   .act:active {
     scale: 0.96;
@@ -275,23 +400,26 @@
     justify-content: center;
     min-width: 18px;
     height: 18px;
-    padding: 0 4px;
+    padding: 0 5px;
     border: 1px solid var(--line-2);
-    border-bottom-width: 2px;
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     color: var(--mute);
-    font: 400 var(--text-11) / 1 var(--font-code), monospace;
+    font: 450 11.5px / 1 var(--font-ui);
   }
 
-  /* the figure panel. (the name is historical: it used to be corner ticks) */
-  .ticks {
+  /* the instrument panel: lit from within. a step brighter than the paper in light, a step
+     darker than the room in dark, with an inset rim of the book colour. (the name .ticks is
+     historical: it used to be corner ticks. .inst is the same thing.) */
+  .ticks,
+  .inst {
     border-radius: var(--radius-lg);
     background: var(--well);
-    box-shadow: inset 0 0 0 1px var(--line);
+    box-shadow: var(--rim);
   }
 
+  /* the dot grid: unlit dots are the address space */
   .dots {
-    background-image: radial-gradient(color-mix(in srgb, var(--ink) 10%, transparent) 1px, transparent 1.3px);
+    background-image: radial-gradient(var(--grid) 1px, transparent 1.4px);
     background-size: 12px 12px;
   }
 
@@ -300,17 +428,13 @@
   }
 
   .tabular {
-    font-variant-numeric: tabular-nums;
+    font-variant-numeric: lining-nums tabular-nums;
   }
 
-  /* a small centered ornament line, used above headings and at section ends */
+  /* retired: the ornament line is gone. the class keeps its spacing so old markup doesn't jump */
   .ornament {
     display: block;
-    width: 44px;
     height: 1px;
-    margin-inline: auto;
-    background: var(--accent-2);
-    opacity: 0.7;
   }
 
   /* figures speak mono */
@@ -321,7 +445,7 @@
   .flow,
   .bits,
   [data-stepper] {
-    font-family: var(--font-code), ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-13);
     line-height: 1.6;
   }
@@ -331,15 +455,14 @@
 
 @layer components {
   .prose {
-    --measure: 40rem;
     font-size: 1.1875rem;
-    line-height: 1.85;
+    line-height: var(--lh-body);
+    letter-spacing: var(--track-body);
     color: var(--ink);
   }
   @media (max-width: 640px) {
     .prose {
-      font-size: 1.09rem;
-      line-height: 1.8;
+      font-size: 1.125rem;
     }
   }
   .prose > :where(p, ul, ol, blockquote, h2, h3, h4, .measure, dl) {
@@ -347,73 +470,64 @@
     margin-inline: auto;
   }
   .prose > * + * {
-    margin-top: 1.25em;
+    margin-top: 1.1em;
   }
-  @media (min-width: 640px) {
-    .prose > p {
-      text-align: justify;
-      hyphens: auto;
-      -webkit-hyphens: auto;
-    }
+  .prose p {
+    hyphens: auto;
+    -webkit-hyphens: auto;
   }
   .prose h2 {
-    margin-top: 3.4em;
-    color: var(--hi);
-    font-family: var(--font-display), Georgia, serif;
-    font-size: clamp(1.6rem, 1.3rem + 0.9vw, 2rem);
-    font-weight: 400;
-    letter-spacing: 0.01em;
-    line-height: 1.2;
-    text-align: center;
-  }
-  .prose h2::before {
-    content: "";
-    display: block;
-    width: 40px;
-    height: 1px;
-    margin: 0 auto 1.1em;
-    background: var(--accent-2);
-    opacity: 0.7;
-  }
-  .prose h3 {
     margin-top: 2.4em;
     color: var(--hi);
-    font-family: var(--font-display), Georgia, serif;
-    font-size: 1.45rem;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-    line-height: 1.3;
+    font-family: var(--font-title);
+    font-size: clamp(1.6875rem, 1.45rem + 0.7vw, 1.9375rem);
+    font-weight: 400;
+    letter-spacing: -0.012em;
+    line-height: 1.12;
+  }
+  .prose h3 {
+    margin-top: 2em;
+    color: var(--hi);
+    font-family: var(--font-title);
+    font-size: 1.5rem;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
   }
   .prose h2 + *,
   .prose h3 + * {
-    margin-top: 0.9em;
+    margin-top: 0.75em;
   }
   .prose :where(h2, h3) > a.anchor {
     color: inherit;
     text-decoration: none;
   }
   .prose :where(h2, h3) > a.anchor::after {
-    content: "§";
-    margin-left: 0.4em;
-    color: var(--accent-2);
-    font-size: 0.7em;
+    content: "#";
+    margin-left: 0.35em;
+    color: var(--faint);
+    font-family: var(--font-ui);
+    font-size: 0.6em;
     opacity: 0;
-    transition: opacity 200ms var(--ease);
+    transition: opacity var(--d-ui) var(--ease);
   }
-  .prose :where(h2, h3):hover > a.anchor::after {
+  .prose :where(h2, h3):hover > a.anchor::after,
+  .prose :where(h2, h3) > a.anchor:focus-visible::after {
     opacity: 1;
   }
   .prose a:not(.anchor):not(.act):not(.plain):not(.word) {
-    color: var(--link);
-    text-decoration: none;
-    border-bottom: 1px solid color-mix(in srgb, var(--link) 32%, transparent);
+    color: var(--ink);
+    text-decoration-line: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.22em;
+    text-decoration-color: color-mix(in oklab, var(--book) 55%, transparent);
     transition:
-      color 200ms var(--ease),
-      border-color 200ms var(--ease);
+      color var(--d-fast) var(--ease),
+      text-decoration-color var(--d-fast) var(--ease);
   }
   .prose a:not(.anchor):not(.act):not(.plain):not(.word):hover {
-    color: var(--link-hover);
-    border-bottom-color: var(--link-hover);
+    color: var(--hi);
+    text-decoration-color: var(--book);
   }
   .prose strong {
     color: var(--hi);
@@ -436,11 +550,16 @@
   .prose ol:not([class]) > li + li {
     margin-top: 0.5em;
   }
+  /* bullets are unlit dots on the grid */
   .prose ul:not([class]) > li::before {
-    content: "–";
+    content: "";
     position: absolute;
-    left: 0.2em;
-    color: var(--accent-2);
+    left: 0.45em;
+    top: calc(0.81em - 2.5px);
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--edge);
   }
   .prose ol:not([class]) {
     counter-reset: li;
@@ -449,39 +568,43 @@
     counter-increment: li;
   }
   .prose ol:not([class]) > li::before {
-    content: counter(li) ".";
+    content: counter(li);
     position: absolute;
     left: 0;
-    color: var(--accent);
-    font-variant-numeric: tabular-nums;
+    top: 0.3em;
+    color: var(--faint);
+    font-family: var(--font-ui);
+    font-size: 0.72em;
+    font-variant-numeric: lining-nums tabular-nums;
   }
-  /* inline code: quiet, a hairline under it, like a margin note */
+  /* inline code: a quiet chip on the paper */
   .prose :not(pre) > code,
   .inline-code {
-    padding: 0.05em 0.3em;
-    border-bottom: 1px solid var(--line-2);
-    color: color-mix(in srgb, var(--hi) 82%, var(--accent));
-    font-size: 0.8em;
+    padding: 0.1em 0.3em;
+    border-radius: var(--radius-xs);
+    background: var(--well-2);
+    color: var(--hi);
+    font-size: 0.79em;
+    letter-spacing: 0;
     white-space: nowrap;
   }
   .prose blockquote {
-    padding-left: 1.6em;
-    border-left: 2px solid var(--accent-2);
+    padding-left: 1.25em;
+    box-shadow: inset 1px 0 0 var(--line-2);
     color: var(--mute);
     font-style: italic;
   }
   .prose hr {
-    margin: 3.5em auto;
+    margin: 3em auto;
     border: 0;
-    width: 60px;
-    border-top: 1px solid var(--accent-2);
-    opacity: 0.6;
+    border-top: 1px solid var(--line);
   }
   .prose table {
     width: 100%;
     border-collapse: collapse;
     font-size: 0.86em;
     line-height: 1.55;
+    font-variant-numeric: lining-nums tabular-nums;
   }
   .prose .table-wrap {
     overflow-x: auto;
@@ -490,14 +613,14 @@
     padding: 10px 14px 10px 0;
     border-bottom: 1px solid var(--line-2);
     color: var(--mute);
-    font-family: var(--font-display), serif;
+    font-family: var(--font-ui);
     font-weight: 500;
-    font-size: 1.05em;
+    font-size: 0.85em;
     text-align: left;
     white-space: nowrap;
   }
   .prose td {
-    padding: 11px 14px 11px 0;
+    padding: 10px 14px 10px 0;
     border-bottom: 1px solid var(--line);
     vertical-align: top;
   }
@@ -512,9 +635,15 @@
   .code-frame pre {
     overflow-x: auto;
     padding: 16px 0;
-    font-size: 0.8125rem;
-    line-height: 1.75;
+    font-size: 0.875rem;
+    line-height: 1.65;
+    font-variant-numeric: lining-nums;
     tab-size: 4;
+  }
+  @media (max-width: 640px) {
+    .code-frame pre {
+      font-size: 0.8125rem;
+    }
   }
   .code-frame code {
     display: grid;
@@ -524,40 +653,39 @@
   .code-frame [data-line] {
     position: relative;
     padding: 0 22px 0 0;
-    border-left: 2px solid transparent;
   }
   .code-frame code:not([data-nolines]) > [data-line] {
-    padding-left: calc(4ch + 16px);
+    padding-left: calc(3ch + 32px);
   }
   .code-frame code:not([data-nolines]) > [data-line]::before {
     counter-increment: line;
     content: counter(line);
     position: absolute;
     left: 0;
-    width: 4ch;
+    width: calc(3ch + 16px);
     text-align: right;
-    color: var(--faint);
-    opacity: 0.55;
-    font-variant-numeric: tabular-nums;
+    color: var(--code-cmt);
+    font-variant-numeric: lining-nums tabular-nums;
+    user-select: none;
   }
   .code-frame code[data-nolines] > [data-line] {
     padding-left: 20px;
   }
 
-  /* notation: // [!code highlight] */
+  /* notation: // [!code highlight]. the active line: a hot tint and a 2px hot bar (the code-editor
+     convention, not a callout bar) */
   .code-frame [data-line].highlighted,
   .code-frame [data-highlighted-line] {
-    background: color-mix(in srgb, var(--hot) 10%, transparent);
-    border-left-color: var(--hot);
+    background: color-mix(in oklab, var(--hot) 9%, transparent);
+    box-shadow: inset 2px 0 0 var(--hot);
   }
   .code-frame [data-line].diff.add {
-    background: color-mix(in srgb, var(--live) 10%, transparent);
-    border-left-color: var(--live);
+    background: color-mix(in oklab, var(--live) 9%, transparent);
+    box-shadow: inset 2px 0 0 var(--live);
   }
   .code-frame [data-line].diff.remove {
-    background: color-mix(in srgb, var(--dead) 9%, transparent);
-    border-left-color: var(--dead);
-    opacity: 0.8;
+    background: color-mix(in oklab, var(--dead) 8%, transparent);
+    box-shadow: inset 2px 0 0 var(--dead);
   }
   .code-frame [data-line].diff.add::after,
   .code-frame [data-line].diff.remove::after {
@@ -573,29 +701,58 @@
     color: var(--dead);
   }
   .code-frame [data-line].highlighted.error {
-    background: color-mix(in srgb, var(--dead) 10%, transparent);
-    border-left-color: var(--dead);
+    background: color-mix(in oklab, var(--dead) 9%, transparent);
+    box-shadow: inset 2px 0 0 var(--dead);
   }
   .code-frame [data-line].highlighted.warning {
-    background: color-mix(in srgb, var(--hot) 10%, transparent);
-    border-left-color: var(--hot);
+    background: color-mix(in oklab, var(--hot) 9%, transparent);
+    box-shadow: inset 2px 0 0 var(--hot);
   }
   .code-frame pre.has-focused [data-line]:not(.focused) {
-    opacity: 0.4;
-    filter: blur(0.5px);
-    transition:
-      opacity 200ms var(--ease),
-      filter 200ms var(--ease);
+    opacity: 0.45;
+    transition: opacity var(--d-ui) var(--ease);
   }
   .code-frame:hover pre.has-focused [data-line]:not(.focused) {
     opacity: 1;
-    filter: none;
   }
   .code-frame .highlighted-word,
   .code-frame [data-highlighted-chars] {
     border-radius: 3px;
-    background: color-mix(in srgb, var(--hot) 15%, transparent);
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--hot) 40%, transparent);
+    background: color-mix(in oklab, var(--hot) 14%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--hot) 40%, transparent);
+  }
+
+  /* the run comet: one book-colour spark travels the frame's ring while code runs */
+  .code-frame.running::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    padding: 1.5px;
+    border-radius: inherit;
+    pointer-events: none;
+    background: conic-gradient(
+      from var(--comet),
+      transparent 0deg 250deg,
+      color-mix(in oklab, var(--book) 70%, transparent) 320deg,
+      transparent 360deg
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: jle-comet 900ms linear infinite;
+  }
+}
+@property --comet {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@keyframes jle-comet {
+  to {
+    --comet: 360deg;
   }
 }
 
@@ -649,18 +806,23 @@
     border-radius: 50%;
     background: var(--bg);
   }
-  [data-stepper]:focus-visible {
-    outline: 1.5px solid var(--line-2);
-    outline-offset: 10px;
-    border-radius: 6px;
-  }
+}
+
+/* keyboard focus on a figure (a stepper, or any tabindex div). unlayered on purpose: most figure
+   roots carry `outline-none` for mouse clicks, and that utility used to hide this ring from the
+   keyboard too. the book colour, like every focus ring. */
+[data-stepper]:focus-visible,
+div[tabindex="0"].outline-none:focus-visible {
+  outline: 2px solid var(--book);
+  outline-offset: 8px;
+  border-radius: 6px;
 }
 
 /* ---- figure motion ---------------------------------------------------------------- */
 
 @keyframes jle-flash {
   from {
-    background: color-mix(in srgb, var(--hot) 30%, transparent);
+    background: color-mix(in oklab, var(--hot) 30%, transparent);
   }
   to {
     background: transparent;
@@ -850,14 +1012,40 @@
 
 /* ---- motion preferences ------------------------------------------------------ */
 
+/* the theme switch snaps: lib/theme.ts sets .no-tr for two frames while the tokens change */
+.no-tr *,
+.no-tr *::before,
+.no-tr *::after {
+  transition: none !important;
+}
+
+/* reduced motion removes movement and keeps colour and opacity steps, which carry meaning.
+   transitions keep running for colour, opacity and fills, so a state change still reads; anything
+   that travels, scales or loops stops. figures with their own tweens check the media query too. */
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
   *,
   *::before,
   *::after {
-    animation-duration: 1ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 1ms !important;
-    scroll-behavior: auto !important;
+    transition-property:
+      color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, fill-opacity,
+      stroke-opacity, opacity, box-shadow !important;
+  }
+  .act:active,
+  .btn:active {
+    scale: 1;
+  }
+  .flow-dot,
+  .lineart .sink,
+  .glyph *,
+  .gc-dead {
+    animation: none !important;
+  }
+  .code-frame.running::after {
+    animation: none;
+    background: color-mix(in oklab, var(--book) 60%, transparent);
   }
 }
 
@@ -865,30 +1053,91 @@
 
 @layer components {
   .inshort {
+    hyphens: manual;
     color: var(--hi);
-    font-size: 1.3rem;
-    line-height: 1.7;
+    font-size: 1.3125rem;
+    line-height: 1.55;
+    letter-spacing: var(--track-body);
+  }
+  .inshort p {
+    hyphens: manual;
   }
   .inshort > * + * {
     margin-top: 0.8em;
   }
-  .inshort > p:first-child::first-letter {
-    float: left;
-    margin: 0.06em 0.1em 0 0;
-    color: var(--accent);
-    font-family: var(--font-display), Georgia, serif;
-    font-size: 3.7em;
-    font-weight: 300;
-    line-height: 0.82;
-    text-transform: uppercase;
-  }
   @media (max-width: 640px) {
     .inshort {
-      font-size: 1.18rem;
+      font-size: 1.21875rem;
     }
   }
   .lineart-glyph * {
     vector-effect: non-scaling-stroke;
+  }
+
+  /* glyph chips: a noun in prose wears the same shape and colour as its figure object. the shape
+     carries the meaning too, so colour is never the only signal (after samwho). <C k> renders
+     <span class="chip ref"><span class="chip-lead"><span class="chip-dot"/>first</span> rest</span> */
+  .chip-lead {
+    white-space: nowrap;
+  }
+  .chip-dot {
+    display: inline-block;
+    vertical-align: 0.06em;
+    width: 0.42em;
+    height: 0.42em;
+    margin: 0 0.3em 0 0.06em;
+    border-radius: 50%;
+    background: var(--tone);
+  }
+  .chip.ref {
+    --tone: var(--ref);
+  }
+  .chip.live {
+    --tone: var(--live);
+  }
+  .chip.dead {
+    --tone: var(--dead);
+  }
+  .chip.meta {
+    --tone: var(--meta);
+  }
+  .chip.hot {
+    --tone: var(--hot);
+  }
+  .chip.mute {
+    --tone: var(--mute);
+  }
+  /* ref: a run of dots ending in a bigger one */
+  .chip.ref .chip-dot {
+    width: 0.92em;
+    border-radius: 0;
+    background:
+      radial-gradient(circle, var(--ref) 0 0.21em, transparent 0.22em) 100% 50% / 0.42em 0.42em no-repeat,
+      radial-gradient(circle, var(--ref) 0 0.075em, transparent 0.085em) 0 50% / 0.25em 0.42em repeat-x;
+    background-clip: content-box;
+    padding-right: 0;
+  }
+  /* dead: fill drained, outline kept */
+  .chip.dead .chip-dot {
+    background: transparent;
+    box-shadow: inset 0 0 0 0.09em var(--dead);
+  }
+  /* meta: the header column */
+  .chip.meta .chip-dot {
+    width: 0.3em;
+    height: 0.72em;
+    border-radius: 0.15em;
+    vertical-align: -0.04em;
+  }
+  /* hot: a lit dot with a halo */
+  .chip.hot .chip-dot {
+    box-shadow: 0 0 0 0.12em color-mix(in oklab, var(--hot) 28%, transparent);
+    margin-left: 0.14em;
+  }
+  /* mute: an unlit dot */
+  .chip.mute .chip-dot {
+    background: transparent;
+    box-shadow: inset 0 0 0 0.09em var(--edge);
   }
 }
 [style*="--shiki-light-font-style"] {
@@ -908,7 +1157,7 @@ kbd,
 .memstep,
 [data-stepper] {
   font-variant-ligatures: none;
-  font-feature-settings: "liga" 0, "calt" 0, "zero" 1;
+  font-feature-settings: "liga" 0, "calt" 0;
 }
 
 /* on phones, long inline code may wrap instead of pushing the page sideways */

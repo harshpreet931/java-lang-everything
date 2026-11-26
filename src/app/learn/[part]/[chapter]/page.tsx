@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { flat, getChapter, pad2 } from "@/content/curriculum";
 import { availableHrefs, isAvailable } from "@/lib/content";
@@ -8,7 +7,7 @@ import { JsonLd } from "@/components/seo/JsonLd";
 import { Toc } from "@/components/learn/Toc";
 import { ChapterFooter } from "@/components/learn/ChapterFooter";
 import { Since } from "@/components/mdx/blocks";
-import { Glyph } from "@/components/home/Glyph";
+import { ChapterMeta } from "@/components/learn/ChapterMeta";
 
 type Params = { part: string; chapter: string };
 
@@ -72,63 +71,28 @@ export default async function ChapterPage({ params }: { params: Promise<Params> 
 
   const [, partSeg, chapterSeg] = c.address.split(".");
 
+  // at xl the columns are a grid template, so the article has its final width before the toc (later in the html) streams in
   return (
-    <div className="flex gap-14 px-[var(--gutter)] pt-10 pb-28 lg:pt-14 xl:pl-16">
+    <div className="flex gap-10 px-[var(--gutter)] pt-10 pb-28 lg:pt-16 xl:grid xl:grid-cols-[minmax(0,1fr)_208px] xl:gap-14 xl:pl-14">
       {Body && <JsonLd data={chapterJsonLd(c)} />}
-      <article id="main" className="mx-auto min-w-0 max-w-[880px] flex-1" data-pagefind-body={Body ? "" : undefined}>
-        <header className="mx-auto mb-16 max-w-[40rem] text-center">
-          <Glyph name={c.part.glyph} className="lineart-glyph mx-auto mb-8 size-[76px] text-ref" />
-          <div className="font-mono text-12 text-faint" data-pagefind-ignore>
-            <Link href="/learn" className="hover:text-hi">
-              everything
-            </Link>
-            <span className="text-accent-2">.</span>
-            <Link href={`/learn/${c.part.slug}`} className="hover:text-hi">
-              {partSeg}
-            </Link>
-            <span className="text-accent-2">.</span>
-            <span className="text-mute">{chapterSeg}</span>
-          </div>
+      <article id="main" className="mx-auto w-full min-w-0 max-w-[880px] flex-1" data-pagefind-body={Body ? "" : undefined}>
+        <header className="mx-auto mb-10 max-w-[var(--measure)]">
           <h1
-            className="mt-5 font-display text-[clamp(2.3rem,1.6rem+2.4vw,3.2rem)] leading-[1.08] font-light tracking-[0.005em] text-hi"
+            className="font-title text-[clamp(2.375rem,1.7rem+2vw,3rem)] leading-[1.04] tracking-[-0.018em] text-hi"
             data-pagefind-meta="title"
           >
             {c.title}
           </h1>
-          <p className="mx-auto mt-5 max-w-[34rem] text-18 leading-[1.6] text-mute italic">{c.blurb}</p>
-          <dl
-            className="mt-8 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-14 text-faint"
-            data-pagefind-ignore
-          >
-            <div className="flex gap-1.5">
-              <dt className="sr-only">part</dt>
-              <dd>
-                <Link href={`/learn/${c.part.slug}`} className="hover:text-hi">
-                  part {pad2(c.part.n)}, {c.part.title}
-                </Link>
-              </dd>
-            </div>
-            <span aria-hidden className="text-accent-2">·</span>
-            <div className="flex gap-1.5">
-              <dt className="sr-only">chapter</dt>
-              <dd className="tabular">chapter {num(c)}</dd>
-            </div>
-            {Body && (
-              <>
-                <span aria-hidden className="text-accent-2">·</span>
-                <div className="flex gap-1.5">
-                  <dt className="sr-only">reading time</dt>
-                  <dd className="tabular">{minutes} min read</dd>
-                </div>
-              </>
-            )}
-            {(c.since || c.preview) && (
-              <dd>
-                <Since v={c.since} preview={c.preview} />
-              </dd>
-            )}
-          </dl>
-          <span className="ornament mt-10" aria-hidden />
+          <p className="mt-4 text-[1.25rem] leading-[1.5] text-mute italic max-sm:text-[1.125rem]">{c.blurb}</p>
+          <ChapterMeta
+            address={{ part: partSeg, chapter: chapterSeg }}
+            part={`part ${c.part.n}, ${c.part.title}`}
+            partHref={`/learn/${c.part.slug}`}
+            chapter={`chapter ${c.part.chapters.findIndex((y) => y.slug === c.slug) + 1} of ${c.part.chapters.length}`}
+            minutes={Body ? minutes : null}
+            extra={(c.since || c.preview) && <Since v={c.since} preview={c.preview} />}
+          />
+          <div className="mt-9 h-px bg-line" aria-hidden />
         </header>
 
         {Body ? (
@@ -136,7 +100,7 @@ export default async function ChapterPage({ params }: { params: Promise<Params> 
             <Body />
           </div>
         ) : (
-          <div className="ticks max-w-[68ch] px-7 py-8 text-14 leading-[1.7] text-mute" data-pagefind-ignore>
+          <div className="ticks mx-auto max-w-[var(--measure)] px-7 py-8 font-ui text-14 leading-[1.7] text-mute" data-pagefind-ignore>
             <p className="text-hi">this chapter is still being drawn.</p>
             <p className="mt-3">
               it&apos;s on the map, it just isn&apos;t written yet. if you want to help, every chapter is one mdx file in{" "}
@@ -150,8 +114,8 @@ export default async function ChapterPage({ params }: { params: Promise<Params> 
         </div>
       </article>
 
-      <aside className="hidden w-[210px] shrink-0 xl:block" data-pagefind-ignore>
-        <div className="sticky top-[calc(var(--bar-h)+48px)] max-h-[calc(100dvh-var(--bar-h)-80px)] overflow-y-auto">
+      <aside className="hidden w-[208px] shrink-0 xl:block" data-pagefind-ignore>
+        <div className="sticky top-[calc(var(--bar-h)+64px)] max-h-[calc(100dvh-var(--bar-h)-96px)] overflow-y-auto">
           <Toc toc={toc} />
         </div>
       </aside>

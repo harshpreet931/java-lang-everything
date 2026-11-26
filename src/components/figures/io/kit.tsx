@@ -179,14 +179,14 @@ export function ByteCell({ b, tone, dim, title }: { b: number; tone?: Tone; dim?
 // [night, paper], mirroring src/mdx/themes.mjs: slate keywords, sage strings, brown literals,
 // italic comments. muted on purpose so the semantic colours in the figures stay loud.
 const C = {
-  kw: ["#a3b8c4", "#4f6878"],
-  ty: ["#dcc6ad", "#6e5444"],
-  fn: ["#e8d2b8", "#6a4f3c"],
-  lit: ["#d9b285", "#8b6237"],
-  str: ["#b3c49a", "#55704a"],
-  cmt: ["#857e73", "#a09888"],
-  punc: ["#a0968a", "#8a7e72"],
-  fg: ["#e4ded3", "#3a332c"],
+  kw: ["#9fb8d0", "#3b5878"],
+  ty: ["#d8c4ad", "#6a4a39"],
+  fn: ["#ebe3d6", "#3d362e"],
+  lit: ["#ddb487", "#87552a"],
+  str: ["#b6cc9a", "#45663a"],
+  cmt: ["#948d82", "#6b665d"],
+  punc: ["#a49c90", "#6b665d"],
+  fg: ["#e3ded5", "#26241f"],
 } as const;
 
 const KW = new Set(
@@ -303,8 +303,8 @@ export function CodePanel({
 /** svg arrowhead marker. pass a unique id. */
 export function Arrowhead({ id, tone = "ref" }: { id: string; tone?: ToneOrMute | "line-2" | "ink" }) {
   return (
-    <marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0 0.5 L7.5 4 L0 7.5 z" fill={`var(--${tone})`} />
+    <marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke={`var(--${tone})`} strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
     </marker>
   );
 }

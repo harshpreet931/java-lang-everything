@@ -21,8 +21,8 @@ export function CowSnapshot() {
   return (
     <svg viewBox="0 0 520 250" fontFamily="var(--font-code)" className="block w-full max-w-[600px]" role="img" aria-label="a CopyOnWriteArrayList whose array field points at a new 4-element array, while an iterator's snapshot field still points at the old 3-element array">
       <defs>
-        <marker id={ah} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
-          <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+        <marker id={ah} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+          <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
         </marker>
       </defs>
       <text x={10} y={16} fontSize={10} fill="var(--faint)">

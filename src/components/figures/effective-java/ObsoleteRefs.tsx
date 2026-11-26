@@ -92,11 +92,11 @@ export function ObsoleteRefs() {
         aria-label={`stack array with size ${st.size}. ${NOTES[mode][s.i]}`}
       >
         <defs>
-          <marker id={refHead} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--ref)" />
+          <marker id={refHead} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--ref)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
           </marker>
-          <marker id={deadHead} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--dead)" />
+          <marker id={deadHead} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--dead)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
           </marker>
         </defs>
 

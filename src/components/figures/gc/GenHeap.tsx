@@ -305,11 +305,11 @@ function Space({
   const rows = Array.from({ length: Math.ceil(cells.length / cols) }, (_, r) => cells.slice(r * cols, r * cols + cols));
   return (
     <div className="w-max max-w-full min-w-0">
-      <div className="mb-1 flex items-baseline justify-between gap-3 text-11 text-faint">
+      <div className="mb-1 flex items-baseline justify-between gap-3 font-ui text-12 text-faint">
         <span>{label}</span>
         {sub && <span className="tabular">{sub}</span>}
       </div>
-      <div className="grid w-max gap-[3px] rounded-md p-[3px] shadow-[inset_0_0_0_1px_var(--line-2)]">
+      <div className="grid w-max gap-[3px] rounded-lg bg-well p-1.5 shadow-[inset_0_0_0_1px_var(--line-2)]">
         {rows.map((row, r) => (
           <div key={r} className="grid gap-[3px]">
             <div className="grid gap-[3px]" style={{ gridTemplateColumns: `repeat(${cols}, var(--slot))` }}>
@@ -323,7 +323,7 @@ function Space({
                   return (
                     <span
                       key={k}
-                      className="h-[5px] rounded-[1px] transition-colors duration-200"
+                      className="mx-auto h-[5px] w-[calc(100%-10px)] rounded-full transition-colors duration-200"
                       style={{
                         background: dirty ? "var(--meta)" : scanCard === ci ? "color-mix(in srgb, var(--meta) 40%, transparent)" : "transparent",
                         boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--meta) 55%, transparent)",
@@ -341,30 +341,43 @@ function Space({
   );
 }
 
+// every slot is a dot on the grid. empty = an unlit grid dot (free address space).
+// live = filled, dead = a hollow ring (the fill drained, the outline kept until a GC
+// reclaims the space), hot = just allocated or moved (a touch larger), ref = alive only
+// because an old object points at it. the age sits inside the dot.
 function slot(o: O | null, i: number, s: State, threshold: number, label: string) {
-  if (!o) return <span key={`e${i}`} className="aspect-square rounded-[3px] bg-bg" style={{ width: "var(--slot)" }} />;
+  if (!o)
+    return (
+      <span key={`e${i}`} className="flex aspect-square items-center justify-center" style={{ width: "var(--slot)" }}>
+        <span className="size-[4px] rounded-full bg-grid" />
+      </span>
+    );
   const live = alive(o, s);
   const moved = s.moved.has(o.id);
   const pinned = o.pinnedBy !== undefined && o.born + o.life <= s.t && live;
-  const tone = moved ? "hot" : !live ? "dead" : pinned ? "ref" : "live";
+  const tone = moved && live ? "hot" : !live ? "dead" : pinned ? "ref" : "live";
+  const size = moved && live ? "84%" : "72%";
   return (
     <span
       key={o.id}
-      className="relative flex aspect-square items-center justify-center rounded-[3px] text-11 tabular transition-[box-shadow,background-color] duration-200 ease-jle"
-      style={{
-        width: "var(--slot)",
-        color: `var(--${tone})`,
-        background: `color-mix(in srgb, var(--${tone}) ${live ? 14 : 8}%, var(--bg))`,
-        boxShadow: `inset 0 0 0 ${moved ? 1.6 : 1}px var(--${tone})`,
-        opacity: live ? 1 : 0.8,
-      }}
+      className="relative flex aspect-square items-center justify-center"
+      style={{ width: "var(--slot)" }}
       title={`#${o.id}, age ${o.age}${live ? "" : ", garbage"}`}
     >
-      {o.age}
+      <span
+        className="flex aspect-square items-center justify-center rounded-full text-11 font-medium tabular transition-[box-shadow,background-color,color,width] duration-300 ease-jle"
+        style={{
+          width: size,
+          color: live ? "var(--well)" : "var(--dead)",
+          background: live ? `var(--${tone})` : "transparent",
+          boxShadow: live ? "none" : "inset 0 0 0 1.5px var(--dead)",
+          transitionDelay: `${(i % 8) * 18}ms`,
+        }}
+      >
+        {o.age}
+      </span>
       {o.age >= threshold - 1 && live && label !== "old gen" && (
-        <span className="absolute top-[1px] right-[3px] text-[8px] leading-none" style={{ color: "var(--hot)" }}>
-          •
-        </span>
+        <span className="absolute top-[1px] right-[1px] size-[5px] rounded-full bg-hot" aria-hidden />
       )}
     </span>
   );

@@ -88,7 +88,7 @@ link generously to other chapters with absolute paths: `[pass-by-value](/learn/b
 - one line each.
 </Keylines>
 
-<C k="ref">blue word</C>    colours a word to match a figure (ref | live | dead | meta | hot)
+<C k="ref">blue word</C>    a glyph chip: the word in its colour and shape, to match a figure (ref | live | dead | meta | hot | mute)
 <Since v={21} />            inline "java 21+" badge.  <Since preview v={27} /> → "preview in 27"
 <Defs><dt>term</dt><dd>meaning</dd></Defs>
 ```
@@ -205,9 +205,9 @@ the generic figures cover a lot. flagship ideas need their own component (a Hash
 rules:
 
 - `"use client"` if it's interactive. import the stepper with `import { useStepper, StepControls } from "@/components/viz/stepper"` (never from `@/components/viz`, that pulls in server code).
-- **colour only from tokens.** css variables: `--bg --ink --hi --mute --faint --line --line-2 --well --well-2` and the five semantic ones. tailwind classes exist for all of them (`text-mute`, `bg-well`, `border-line-2`, `text-ref`, `bg-dead`...). the default tailwind palette is turned off on purpose.
+- **colour only from tokens.** css variables: `--bg --ink --hi --mute --faint --line --line-2 --edge --well --well-2 --grid --dot --book`, the `--code-*` palette and the five semantic ones (the list is in DESIGN.md). `--book` is wayfinding only, never a meaning inside a figure. tailwind classes exist for all of them (`text-mute`, `bg-well`, `border-line-2`, `text-ref`, `bg-dead`...). the default tailwind palette is turned off on purpose.
 - **semantic colours mean one thing, always:** `ref` (blue) = a reference/pointer/arrow. `live` (green) = reachable, valid, correct. `dead` (red) = garbage, bug, race, exception, the wrong way. `meta` (purple) = runtime machinery (class metadata, locks, loaders, headers). `hot` (amber) = look here: the current thing, what just changed. never decorative.
-- **type:** prose is Crimson Pro (serif), headings Cormorant Garamond, figures JetBrains Mono. inside `<Figure>` everything is mono already; if your figure can render outside one, put `font-mono` on its root. long explanatory text inside a figure (narration, notes) can be `font-serif`. sizes `text-11 … text-18`. svg text: `fontSize={11|12}`, `fill="var(--ink)"`, `fontFamily="var(--font-code)"`.
+- **type:** prose is Piazzolla (`font-body`), titles Redaction (`font-title`), ui labels Geist (`font-ui`), figures and code Geist Mono (`font-mono`). inside `<Figure>` everything is mono already; if your figure can render outside one, put `font-mono` on its root. long explanatory text inside a figure (narration, notes) is `font-body`; legends and labels are `font-ui`. sizes `text-11 … text-18`, tabular numbers on values. svg text: `fontSize={11|12}`, `fill="var(--ink)"`, `fontFamily="var(--font-mono)"`. the faces have no arrow glyphs: draw arrows in svg.
 - **controls:** config-file rows (`key =` on the left in `text-faint`), options as `.word` buttons with `aria-pressed`, actions as `.act` / `.act.solid`, sliders `input[type=range].slider`. look at `StackOverflowMeter.tsx`.
 - **frames:** wells (`bg-well`) with inset hairlines (`shadow-[inset_0_0_0_1px_var(--line)]`), radius `rounded-md` (6px) inside a figure. no heavy shadows, no gradients, no glow. never pure black or pure white surfaces: the default theme is warm paper, the dark one is warm charcoal.
 - **motion:** only to explain something, under ~300ms for ui state, `ease-jle` (`cubic-bezier(0.2,0,0,1)`). respect `prefers-reduced-motion` (jump to the end state). no motion library needed for most things; `motion/react` is installed if you really need layout animation.

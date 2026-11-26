@@ -93,8 +93,8 @@ export function StreamKinds() {
       <div ref={ref} className="min-w-0 overflow-hidden">
         <svg width={w} height={H} className="block" role="img" aria-label={`conversions from ${NAME[sel]}: ${out.map((e) => `${e.label} to ${NAME[e.to]}`).join("; ")}`}>
           <defs>
-            <marker id={`${uid}-a`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-              <path d="M0 0.5 L7.5 4 L0 7.5 z" fill="var(--hot)" />
+            <marker id={`${uid}-a`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">
+              <path d="M1.6 1.2 L7 4 L1.6 6.8" fill="none" stroke="var(--hot)" strokeWidth={1.3} strokeLinecap="round" strokeLinejoin="round" />
             </marker>
           </defs>
           {out.map((e) => {

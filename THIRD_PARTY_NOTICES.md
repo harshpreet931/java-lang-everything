@@ -75,3 +75,18 @@ per section 4(b) of the Apache License: we changed these files. `compiler.wasm`,
 - `compile-classlib-teavm.bin`: regenerated from the patched class library with teavm-javac's `StdlibConverter` at commit `199bed0c353d944b8107b517fc1893c86afb83c2` ("apply `@Rename` annotation properly"). without it javac could not see `getMessage()`, `getClass()`, `toString()` and others.
 
 the patches and a script that rebuilds both files from the upstream ones are in `src/lib/java/teavm-patches/`. they are under the same Apache-2.0 license as the files they patch.
+
+---
+
+## fonts
+
+the site self-hosts these from `src/fonts/` through `next/font/local`, each folder with its OFL.txt. `src/fonts/geist-symbols/` holds the full upstream Geist and Geist Mono variable builds, loaded only for arrows and maths signs the latin subsets lack (a `unicode-range` face). the share images use static copies in `src/assets/fonts/` (Redaction 400, Redaction 20 400, Piazzolla 400 italic, Geist Mono 400, Departure Mono 400) with their licences beside them; those copies have the GSUB table removed so the og renderer can read them. none of these fonts declares a reserved font name, so the OFL allows the modified copies.
+
+| font | copyright | license |
+| --- | --- | --- |
+| [Redaction](https://github.com/jeremymickel/Redaction) (incl. Redaction 20) | Copyright 2019 The Redaction Project Authors | SIL Open Font License 1.1 |
+| [Piazzolla](https://github.com/huertatipografica/piazzolla) | Copyright 2018 The Piazzolla Project Authors | SIL Open Font License 1.1 |
+| [Geist, Geist Mono, Geist Pixel](https://github.com/vercel/geist-font) | Copyright 2024, 2026 The Geist Project Authors | SIL Open Font License 1.1 |
+| [Departure Mono](https://departuremono.com) | Copyright 2022-2024 Helena Zhang | SIL Open Font License 1.1 |
+
+the SIL Open Font License 1.1: https://openfontlicense.org.

@@ -151,7 +151,7 @@ export function Playground() {
         {/* output */}
         <div className="flex min-h-[300px] flex-col overflow-hidden rounded-lg bg-well shadow-[inset_0_0_0_1px_var(--line)]" aria-live="polite">
           <div className="flex h-11 items-center justify-between gap-3 border-b border-line px-4">
-            <span className="font-display text-[1.05rem] text-accent italic">
+            <span className="font-ui text-13 text-mute">
               {running ? (status === "loading" ? "loading the compiler…" : "running…") : "output"}
             </span>
             <span className="font-mono text-11 text-faint tabular">
